@@ -266,7 +266,7 @@ def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: s
         evidence_id = int(row["id"])
     else:
         fact_fingerprint = hashlib.sha256(key.encode()).hexdigest()
-        evidence_id = db.execute(
+        new_id = db.execute(
             """INSERT INTO evidence(
                    actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,source_date,
                    quote,source_group,fingerprint,fact_key,evidence_kind,language,review_status,created_at,updated_at
@@ -277,6 +277,8 @@ def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: s
                 _language_from_url(item["url"]), stamp, stamp,
             ),
         ).lastrowid
+        assert new_id is not None  # guaranteed by sqlite3 right after a successful AUTOINCREMENT insert
+        evidence_id = new_id
     db.execute(
         """INSERT OR IGNORE INTO evidence_sources(
                evidence_id,source_url,source_title,source_date,quote,language,fingerprint,created_at

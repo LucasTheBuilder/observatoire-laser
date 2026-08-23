@@ -14,8 +14,14 @@ import db as dbmod
 import scrapers
 from db import connect, scalar
 from hybrid import ContentBlock, classify_source, parse_document
-from scrapers import APPLICATION_ARCHITECTURES, PROCESS_TECHNOLOGIES, _candidate, _context_for_block, _match_label, adaptive_decision
-
+from scrapers import (
+    APPLICATION_ARCHITECTURES,
+    PROCESS_TECHNOLOGIES,
+    _candidate,
+    _context_for_block,
+    _match_label,
+    adaptive_decision,
+)
 
 LASEA_PAGE = """
 <!doctype html><html><head><title>LASEA Applications</title></head><body>

@@ -4,7 +4,6 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-
 DEFAULT_SITE_PROFILE: dict[str, Any] = {
     "profile_version": 2,
     "ollama_profile_assist": False,

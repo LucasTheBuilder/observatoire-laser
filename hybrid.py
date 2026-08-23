@@ -6,16 +6,15 @@ import os
 import re
 import time
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
-from collections import Counter
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from site_profiles import DEFAULT_SITE_PROFILE
-
 
 CORE_SECTIONS = ("application", "project", "news")
 SECTION_SCORES = {
@@ -118,8 +117,23 @@ CMP_HINTS = (
 )
 
 
+def _class_list(tag: Tag) -> list[str]:
+    """bs4 types a tag's `class` attribute as str | list[str] | None depending on the parser;
+    this normalizes it to the list[str] it always semantically is."""
+    value = tag.get("class")
+    if isinstance(value, list):
+        return value
+    return [value] if value else []
+
+
+def _attr_str(tag: Tag, name: str) -> str:
+    """Single-valued attribute (id, role, aria-label, ...) as plain text, never None."""
+    value = tag.get(name)
+    return value if isinstance(value, str) else ""
+
+
 def _noise_signature(tag: Tag) -> str:
-    attrs = " ".join([str(tag.get("id", "")), " ".join(tag.get("class", [])), str(tag.get("aria-label", "")), str(tag.get("role", ""))])
+    attrs = " ".join([_attr_str(tag, "id"), " ".join(_class_list(tag)), _attr_str(tag, "aria-label"), _attr_str(tag, "role")])
     text = _clean(tag.get_text(" ", strip=True))[:1200]
     return _plain(f"{attrs} {text}")
 
@@ -127,7 +141,7 @@ def _noise_signature(tag: Tag) -> str:
 def _is_cmp_zone(tag: Tag) -> bool:
     """Detect a consent/CMP container without banning legitimate technical uses of words like API/privacy."""
     sig = _noise_signature(tag)
-    attrs = _plain(" ".join([str(tag.get("id", "")), " ".join(tag.get("class", [])), str(tag.get("aria-label", ""))]))
+    attrs = _plain(" ".join([_attr_str(tag, "id"), " ".join(_class_list(tag)), _attr_str(tag, "aria-label")]))
     strong_attr = any(token in attrs for token in (
         "cookie", "consent", "cmp", "onetrust", "didomi", "tarteaucitron", "privacy manager", "cookiebot"
     ))
@@ -154,9 +168,9 @@ def _remove_noise_zones(soup: BeautifulSoup) -> int:
         for tag in list(soup.select(selector)):
             if tag.parent is not None:
                 tag.decompose(); removed += 1
-    for tag in list(soup.find_all(["div", "section", "dialog"], attrs={"role": ["dialog", "alertdialog"]})):
-        if tag.parent is not None and _is_cmp_zone(tag):
-            tag.decompose(); removed += 1
+    for element in list(soup.find_all(["div", "section", "dialog"], attrs={"role": ["dialog", "alertdialog"]})):
+        if isinstance(element, Tag) and element.parent is not None and _is_cmp_zone(element):
+            element.decompose(); removed += 1
     return removed
 
 
@@ -265,7 +279,7 @@ def _path(tag: Tag) -> str:
         if current.get("id"):
             token += f"#{current.get('id')}"
         else:
-            classes = [item for item in current.get("class", []) if len(item) < 35][:2]
+            classes = [item for item in _class_list(current) if len(item) < 35][:2]
             if classes:
                 token += "." + ".".join(classes)
         parts.append(token)
@@ -280,7 +294,7 @@ def _meaningful_links(soup: BeautifulSoup, base_url: str, profile: dict[str, Any
     max_links = int(profile.get("crawl", {}).get("max_links_per_page", 160))
     for link in soup.select("a[href]"):
         label = _clean(link.get_text(" ", strip=True))
-        href = urljoin(base_url, link.get("href", "")).split("#", 1)[0]
+        href = urljoin(base_url, _attr_str(link, "href")).split("#", 1)[0]
         parsed = urlparse(href)
         if parsed.scheme not in ("http", "https"):
             continue
@@ -321,8 +335,9 @@ def _heading_hierarchy(tag: Tag) -> tuple[str, str, str, str]:
     own = tag.find(["h1", "h2", "h3", "h4", "h5", "h6"], recursive=False)
     if own is None and tag.name in ("h1", "h2", "h3", "h4", "h5", "h6"):
         own = tag
-    own_text = _clean(own.get_text(" ", strip=True)) if own else ""
-    own_level = _heading_level(own) if own else None
+    own_tag = own if isinstance(own, Tag) else None
+    own_text = _clean(own_tag.get_text(" ", strip=True)) if own_tag else ""
+    own_level = _heading_level(own_tag) if own_tag else None
     values: dict[int, str] = {}
     if own_level in (1, 2, 3) and own_text:
         values[own_level] = own_text
@@ -333,7 +348,7 @@ def _heading_hierarchy(tag: Tag) -> tuple[str, str, str, str]:
     hops = 0
     while current is not None and hops < 6:
         direct = current.find(["h1", "h2", "h3"], recursive=False)
-        if direct is not None:
+        if isinstance(direct, Tag):
             level = _heading_level(direct)
             value = _clean(direct.get_text(" ", strip=True))
             if level in (1, 2, 3) and value and level not in values:
@@ -367,7 +382,7 @@ def _content_block(tag: Tag, heading_hint: str = "") -> ContentBlock | None:
     heading = own_heading or _title_like_text(tag) or heading_hint or h3 or h2 or h1
     media_parts: list[str] = []
     for image in tag.select("img[alt]")[:4]:
-        alt = _clean(image.get("alt", ""))
+        alt = _clean(_attr_str(image, "alt"))
         if alt:
             media_parts.append(alt)
     for caption in tag.select("figcaption")[:2]:
@@ -409,7 +424,7 @@ def _is_pseudo_heading(tag: Tag) -> bool:
     value = _clean(tag.get_text(" ", strip=True))
     if not (2 <= len(value) <= 160 and len(value.split()) <= 16):
         return False
-    classes = " ".join(tag.get("class", [])).lower()
+    classes = " ".join(_class_list(tag)).lower()
     if any(token in classes for token in ("title", "heading", "subtitle", "card-title", "item-title", "label")):
         return True
     # Typical Drupal/WordPress pattern: <p><strong>Laser turning</strong></p>.
@@ -672,7 +687,7 @@ def _token_coverage(root: Tag | BeautifulSoup, blocks: list[ContentBlock]) -> fl
     root_counter = Counter(words(_clean(root.get_text(" ", strip=True))))
     if not root_counter:
         return 1.0
-    extracted = Counter()
+    extracted: Counter[str] = Counter()
     for block in blocks:
         extracted.update(words(block.text))
     covered = sum(min(count, extracted.get(token, 0)) for token, count in root_counter.items())

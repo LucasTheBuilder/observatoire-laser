@@ -8,11 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hybrid import classify_source, parse_document
 import scrapers
+from hybrid import classify_source, parse_document
 from scrapers import _push_crawl_item
 from site_profiles import crawl_budget, get_site_profile
-
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
@@ -23,7 +23,7 @@ STATIC_DIR = BASE_DIR / "static"
 
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="observatoire")
 job_lock = threading.Lock()
-jobs = {
+jobs: dict[str, dict[str, Any]] = {
     "actors": {"status": "idle", "result": None, "error": None},
     "market": {"status": "idle", "result": None, "error": None},
     "technology": {"status": "idle", "result": None, "error": None},

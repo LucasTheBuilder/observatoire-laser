@@ -17,7 +17,18 @@ from urllib.parse import urlparse
 import httpx
 
 from db import ACTORS_DB, BUCKET_RANK, MARKET_DB, TECH_DB, application_key, connect, market_fact_key, offer_fact_key, utc_now
-from hybrid import ContentBlock, OllamaClient, block_payload, build_profile, canonical_url, classify_source, normalize_page_type, parse_document, profile_json
+from hybrid import (
+    ContentBlock,
+    OllamaClient,
+    ParsedDocument,
+    block_payload,
+    build_profile,
+    canonical_url,
+    classify_source,
+    normalize_page_type,
+    parse_document,
+    profile_json,
+)
 from site_profiles import crawl_budget, get_site_profile, seed_urls
 
 CRAWLER_CONTACT = os.getenv("CRAWLER_CONTACT", "").strip()
@@ -120,7 +131,14 @@ TECHNOLOGY_QUERIES = (
     "femtosecond laser semiconductor processing",
 )
 
-LASER_RULES = {
+# A lexicon rule maps a few well-known keys (any_of/all_of/regex/requires_any/exclude) to
+# tuples of terms/patterns. Annotating the lexicons below lets mypy check every call site
+# that takes a lexicon (_rule_match_terms, _match_label, _match_all_labels, ...) instead of
+# widening them all to plain dicts.
+LexiconRule = dict[str, tuple[str, ...]]
+Lexicon = dict[str, LexiconRule]
+
+LASER_RULES: Lexicon = {
     "femtosecond": {"any_of": ("femtosecond", "femtoseconde")},
     "fs laser": {"regex": (r"\bfs[ -]?laser\b",)},
     "ultrafast": {"any_of": ("ultrafast",)},
@@ -130,7 +148,7 @@ LASER_RULES = {
     "Ultrakurzpulslaser": {"any_of": ("ultrakurzpulslaser", "ultrakurzpuls laser")},
 }
 
-MARKETS = {
+MARKETS: Lexicon = {
     "Médical": {"any_of": ("medical", "medtech", "surgical", "healthcare", "biomedical")},
     "Batteries": {"any_of": ("battery", "batteries", "energy storage", "battery cell")},
     "Optique": {"any_of": ("optical", "optique", "lens", "lenses", "optics")},
@@ -142,7 +160,7 @@ MARKETS = {
     "Luxe": {"any_of": ("luxury", "luxe", "horlogerie", "watchmaking")},
 }
 
-COMPONENTS = {
+COMPONENTS: Lexicon = {
     "Composants en Nitinol pour cathéters": {"all_of": ("nitinol", "catheter")},
     "Lentilles intraoculaires (IOL)": {"any_of": ("intraocular lens", "intraocular lenses"), "regex": (r"\biol\b",)},
     "Stents": {"any_of": ("stent",)},
@@ -170,7 +188,7 @@ COMPONENTS = {
     "Capteurs": {"any_of": ("sensor", "capteur")},
 }
 
-OPERATIONS = {
+OPERATIONS: Lexicon = {
     "Micro-usinage": {"any_of": ("micromachining", "micro-machining", "micro machining")},
     "Microdécoupe": {"any_of": ("microcutting", "micro-cutting", "laser cutting", "microdécoupe", "découpe laser", "tube cutting")},
     "Microperçage": {"any_of": ("microdrilling", "micro-drilling", "laser drilling", "microperçage", "perçage laser")},
@@ -190,18 +208,18 @@ OPERATIONS = {
     "Milling": {"any_of": ("laser milling", "micromilling", "micro-milling")},
 }
 
-PROCESS_TECHNOLOGIES = {
+PROCESS_TECHNOLOGIES: Lexicon = {
     "SLE": {"any_of": ("selective laser etching", "selective laser-induced etching", "selective laser induced etching", "laser assisted etching", "laser-assisted etching", "isle process"), "regex": (r"\bSLE\b",), "requires_any": ("laser", "etching", "glass", "silica")},
     "LIPSS": {"any_of": ("laser-induced periodic surface structures", "laser induced periodic surface structures"), "regex": (r"\bLIPSS\b",)},
     "LSFL": {"regex": (r"\bLSFL\b",)},
     "HSFL": {"regex": (r"\bHSFL\b",)},
 }
 
-APPLICATION_ARCHITECTURES = {
+APPLICATION_ARCHITECTURES: Lexicon = {
     "TGV": {"any_of": ("through glass via", "through-glass via", "through glass vias", "through-glass vias"), "regex": (r"\bTGVs?\b",), "requires_any": ("glass", "via", "interposer", "semiconductor", "packaging")},
 }
 
-MATERIALS = {
+MATERIALS: Lexicon = {
     "Verre": {"any_of": ("glass", "fused silica", "borosilicate", "quartz glass")},
     "Saphir": {"any_of": ("sapphire",)},
     "Silicium": {"any_of": ("silicon",)},
@@ -211,7 +229,7 @@ MATERIALS = {
     "Métal": {"any_of": ("stainless steel", "titanium", "aluminium", "aluminum", "copper", "nickel")},
 }
 
-PERFORMANCE_TERMS = {
+PERFORMANCE_TERMS: Lexicon = {
     "Productivité": {"any_of": ("high throughput", "throughput", "high-speed processing", "high speed processing", "large-area processing", "large area processing")},
     "Parallélisation": {"any_of": ("parallel processing", "multibeam", "multi-beam", "beam splitting", "diffractive optical element", "polygon scanner")},
     "Haute puissance": {"any_of": ("high average power", "high-power ultrafast", "high power ultrafast", "high repetition rate", "mhz processing")},
@@ -257,7 +275,7 @@ MATURITY_RULES = (
 )
 
 # Compatibilité avec d'éventuels imports externes : inclut aussi les règles regex.
-def _compat_terms(rules: dict[str, dict[str, tuple[str, ...]]]) -> tuple[str, ...]:
+def _compat_terms(rules: Lexicon) -> tuple[str, ...]:
     terms: list[str] = []
     for label, rule in rules.items():
         terms.extend(rule.get("all_of", ()))
@@ -351,7 +369,7 @@ def _contains_term(text: str, term: str) -> bool:
     return _contains_term_normalized(_normalize_text(text), term)
 
 
-def _rule_match_terms(text: str, rule: dict[str, tuple[str, ...]]) -> list[str]:
+def _rule_match_terms(text: str, rule: LexiconRule) -> list[str]:
     """Return only the actual lexical evidence supporting a complete rule."""
     norm = _normalize_text(text)
     excludes = rule.get("exclude", ())
@@ -381,11 +399,11 @@ def _rule_match_terms(text: str, rule: dict[str, tuple[str, ...]]) -> list[str]:
     return list(dict.fromkeys(hits))
 
 
-def _rule_matches(text: str, rule: dict[str, tuple[str, ...]]) -> bool:
+def _rule_matches(text: str, rule: LexiconRule) -> bool:
     return bool(_rule_match_terms(text, rule))
 
 
-def _specificity_score(rule: dict[str, tuple[str, ...]], hits: list[str]) -> tuple[int, int, int]:
+def _specificity_score(rule: LexiconRule, hits: list[str]) -> tuple[int, int, int]:
     """Favor explicit multi-term rules and longer evidence over generic labels."""
     all_bonus = 3 if rule.get("all_of") else 0
     regex_bonus = 1 if rule.get("regex") else 0
@@ -393,7 +411,7 @@ def _specificity_score(rule: dict[str, tuple[str, ...]], hits: list[str]) -> tup
     return (all_bonus + regex_bonus + len(hits), lexical_weight, len(rule.get("all_of", ())))
 
 
-def _match_label_details(text: str, lexicon: dict[str, dict[str, tuple[str, ...]]]) -> tuple[str | None, list[str]]:
+def _match_label_details(text: str, lexicon: Lexicon) -> tuple[str | None, list[str]]:
     matches: list[tuple[tuple[int, int, int], str, list[str]]] = []
     for label, rule in lexicon.items():
         hits = _rule_match_terms(text, rule)
@@ -406,11 +424,11 @@ def _match_label_details(text: str, lexicon: dict[str, dict[str, tuple[str, ...]
     return label, hits
 
 
-def _match_label(text: str, lexicon: dict[str, dict[str, tuple[str, ...]]]) -> str | None:
+def _match_label(text: str, lexicon: Lexicon) -> str | None:
     return _match_label_details(text, lexicon)[0]
 
 
-def _match_all_labels(text: str, lexicon: dict[str, dict[str, tuple[str, ...]]]) -> list[tuple[str, list[str]]]:
+def _match_all_labels(text: str, lexicon: Lexicon) -> list[tuple[str, list[str]]]:
     """Return all matching canonical labels, ordered by specificity, not just the first one."""
     matches: list[tuple[tuple[int, int, int], str, list[str]]] = []
     for label, rule in lexicon.items():
@@ -421,7 +439,7 @@ def _match_all_labels(text: str, lexicon: dict[str, dict[str, tuple[str, ...]]])
     return [(label, hits) for _, label, hits in matches]
 
 
-def _matching_terms(text: str, lexicon: dict[str, dict[str, tuple[str, ...]]]) -> list[str]:
+def _matching_terms(text: str, lexicon: Lexicon) -> list[str]:
     hits: list[str] = []
     for rule in lexicon.values():
         hits.extend(_rule_match_terms(text, rule))
@@ -749,7 +767,6 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
         _inc_diagnostic(diagnostics, "noise_block")
         return None
 
-    direct = " ".join(filter(None, (block.heading, block.text, block.media_context)))
     section = context_text or " ".join(filter(None, (block.section_context, block.text, block.media_context)))
     if not _laser_match(_laser_context(title, block, section)):
         _inc_diagnostic(diagnostics, "no_laser_context")
@@ -887,10 +904,10 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
     # Offer pages can be valuable even without a market/component. On generic pages, demand explicit capability evidence.
     page_offer_type = page_type if page_type in {"service", "capability", "technology", "product"} else "capability"
     capabilities: list[tuple[str, str | None, str | None]] = []
-    for operation, _ in operations:
-        capabilities.append((operation, operation, None))
-    for process, _ in processes:
-        capabilities.append((process, None, process))
+    for operation_label, _ in operations:
+        capabilities.append((operation_label, operation_label, None))
+    for process_label, _ in processes:
+        capabilities.append((process_label, None, process_label))
 
     if not capabilities:
         if page_type not in {"service", "capability", "technology", "product"}:
@@ -1027,7 +1044,6 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
             continue
 
         maturity = _validate_ai_value(fact.get("maturity"), set(maturity_to_bucket))
-        reported_bucket = str(fact.get("bucket", "pending"))
         maturity_class = maturity_to_bucket.get(maturity, "unknown")
         bucket = "existing" if maturity_class == "existing" else "radar"
         market = fields["market"]
@@ -1234,7 +1250,7 @@ def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
                     "reason": source.get("discovery_reason") or source.get("source_kind") or "stored",
                 })
 
-            documents: list[tuple[str, object]] = []
+            documents: list[tuple[str, ParsedDocument]] = []
             actor_errors = 0
             successful_visits = 0
             attempts = 0

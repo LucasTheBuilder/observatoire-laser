@@ -1,0 +1,28 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 130
+
+[tool.ruff.lint]
+# Conservative default set: real bugs and correctness issues (pyflakes), style consistency
+# (pycodestyle), import ordering, and unused-import cleanup. Deliberately not enabling
+# stricter/opinionated rule families (e.g. ANN, D, PL) so this stays a safety net rather
+# than a rewrite of the existing style.
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",  # long lines are the existing convention (dense dict literals, SQL statements)
+    "E702",  # a handful of intentional `x(); y` one-liners in hybrid.py's noise-removal loops
+]
+
+[tool.ruff.lint.per-file-ignores]
+# tests/*.py insert the project root onto sys.path before importing project modules by name,
+# which E402 (import not at top of file) would otherwise flag on every test file.
+"tests/*.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["app.py", "db.py", "scrapers.py", "hybrid.py", "site_profiles.py", "browser_fetcher.py", "browser_service.py"]
+ignore_missing_imports = true
+# The codebase already carries rich type hints (PEP 604 unions, `from __future__ import
+# annotations`) but candidate/row dicts are intentionally dynamic (sqlite3.Row, scraped
+# HTML). Full strict mode would mostly flag that dynamism rather than real bugs, so this
+# stays at mypy's default strictness -- a safety net for obvious mistakes, not a rewrite.

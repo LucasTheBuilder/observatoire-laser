@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import heapq
 import itertools
 import sqlite3
-import tempfile
 import unittest
 from collections import defaultdict
-from pathlib import Path
 
 from hybrid import ContentBlock
-import scrapers
 from scrapers import (
     _candidate,
     _offer_candidates,

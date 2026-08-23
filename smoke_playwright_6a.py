@@ -11,7 +11,6 @@ from browser_fetcher import BrowserFetcher
 from hybrid import parse_document
 from site_profiles import get_site_profile
 
-
 DEFAULT_URLS = [
     "https://www.alphanov.com/en/application-sectors/lasers",
     "https://www.alphanov.com/en/products-and-services/laser-machining-and-micro-machining",

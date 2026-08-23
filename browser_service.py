@@ -4,13 +4,12 @@ import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
 from playwright.async_api import Browser, Playwright, async_playwright
-
+from pydantic import BaseModel, Field
 
 DEFAULT_TIMEOUT_MS = int(os.getenv("BROWSER_TIMEOUT_MS", "18000"))
 NAVIGATION_TIMEOUT_MS = int(os.getenv("BROWSER_NAVIGATION_TIMEOUT_MS", "15000"))
@@ -29,7 +28,7 @@ ALLOWED_DOMAINS = tuple(
 
 class RenderRequest(BaseModel):
     url: str
-    wait_until: str = Field(default="domcontentloaded", pattern="^(commit|domcontentloaded|load|networkidle)$")
+    wait_until: Literal["commit", "domcontentloaded", "load", "networkidle"] = "domcontentloaded"
     extra_wait_ms: int = Field(default=500, ge=0, le=5000)
     scroll_once: bool = True
 
