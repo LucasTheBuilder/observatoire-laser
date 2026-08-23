@@ -5,7 +5,7 @@ Cette phase ne branche toujours pas Playwright automatiquement dans le crawler. 
 ## Changements
 
 1. `diagnose_document()` expose le nombre de H1/H2/H3/H4, sections, articles, ancres, candidats CSS, candidats utilisables, parents écartés, blocs sémantiques, segments par titres et blocs finaux.
-2. `audit_dom_6a_bis.py` compare HTTPX et Playwright avec ces métriques et affiche les 20 premiers blocs retenus.
+2. `audit_dom_6a_quater.py` compare HTTPX et Playwright avec ces métriques et affiche les 20 premiers blocs retenus (métriques de qualité incluses ; les variantes `_bis`/`_ter` intermédiaires ont été retirées, l'historique reste consultable via `git log`).
 3. `parse_document()` possède maintenant une segmentation éditoriale H2/H3/H4 conservatrice. Elle ne s'active que si l'extraction sémantique retourne au plus 3 blocs alors que la page contient au moins 4 titres H2/H3/H4. Elle doit aussi produire au moins deux blocs supplémentaires pour remplacer l'extraction sémantique.
 4. La segmentation coupe au prochain titre de rang égal ou supérieur. Cela réduit les contaminations entre rubriques éloignées.
 
@@ -14,13 +14,13 @@ Cette phase ne branche toujours pas Playwright automatiquement dans le crawler. 
 Depuis le projet Docker :
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.playwright.yml exec observatoire python audit_dom_6a_bis.py --renderer http://browser:8780
+docker compose -f docker-compose.yml -f docker-compose.playwright.yml exec observatoire python audit_dom_6a_quater.py --renderer http://browser:8780
 ```
 
 Pour obtenir le JSON complet :
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.playwright.yml exec observatoire python audit_dom_6a_bis.py --renderer http://browser:8780 --json
+docker compose -f docker-compose.yml -f docker-compose.playwright.yml exec observatoire python audit_dom_6a_quater.py --renderer http://browser:8780 --json
 ```
 
 ## Ce qu'il faut regarder

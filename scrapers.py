@@ -4,11 +4,14 @@ import hashlib
 import heapq
 import itertools
 import json
+import os
 import re
+import time
 import unicodedata
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
+from urllib import robotparser
 from urllib.parse import urlparse
 
 import httpx
@@ -17,8 +20,96 @@ from db import ACTORS_DB, MARKET_DB, TECH_DB, connect, market_fact_key, offer_fa
 from hybrid import ContentBlock, OllamaClient, block_payload, build_profile, canonical_url, classify_source, normalize_page_type, parse_document, profile_json
 from site_profiles import crawl_budget, get_site_profile, seed_urls
 
-HEADERS = {"User-Agent": "ObservatoireLaser/3.4.1-optimized (+local-relation deterministic crawler)"}
+CRAWLER_CONTACT = os.getenv("CRAWLER_CONTACT", "").strip()
+USER_AGENT = "ObservatoireLaser/3.4.1-optimized (+local-relation deterministic crawler" + (
+    f"; contact: {CRAWLER_CONTACT})" if CRAWLER_CONTACT else ")"
+)
+HEADERS = {"User-Agent": USER_AGENT}
 TIMEOUT = httpx.Timeout(18.0, connect=8.0)
+
+# Politeness: a fixed per-host delay plus bounded retries on transient failures. Both are
+# deliberately conservative defaults for small industrial/institutional sites that are not
+# built to absorb bursty traffic; override via env vars if a faster/slower pace is needed.
+CRAWL_DELAY_SECONDS = float(os.getenv("CRAWL_DELAY_SECONDS", "0.5"))
+CRAWL_MAX_RETRIES = int(os.getenv("CRAWL_MAX_RETRIES", "2"))
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+ROBOTS_CACHE_TTL_SECONDS = 6 * 3600
+
+_robots_cache: dict[str, tuple[float, "robotparser.RobotFileParser | None"]] = {}
+_last_request_at: dict[str, float] = {}
+
+
+def _robots_parser(client: httpx.Client, origin: str) -> "robotparser.RobotFileParser | None":
+    """Fetch and cache robots.txt for one origin. Any failure means 'no rules' (allow)."""
+    now = time.monotonic()
+    cached = _robots_cache.get(origin)
+    if cached is not None and now - cached[0] < ROBOTS_CACHE_TTL_SECONDS:
+        return cached[1]
+    parser: robotparser.RobotFileParser | None
+    try:
+        response = client.get(f"{origin}/robots.txt", timeout=8.0)
+        if response.status_code == 200:
+            parser = robotparser.RobotFileParser()
+            parser.parse(response.text.splitlines())
+        else:
+            parser = None
+    except Exception:
+        parser = None
+    _robots_cache[origin] = (now, parser)
+    return parser
+
+
+def _robots_allowed(client: httpx.Client, url: str) -> bool:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return True
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    parser = _robots_parser(client, origin)
+    if parser is None:
+        return True
+    try:
+        return parser.can_fetch(HEADERS["User-Agent"], url)
+    except Exception:
+        return True
+
+
+def _throttle(url: str) -> None:
+    """Enforce a minimum delay between two requests to the same host."""
+    if CRAWL_DELAY_SECONDS <= 0:
+        return
+    host = urlparse(url).netloc.lower()
+    if not host:
+        return
+    now = time.monotonic()
+    last = _last_request_at.get(host)
+    if last is not None:
+        remaining = CRAWL_DELAY_SECONDS - (now - last)
+        if remaining > 0:
+            time.sleep(remaining)
+    _last_request_at[host] = time.monotonic()
+
+
+def _fetch(client: httpx.Client, url: str) -> httpx.Response:
+    """GET one URL while respecting robots.txt, per-host throttling and transient-error retries."""
+    if not _robots_allowed(client, url):
+        raise PermissionError(f"robots.txt interdit: {url}")
+    attempt = 0
+    while True:
+        _throttle(url)
+        try:
+            response = client.get(url)
+        except (httpx.TimeoutException, httpx.TransportError):
+            if attempt >= CRAWL_MAX_RETRIES:
+                raise
+            time.sleep(2 ** attempt)
+            attempt += 1
+            continue
+        if response.status_code in RETRYABLE_STATUS_CODES and attempt < CRAWL_MAX_RETRIES:
+            time.sleep(2 ** attempt)
+            attempt += 1
+            continue
+        response.raise_for_status()
+        return response
 
 TECHNOLOGY_QUERIES = (
     "femtosecond laser micromachining",
@@ -1124,8 +1215,7 @@ def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
                     continue
 
                 try:
-                    response = client.get(url)
-                    response.raise_for_status()
+                    response = _fetch(client, url)
                     resolved_url = str(response.url)
                     document = parse_document(response.text, resolved_url, profile=site_profile)
                     documents.append((resolved_url, document))
@@ -1549,8 +1639,7 @@ def scrape_market(max_pages: int = 120) -> dict:
                     page_type = normalize_page_type(source.get("page_type"))
                     diagnostics["stored_pages_reused"] += 1
                 else:
-                    response = client.get(source["url"])
-                    response.raise_for_status()
+                    response = _fetch(client, source["url"])
                     site_profile = get_site_profile({"name": source["name"], "official_url": source["official_url"]})
                     document = parse_document(response.text, str(response.url), profile=site_profile)
                     blocks = document.blocks

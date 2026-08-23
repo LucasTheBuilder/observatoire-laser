@@ -3,13 +3,19 @@ services:
     build: .
     container_name: observatoire-laser-clean
     ports:
-      - "8765:8765"
+      # Bound to localhost by default: the API has no authentication, so it must not be
+      # reachable from the local network. Override with OBSERVATOIRE_HOST=0.0.0.0 (or a
+      # specific LAN address) only if remote access is intentional and access-controlled.
+      - "${OBSERVATOIRE_HOST:-127.0.0.1}:8765:8765"
     volumes:
       - ./data:/app/data
     environment:
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
       OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-90}
+      CRAWL_DELAY_SECONDS: ${CRAWL_DELAY_SECONDS:-0.5}
+      CRAWL_MAX_RETRIES: ${CRAWL_MAX_RETRIES:-2}
+      CRAWLER_CONTACT: ${CRAWLER_CONTACT:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
