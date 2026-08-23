@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from db import ACTORS_DB, MARKET_DB, TECH_DB, connect, init_databases, rows
+from db import ACTORS_DB, MARKET_DB, TECH_DB, backup_all_databases, connect, init_databases, rows
 from hybrid import OllamaClient
 from scrapers import scrape_actors, scrape_market, scrape_technology
 
@@ -358,6 +358,10 @@ def offer_proofs(offer_id: int):
 
 def _run_job(kind: str) -> None:
     try:
+        try:
+            backup_all_databases()
+        except Exception:
+            pass  # a backup failure (e.g. disk full) must never block the collection itself
         result = collectors[kind]()
         with job_lock:
             jobs[kind] = {"status": "completed", "result": result, "error": None}

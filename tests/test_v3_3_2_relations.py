@@ -126,5 +126,41 @@ class MarketResetTests(unittest.TestCase):
                 dbmod.TECH_DB = original_tech
 
 
+class BackupRotationTests(unittest.TestCase):
+    def test_backup_all_databases_snapshots_existing_dbs_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            original = (dbmod.DATA_DIR, dbmod.ACTORS_DB, dbmod.MARKET_DB, dbmod.TECH_DB)
+            try:
+                dbmod.DATA_DIR = root
+                dbmod.ACTORS_DB = root / "actors.db"
+                dbmod.MARKET_DB = root / "market.db"
+                dbmod.TECH_DB = root / "technology.db"
+                dbmod.init_databases()
+                dbmod.TECH_DB.unlink()  # simulate a database that hasn't been created yet
+                saved = dbmod.backup_all_databases()
+                self.assertEqual(2, len(saved))
+                self.assertTrue(all(path.exists() for path in saved))
+                self.assertTrue(all(path.parent == root / "backups" for path in saved))
+            finally:
+                dbmod.DATA_DIR, dbmod.ACTORS_DB, dbmod.MARKET_DB, dbmod.TECH_DB = original
+
+    def test_prune_backups_keeps_only_the_most_recent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            backups_dir = root / "backups"
+            backups_dir.mkdir()
+            original_data_dir = dbmod.DATA_DIR
+            try:
+                dbmod.DATA_DIR = root
+                for i in range(5):
+                    (backups_dir / f"market_2026010{i}T000000Z.db").write_text("x")
+                dbmod._prune_backups("market", keep=2)
+                remaining = sorted(path.name for path in backups_dir.glob("market_*.db"))
+                self.assertEqual(["market_20260103T000000Z.db", "market_20260104T000000Z.db"], remaining)
+            finally:
+                dbmod.DATA_DIR = original_data_dir
+
+
 if __name__ == "__main__":
     unittest.main()

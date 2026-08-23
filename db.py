@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import sqlite3
@@ -16,6 +17,7 @@ DATA_DIR = BASE_DIR / "data"
 ACTORS_DB = DATA_DIR / "actors.db"
 MARKET_DB = DATA_DIR / "market.db"
 TECH_DB = DATA_DIR / "technology.db"
+BACKUP_RETENTION_COUNT = int(os.getenv("BACKUP_RETENTION_COUNT", "14"))
 
 
 ACTORS = [
@@ -604,6 +606,58 @@ def init_databases() -> None:
         )
 
 
+def _backup_dir() -> Path:
+    """Resolved fresh on every call (DATA_DIR / "backups"), like ACTORS_DB/MARKET_DB/TECH_DB
+    are used elsewhere in this module -- tests patch DATA_DIR to an isolated path, and a
+    module-level constant computed once at import time would silently keep pointing at the
+    real project's data/backups/ instead of following that patch."""
+    return DATA_DIR / "backups"
+
+
+def _backup_one(path: Path, stamp: str) -> Path | None:
+    """Copy one SQLite file to data/backups/<stem>_<stamp>.db. No-op if it doesn't exist yet."""
+    if not path.exists():
+        return None
+    backup_dir = _backup_dir()
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / f"{path.stem}_{stamp}.db"
+    shutil.copy2(path, backup_path)
+    return backup_path
+
+
+def _prune_backups(stem: str, keep: int = BACKUP_RETENTION_COUNT) -> None:
+    """Keep only the ``keep`` most recent backups for one database (by filename, which sorts
+    chronologically thanks to the ISO-like timestamp suffix)."""
+    backup_dir = _backup_dir()
+    if not backup_dir.exists():
+        return
+    candidates = sorted(backup_dir.glob(f"{stem}_*.db"), key=lambda p: p.name, reverse=True)
+    for stale in candidates[keep:]:
+        stale.unlink(missing_ok=True)
+
+
+def backup_all_databases() -> list[Path]:
+    """Snapshot the three SQLite databases to data/backups/ before a collection run.
+
+    Best-effort and additive: a missing or unreadable database is skipped rather than aborting
+    the others, and this never runs automatically at import time or app startup -- only right
+    before a scrape job -- so a bad run always has a rollback point without the analyst having
+    to remember to run reset_market_db.py first. Old backups beyond BACKUP_RETENTION_COUNT are
+    pruned per database so data/backups/ doesn't grow unbounded.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    saved: list[Path] = []
+    for path in (ACTORS_DB, MARKET_DB, TECH_DB):
+        try:
+            backup_path = _backup_one(path, stamp)
+        except OSError:
+            continue
+        if backup_path:
+            saved.append(backup_path)
+            _prune_backups(path.stem)
+    return saved
+
+
 def reset_market_database(*, backup: bool = True) -> Path | None:
     """Rebuild market.db from an empty schema while preserving actors.db and technology.db.
 
@@ -611,14 +665,10 @@ def reset_market_database(*, backup: bool = True) -> Path | None:
     timestamp before deletion. WAL/SHM sidecars are removed as well. This is intentionally an
     explicit maintenance action and is never executed automatically at application startup.
     """
-    backup_path: Path | None = None
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if MARKET_DB.exists() and backup:
-        backup_dir = DATA_DIR / "backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup_path = backup_dir / f"market_{stamp}.db"
-        shutil.copy2(MARKET_DB, backup_path)
+    backup_path = _backup_one(MARKET_DB, datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")) if backup else None
+    if backup_path:
+        _prune_backups(MARKET_DB.stem)
     for path in (MARKET_DB, Path(str(MARKET_DB) + "-wal"), Path(str(MARKET_DB) + "-shm")):
         if path.exists():
             path.unlink()
