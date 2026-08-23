@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import heapq
+import itertools
+import sqlite3
+import tempfile
+import unittest
+from collections import defaultdict
+from pathlib import Path
+
+from hybrid import ContentBlock
+import scrapers
+from scrapers import (
+    _candidate,
+    _offer_candidates,
+    _pop_crawl_item,
+    _push_crawl_item,
+    _upsert_market_candidate,
+)
+from site_profiles import get_site_profile, seed_urls
+
+
+class CoverageFirstTests(unittest.TestCase):
+    def test_second_project_does_not_monopolise_uncovered_families(self):
+        profile = get_site_profile({"name": "ALPHANOV", "official_url": "https://www.alphanov.com"})
+        heap = []
+        queued = {}
+        counter = itertools.count()
+        for item in (
+            {"url": "https://x.test/project-1", "page_type": "project", "score": 135, "depth": 1},
+            {"url": "https://x.test/project-2", "page_type": "project", "score": 134, "depth": 1},
+            {"url": "https://x.test/service", "page_type": "service", "score": 90, "depth": 1},
+            {"url": "https://x.test/technology", "page_type": "technology", "score": 86, "depth": 1},
+            {"url": "https://x.test/application", "page_type": "application", "score": 105, "depth": 1},
+        ):
+            _push_crawl_item(heap, queued, counter, item)
+
+        visited = set()
+        visited_by_type = defaultdict(int)
+        first = _pop_crawl_item(heap, queued, visited, visited_by_type, profile)
+        self.assertIsNotNone(first)
+        first_item, _ = first
+        visited.add(first_item["url"])
+        visited_by_type[first_item["page_type"]] += 1
+
+        second = _pop_crawl_item(heap, queued, visited, visited_by_type, profile)
+        self.assertIsNotNone(second)
+        second_item, _ = second
+        # If project was consumed first, another project must lose its coverage boost.
+        if first_item["page_type"] == "project":
+            self.assertNotEqual(second_item["page_type"], "project")
+
+
+class AlphanovProfileTests(unittest.TestCase):
+    def test_profile_seeds_products_services_and_application_sectors(self):
+        profile = get_site_profile({"name": "ALPHANOV", "official_url": "https://www.alphanov.com"})
+        self.assertIn("/produits-et-services/", profile["priority_paths"])
+        self.assertIn("/en/products-and-services/", profile["priority_paths"])
+        self.assertIn("/secteurs-applicatifs/", profile["priority_paths"])
+        self.assertIn("/en/application-sectors/", profile["priority_paths"])
+        urls = seed_urls(profile, "https://www.alphanov.com")
+        self.assertIn("https://www.alphanov.com/produits-et-services/procedes-laser", urls)
+        self.assertIn("https://www.alphanov.com/en/products-and-services/laser-machining-and-micro-machining", urls)
+        self.assertIn("https://www.alphanov.com/secteurs-applicatifs/lasers", urls)
+        self.assertIn("https://www.alphanov.com/en/application-sectors/lasers", urls)
+
+
+class StrictMarketVsOfferTests(unittest.TestCase):
+    def test_process_or_material_never_becomes_market_component(self):
+        block = ContentBlock(
+            heading="Laser processes",
+            h1="Laser processes",
+            h2="Transparent materials",
+            h3="",
+            path="main > section",
+            text=(
+                "Our femtosecond laser processing of fused silica uses selective laser etching and high throughput "
+                "processing for industrial customers."
+            ),
+        )
+        market_fact = _candidate("ALPHANOV", "https://www.alphanov.com/en/products-and-services/test", "Laser processes", block)
+        self.assertIsNone(market_fact)
+        offers = _offer_candidates(
+            "ALPHANOV", "https://www.alphanov.com/en/products-and-services/test", "Laser processes", block, page_type="service"
+        )
+        self.assertTrue(offers)
+        self.assertTrue(any(item["capability"] == "SLE" for item in offers))
+
+    def test_rich_service_block_returns_multiple_capabilities(self):
+        block = ContentBlock(
+            heading="Laser machining and micro-machining",
+            h1="Laser processes",
+            h2="Laser machining and micro-machining",
+            h3="",
+            path="main > section",
+            text=(
+                "We provide femtosecond laser micromachining, laser drilling, surface texturing and selective ablation "
+                "as technical services and contract manufacturing."
+            ),
+        )
+        offers = _offer_candidates(
+            "ALPHANOV", "https://www.alphanov.com/en/products-and-services/laser-machining", "Laser machining", block, page_type="service"
+        )
+        capabilities = {item["capability"] for item in offers}
+        self.assertIn("Micro-usinage", capabilities)
+        self.assertIn("Microperçage", capabilities)
+        self.assertIn("Texturation", capabilities)
+        self.assertIn("Ablation", capabilities)
+
+
+class MultilingualFactTests(unittest.TestCase):
+    def _db(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, actor_name TEXT, bucket TEXT, market TEXT, component TEXT,
+                operation TEXT, industrial_stage TEXT, source_url TEXT, source_title TEXT, source_date TEXT, quote TEXT,
+                source_group TEXT, fingerprint TEXT UNIQUE, fact_key TEXT UNIQUE, evidence_kind TEXT, language TEXT,
+                review_status TEXT, created_at TEXT, updated_at TEXT, block_heading TEXT, block_path TEXT,
+                extraction_mode TEXT, field_confidence REAL, laser_process TEXT, material TEXT, performance TEXT,
+                maturity_level TEXT, relation_strength TEXT, relation_evidence TEXT, source_role TEXT
+            );
+            CREATE TABLE evidence_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, evidence_id INTEGER, source_url TEXT, source_title TEXT,
+                source_date TEXT, quote TEXT, language TEXT, block_heading TEXT, block_path TEXT, extraction_mode TEXT,
+                field_confidence REAL, relation_strength TEXT, relation_evidence TEXT, source_role TEXT, fingerprint TEXT UNIQUE, created_at TEXT
+            );
+            """
+        )
+        return conn
+
+    def test_fr_and_en_sources_create_one_fact_two_proofs(self):
+        conn = self._db()
+        common = {
+            "kind": "market_application",
+            "actor": "ALPHANOV",
+            "bucket": "radar",
+            "market": "Batteries",
+            "component": "Électrodes de batteries",
+            "operation": "Microdécoupe",
+            "process": None,
+            "material": None,
+            "performance": None,
+            "maturity": "Pré-industrialisation",
+            "stage": "Ligne pilote",
+            "group": "alphanov|radar|batteries|electrodes-de-batteries|microdecoupe",
+            "fact_key": "alphanov|radar|batteries|electrodes-de-batteries|microdecoupe",
+            "fingerprint": "fact-fingerprint",
+            "block_heading": "Femtocell",
+            "block_path": "main > article",
+            "mode": "block-rules",
+            "confidence": 0.9,
+        }
+        fr = dict(common, url="https://www.alphanov.com/fr/projet/femtocell", title="Femtocell FR", quote="Laser femtoseconde pour électrodes de batteries.", source_fingerprint="src-fr")
+        en = dict(common, url="https://www.alphanov.com/en/project/femtocell", title="Femtocell EN", quote="Femtosecond laser for battery electrodes.", source_fingerprint="src-en")
+        _upsert_market_candidate(conn, fr)
+        _upsert_market_candidate(conn, en)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM evidence_sources").fetchone()[0], 2)
+        languages = {row[0] for row in conn.execute("SELECT language FROM evidence_sources")}
+        self.assertEqual(languages, {"fr", "en"})
+
+
+if __name__ == "__main__":
+    unittest.main()

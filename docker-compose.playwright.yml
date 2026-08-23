@@ -1,0 +1,17 @@
+services:
+  browser:
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+    container_name: observatoire-laser-browser
+    restart: unless-stopped
+    ipc: host
+    ports:
+      - "127.0.0.1:8780:8780"
+    environment:
+      BROWSER_TIMEOUT_MS: "18000"
+      BROWSER_NAVIGATION_TIMEOUT_MS: "15000"
+      BROWSER_MAX_CONCURRENCY: "2"
+      BROWSER_MAX_HTML_CHARS: "3000000"
+      # Optionnel : limiter le renderer à certains domaines, séparés par des virgules.
+      # BROWSER_ALLOWED_DOMAINS: "alphanov.com,manutech-usd.fr,lasea.eu"

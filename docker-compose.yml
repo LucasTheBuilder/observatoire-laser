@@ -1,0 +1,15 @@
+services:
+  observatoire:
+    build: .
+    container_name: observatoire-laser-clean
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/app/data
+    environment:
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-90}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

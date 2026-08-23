@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime state: scraped databases and backups are generated data, not source.
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/backups/
+
+.env

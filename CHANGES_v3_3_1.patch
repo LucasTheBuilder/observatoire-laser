@@ -1,0 +1,1543 @@
+--- /mnt/data/observatoire_v3_3_dev/app.py	2026-08-23 15:57:31.009625390 +0000
++++ /mnt/data/observatoire_v3_3_1_dev/app.py	2026-08-23 16:35:55.573893838 +0000
+@@ -19,7 +19,7 @@
+ BASE_DIR = Path(__file__).resolve().parent
+ STATIC_DIR = BASE_DIR / "static"
+ 
+-app = FastAPI(title="Observatoire Laser", version="3.3.0-dev")
++app = FastAPI(title="Observatoire Laser", version="3.3.1-dev")
+ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+ executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="observatoire")
+ job_lock = threading.Lock()
+@@ -56,9 +56,11 @@
+             "last_run": _last_run(ACTORS_DB),
+         },
+         "market": {
+-            "existing": scalar(MARKET_DB, "SELECT COUNT(DISTINCT market||'|'||component||'|'||operation) FROM evidence WHERE bucket='existing' AND review_status='accepted'"),
+-            "radar": scalar(MARKET_DB, "SELECT COUNT(DISTINCT market||'|'||component||'|'||operation) FROM evidence WHERE bucket='radar' AND review_status='accepted'"),
+-            "evidence": scalar(MARKET_DB, "SELECT COUNT(*) FROM evidence WHERE review_status='accepted'"),
++            "existing": scalar(MARKET_DB, "SELECT COUNT(*) FROM evidence WHERE bucket='existing' AND review_status='accepted' AND evidence_kind='market_application'"),
++            "radar": scalar(MARKET_DB, "SELECT COUNT(*) FROM evidence WHERE bucket='radar' AND review_status='accepted' AND evidence_kind='market_application'"),
++            "evidence": scalar(MARKET_DB, "SELECT COUNT(*) FROM evidence WHERE review_status='accepted' AND evidence_kind='market_application'"),
++            "offers": scalar(MARKET_DB, "SELECT COUNT(*) FROM offers WHERE review_status='accepted'"),
++            "proof_sources": scalar(MARKET_DB, "SELECT COUNT(*) FROM evidence_sources") + scalar(MARKET_DB, "SELECT COUNT(*) FROM offer_sources"),
+             "last_run": _last_run(MARKET_DB),
+         },
+         "technology": {
+@@ -114,12 +116,18 @@
+ def market():
+     grouped = rows(
+         MARKET_DB,
+-        """SELECT bucket,market,component,operation,COUNT(DISTINCT source_group) AS proofs
+-           FROM evidence WHERE review_status='accepted' AND bucket IN ('existing','radar')
+-             AND market IS NOT NULL AND component IS NOT NULL AND operation IS NOT NULL
+-             AND TRIM(market)!='' AND market!='Non identifié'
+-             AND TRIM(component)!='' AND TRIM(operation)!=''
+-           GROUP BY bucket,market,component,operation ORDER BY market,component,operation""",
++        """SELECT e.id,e.bucket,e.market,e.component,e.operation,
++                  COUNT(es.id) AS proofs,
++                  COUNT(DISTINCT COALESCE(es.language,'unknown')) AS languages
++           FROM evidence e
++           LEFT JOIN evidence_sources es ON es.evidence_id=e.id
++           WHERE e.review_status='accepted' AND e.evidence_kind='market_application'
++             AND e.bucket IN ('existing','radar')
++             AND e.market IS NOT NULL AND e.component IS NOT NULL AND e.operation IS NOT NULL
++             AND TRIM(e.market)!='' AND e.market!='Non identifié'
++             AND TRIM(e.component)!='' AND TRIM(e.operation)!=''
++           GROUP BY e.id,e.bucket,e.market,e.component,e.operation
++           ORDER BY e.market,e.component,e.operation""",
+     )
+     return {
+         "existing": [item for item in grouped if item["bucket"] == "existing"],
+@@ -131,14 +139,46 @@
+ def proofs(bucket: str, market: str, component: str, operation: str):
+     return rows(
+         MARKET_DB,
+-        """SELECT actor_name,industrial_stage,source_url,source_title,source_date,quote,
+-                  block_heading,extraction_mode,field_confidence,laser_process,material,performance,maturity_level
+-           FROM evidence WHERE bucket=? AND market=? AND component=? AND operation=?
+-             AND review_status='accepted' ORDER BY COALESCE(source_date,created_at) DESC""",
++        """SELECT e.actor_name,e.industrial_stage,es.source_url,es.source_title,es.source_date,es.quote,
++                  es.language,es.block_heading,es.extraction_mode,es.field_confidence,
++                  e.laser_process,e.material,e.performance,e.maturity_level
++           FROM evidence e
++           JOIN evidence_sources es ON es.evidence_id=e.id
++           WHERE e.bucket=? AND e.market=? AND e.component=? AND e.operation=?
++             AND e.review_status='accepted'
++           ORDER BY COALESCE(es.source_date,es.created_at) DESC""",
+         (bucket, market, component, operation),
+     )
+ 
+ 
++@app.get("/api/offers")
++def offers():
++    return rows(
++        MARKET_DB,
++        """SELECT o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,
++                  o.industrial_stage,o.page_type,COUNT(os.id) AS proofs,
++                  COUNT(DISTINCT COALESCE(os.language,'unknown')) AS languages
++           FROM offers o
++           LEFT JOIN offer_sources os ON os.offer_id=o.id
++           WHERE o.review_status='accepted'
++           GROUP BY o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.industrial_stage,o.page_type
++           ORDER BY o.actor_name,o.offer_type,o.capability""",
++    )
++
++
++@app.get("/api/offers/{offer_id}/proofs")
++def offer_proofs(offer_id: int):
++    return rows(
++        MARKET_DB,
++        """SELECT o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.industrial_stage,
++                  os.source_url,os.source_title,os.quote,os.language,os.block_heading,os.extraction_mode,os.field_confidence
++           FROM offers o JOIN offer_sources os ON os.offer_id=o.id
++           WHERE o.id=? AND o.review_status='accepted'
++           ORDER BY os.created_at DESC""",
++        (offer_id,),
++    )
++
++
+ def _run_job(kind: str) -> None:
+     try:
+         result = collectors[kind]()
+--- /mnt/data/observatoire_v3_3_dev/db.py	2026-08-23 16:12:22.226089002 +0000
++++ /mnt/data/observatoire_v3_3_1_dev/db.py	2026-08-23 16:37:10.437365623 +0000
+@@ -1,11 +1,14 @@
+ from __future__ import annotations
+ 
+ import hashlib
++import re
+ import sqlite3
++import unicodedata
+ from contextlib import contextmanager
+ from datetime import datetime, timezone
+ from pathlib import Path
+ from typing import Any, Iterable
++from urllib.parse import urlparse
+ 
+ BASE_DIR = Path(__file__).resolve().parent
+ DATA_DIR = BASE_DIR / "data"
+@@ -46,60 +49,18 @@
+     ("MANUTECH USD", "https://www.manutech-usd.fr/en/", "official"),
+ ]
+ 
+-SEED_EVIDENCE = [
+-    {
+-        "actor": "Blueacre Technology / AP Technologies",
+-        "bucket": "existing",
+-        "market": "Médical",
+-        "component": "Composants en Nitinol pour cathéters",
+-        "operation": "Microdécoupe femtoseconde",
+-        "stage": "Production industrielle",
+-        "url": "https://www.accessnewswire.com/newsroom/en/healthcare-and-pharmaceutical/ap-technologies-acquires-blueacre-technology-adding-nitinol-and-preci-1168199",
+-        "title": "AP Technologies acquires Blueacre Technology",
+-        "date": "2026-05-19",
+-        "quote": "Blueacre brings nearly two decades of capability in laser micromachining and nitinol processing for the medical device industry, including femtosecond and picosecond laser cutting.",
+-        "group": "ap-technologies-blueacre-acquisition-2026",
+-    },
+-    {
+-        "actor": "LightFab",
+-        "bucket": "existing",
+-        "market": "Microfluidique",
+-        "component": "Composants et microcanaux en verre",
+-        "operation": "SLE et microstructuration 3D",
+-        "stage": "Petites séries et production",
+-        "url": "https://lightfab.de/",
+-        "title": "LightFab – 3D Microfabrication",
+-        "date": None,
+-        "quote": "We produce microstructured glass components using ultrafast laser radiation. Single order, prototyping, small series and mass production.",
+-        "group": "lightfab-glass-microfabrication",
+-    },
+-    {
+-        "actor": "ALPHANOV",
+-        "bucket": "radar",
+-        "market": "Batteries",
+-        "component": "Électrodes de batteries Gen4",
+-        "operation": "Découpe et structuration",
+-        "stage": "Ligne pilote",
+-        "url": "https://www.alphanov.com/en/collaborative-projects/femtocell-pilot-line-next-generation-gen4-batteries",
+-        "title": "Femtocell: pilot line for Gen4 batteries",
+-        "date": "2025-09-19",
+-        "quote": "The Femtocell project aims to develop a pilot line based on a high-power femtosecond laser source dedicated to the cutting and structuring of electrodes for next-generation batteries.",
+-        "group": "femtocell-gen4-pilot-line",
+-    },
+-    {
+-        "actor": "HEF / MANUTECH USD",
+-        "bucket": "radar",
+-        "market": "Optique",
+-        "component": "Composants en verre optique",
+-        "operation": "Découpe femtoseconde",
+-        "stage": "Industrialisation en développement",
+-        "url": "https://hef.group/en/glacier-project-femtosecond-laser-and-glass-cutting/",
+-        "title": "GLACIER project: femtosecond laser and glass cutting",
+-        "date": None,
+-        "quote": "The HEF Groupe has chosen to innovate with MANUTECH USD, VISIOSHAPE, and the Université Jean Monnet Saint-Etienne to industrialize a femtosecond laser cutting process for optical glass.",
+-        "group": "glacier-optical-glass",
+-    },
+-]
++# Seed values are now kept as canonical dimensions. Generation/application detail belongs in stage/quote,
++# not in the component label, so seed and scraped evidence can deduplicate correctly.
++LEGACY_SEED_GROUPS = (
++    "ap-technologies-blueacre-acquisition-2026",
++    "lightfab-glass-microfabrication",
++    "femtocell-gen4-pilot-line",
++    "glacier-optical-glass",
++)
++
++# v3.3.1 no longer injects synthetic/curated market facts at startup.
++# Market facts must come from the strict extraction pipeline; legacy seeds are kept only as review material.
++SEED_EVIDENCE: list[dict[str, Any]] = []
+ 
+ 
+ def utc_now() -> str:
+@@ -128,6 +89,121 @@
+             db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+ 
+ 
++def _slug(value: str | None) -> str:
++    text = unicodedata.normalize("NFKD", value or "")
++    text = "".join(char for char in text if not unicodedata.combining(char))
++    return re.sub(r"[^a-z0-9]+", "-", text.casefold()).strip("-") or "non-identifie"
++
++
++def _language_from_url(url: str | None) -> str | None:
++    path = urlparse(url or "").path.casefold()
++    parts = [part for part in path.split("/") if part]
++    if not parts:
++        return None
++    first = parts[0]
++    if first in {"fr", "fr-fr", "france"}:
++        return "fr"
++    if first in {"en", "en-gb", "en-us"}:
++        return "en"
++    if first in {"de", "de-de"}:
++        return "de"
++    return None
++
++
++def market_fact_key(actor: str, bucket: str, market: str, component: str, operation: str) -> str:
++    """Language-independent canonical key for one market application fact."""
++    return "|".join(_slug(value) for value in (actor, bucket, market, component, operation))
++
++
++def offer_fact_key(actor: str, offer_type: str, capability: str, operation: str | None, laser_process: str | None) -> str:
++    return "|".join(_slug(value) for value in (actor, offer_type, capability, operation or "", laser_process or ""))
++
++
++def _canonicalise_existing_evidence(db: sqlite3.Connection) -> None:
++    """Repair legacy labels and remove old curated seeds from automatic publication."""
++    placeholders = ",".join("?" for _ in LEGACY_SEED_GROUPS)
++    db.execute(f"UPDATE evidence SET review_status='review' WHERE source_group IN ({placeholders})", LEGACY_SEED_GROUPS)
++    db.execute("UPDATE evidence SET component='Électrodes de batteries' WHERE component='Électrodes de batteries Gen4'")
++    db.execute("UPDATE evidence SET component='Microcanaux' WHERE component='Composants et microcanaux en verre'")
++    db.execute("UPDATE evidence SET component='Composants en verre' WHERE component='Composants en verre optique'")
++    db.execute("UPDATE evidence SET operation='Microdécoupe' WHERE operation IN ('Microdécoupe femtoseconde','Découpe femtoseconde')")
++    db.execute("UPDATE evidence SET operation='SLE' WHERE operation='SLE et microstructuration 3D'")
++    db.execute("UPDATE evidence SET operation='Microdécoupe' WHERE actor_name='ALPHANOV' AND operation='Découpe et structuration'")
++
++
++def _migrate_evidence_fact_model(db: sqlite3.Connection) -> None:
++    """Backfill language-independent facts and move each URL/quote into a source-proof table."""
++    _canonicalise_existing_evidence(db)
++    rows = db.execute("SELECT * FROM evidence ORDER BY id").fetchall()
++    if not rows:
++        return
++
++    grouped: dict[str, list[sqlite3.Row]] = {}
++    for row in rows:
++        key = market_fact_key(row["actor_name"], row["bucket"], row["market"] or "", row["component"] or "", row["operation"] or "")
++        grouped.setdefault(key, []).append(row)
++
++    for key, members in grouped.items():
++        # Prefer an accepted/high-confidence row as the representative fact.
++        def rank(row: sqlite3.Row) -> tuple[int, float, int]:
++            status_rank = {"accepted": 2, "review": 1, "rejected": 0}.get(row["review_status"], 0)
++            confidence = float(row["field_confidence"] or 0) if "field_confidence" in row.keys() else 0.0
++            return status_rank, confidence, -int(row["id"])
++
++        representative = max(members, key=rank)
++        rep_id = int(representative["id"])
++        db.execute(
++            "UPDATE evidence SET fact_key=?,evidence_kind='market_application',language=? WHERE id=?",
++            (key, _language_from_url(representative["source_url"]), rep_id),
++        )
++        for row in members:
++            source_fingerprint = str(row["fingerprint"] or hashlib.sha256(f"{row['source_url']}|{row['quote']}".encode()).hexdigest())
++            db.execute(
++                """INSERT OR IGNORE INTO evidence_sources(
++                       evidence_id,source_url,source_title,source_date,quote,language,block_heading,block_path,
++                       extraction_mode,field_confidence,fingerprint,created_at
++                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
++                (
++                    rep_id, row["source_url"], row["source_title"], row["source_date"], row["quote"],
++                    _language_from_url(row["source_url"]),
++                    row["block_heading"] if "block_heading" in row.keys() else None,
++                    row["block_path"] if "block_path" in row.keys() else None,
++                    row["extraction_mode"] if "extraction_mode" in row.keys() else None,
++                    row["field_confidence"] if "field_confidence" in row.keys() else None,
++                    source_fingerprint, row["created_at"],
++                ),
++            )
++            if int(row["id"]) != rep_id:
++                db.execute("DELETE FROM evidence WHERE id=?", (row["id"],))
++
++
++def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: str) -> None:
++    key = market_fact_key(item["actor"], item["bucket"], item["market"], item["component"], item["operation"])
++    source_fingerprint = hashlib.sha256(f"{item['url']}|{item['quote']}".encode()).hexdigest()
++    row = db.execute("SELECT id FROM evidence WHERE fact_key=?", (key,)).fetchone()
++    if row:
++        evidence_id = int(row["id"])
++    else:
++        fact_fingerprint = hashlib.sha256(key.encode()).hexdigest()
++        evidence_id = db.execute(
++            """INSERT INTO evidence(
++                   actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,source_date,
++                   quote,source_group,fingerprint,fact_key,evidence_kind,language,review_status,created_at,updated_at
++               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,'accepted',?,?)""",
++            (
++                item["actor"], item["bucket"], item["market"], item["component"], item["operation"], item["stage"],
++                item["url"], item["title"], item["date"], item["quote"], key, fact_fingerprint, key,
++                _language_from_url(item["url"]), stamp, stamp,
++            ),
++        ).lastrowid
++    db.execute(
++        """INSERT OR IGNORE INTO evidence_sources(
++               evidence_id,source_url,source_title,source_date,quote,language,fingerprint,created_at
++           ) VALUES(?,?,?,?,?,?,?,?)""",
++        (evidence_id, item["url"], item["title"], item["date"], item["quote"], _language_from_url(item["url"]), source_fingerprint, stamp),
++    )
++
++
+ def init_databases() -> None:
+     DATA_DIR.mkdir(parents=True, exist_ok=True)
+     with connect(ACTORS_DB) as db:
+@@ -278,19 +354,77 @@
+             "material": "TEXT",
+             "performance": "TEXT",
+             "maturity_level": "TEXT",
++            "fact_key": "TEXT",
++            "evidence_kind": "TEXT NOT NULL DEFAULT 'market_application'",
++            "language": "TEXT",
+         })
++        db.executescript(
++            """
++            CREATE TABLE IF NOT EXISTS evidence_sources (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                evidence_id INTEGER NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
++                source_url TEXT NOT NULL,
++                source_title TEXT,
++                source_date TEXT,
++                quote TEXT NOT NULL,
++                language TEXT,
++                block_heading TEXT,
++                block_path TEXT,
++                extraction_mode TEXT,
++                field_confidence REAL,
++                fingerprint TEXT NOT NULL UNIQUE,
++                created_at TEXT NOT NULL
++            );
++            CREATE INDEX IF NOT EXISTS evidence_sources_fact_idx ON evidence_sources(evidence_id);
++
++            CREATE TABLE IF NOT EXISTS offers (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                actor_name TEXT NOT NULL,
++                offer_type TEXT NOT NULL,
++                capability TEXT NOT NULL,
++                operation TEXT,
++                laser_process TEXT,
++                material TEXT,
++                performance TEXT,
++                industrial_stage TEXT,
++                page_type TEXT,
++                source_url TEXT NOT NULL,
++                source_title TEXT,
++                quote TEXT NOT NULL,
++                fact_key TEXT NOT NULL UNIQUE,
++                fingerprint TEXT NOT NULL UNIQUE,
++                review_status TEXT NOT NULL DEFAULT 'accepted' CHECK(review_status IN ('accepted','review','rejected')),
++                field_confidence REAL,
++                created_at TEXT NOT NULL,
++                updated_at TEXT NOT NULL
++            );
++            CREATE INDEX IF NOT EXISTS offers_actor_idx ON offers(actor_name,offer_type,capability);
++            CREATE TABLE IF NOT EXISTS offer_sources (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                offer_id INTEGER NOT NULL REFERENCES offers(id) ON DELETE CASCADE,
++                source_url TEXT NOT NULL,
++                source_title TEXT,
++                quote TEXT NOT NULL,
++                language TEXT,
++                block_heading TEXT,
++                block_path TEXT,
++                extraction_mode TEXT,
++                field_confidence REAL,
++                fingerprint TEXT NOT NULL UNIQUE,
++                created_at TEXT NOT NULL
++            );
++            CREATE INDEX IF NOT EXISTS offer_sources_fact_idx ON offer_sources(offer_id);
++            """
++        )
++        _add_columns(db, "collection_runs", {
++            "offers_added": "INTEGER NOT NULL DEFAULT 0",
++            "sources_added": "INTEGER NOT NULL DEFAULT 0",
++        })
++        _migrate_evidence_fact_model(db)
++        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS evidence_fact_key_uq ON evidence(fact_key) WHERE fact_key IS NOT NULL")
+         stamp = utc_now()
+         for item in SEED_EVIDENCE:
+-            fingerprint = hashlib.sha256(f"{item['group']}|{item['url']}|{item['quote']}".encode()).hexdigest()
+-            db.execute(
+-                """INSERT OR IGNORE INTO evidence(
+-                    actor_name,bucket,market,component,operation,industrial_stage,source_url,
+-                    source_title,source_date,quote,source_group,fingerprint,created_at,updated_at
+-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+-                (item["actor"], item["bucket"], item["market"], item["component"], item["operation"],
+-                 item["stage"], item["url"], item["title"], item["date"], item["quote"],
+-                 item["group"], fingerprint, stamp, stamp),
+-            )
++            _upsert_seed_evidence(db, item, stamp)
+ 
+     with connect(TECH_DB) as db:
+         db.executescript(
+--- /mnt/data/observatoire_v3_3_dev/hybrid.py	2026-08-23 16:12:22.206089002 +0000
++++ /mnt/data/observatoire_v3_3_1_dev/hybrid.py	2026-08-23 16:31:34.892825914 +0000
+@@ -36,10 +36,10 @@
+ }
+ DISCOVERY_TERMS = (
+     "application", "applications", "use case", "case study", "case-study", "customer case",
+-    "product", "products", "produit", "solution", "solutions", "service", "services",
+-    "capability", "capabilities", "capacity", "capacities", "technology", "technologies",
++    "product", "products", "produit", "produits", "solution", "solutions", "service", "services", "prestation", "prestations",
++    "capability", "capabilities", "capacity", "capacities", "competence", "competences", "savoir-faire", "expertise", "expertises", "technology", "technologies",
+     "news", "blog", "nouveaute", "nouveauté", "actualite", "actualité", "project", "projects",
+-    "projet", "market", "markets", "industrie", "industry", "production", "manufacturing",
++    "projet", "market", "markets", "marche", "marché", "secteur", "secteurs", "industrie", "industry", "production", "manufacturing",
+     "medical", "battery", "glass", "laser", "equipment", "equipement", "publication", "paper",
+ )
+ 
+@@ -124,10 +124,10 @@
+         ("application", r"\b(applications?|use cases?|applications? industrielles?)\b"),
+         ("project", r"\b(projects?|projets?|collaborations?|collaborative projects?)\b"),
+         ("news", r"\b(news|blogs?|actualites?|nouveautes?|press|presse|insights?)\b"),
+-        ("service", r"\b(services?|job shop|contract manufacturing|contract machining|manufacturing services?)\b"),
+-        ("capability", r"\b(capabilities|capability|capacities|capacity|competences?|expertise)\b"),
++        ("service", r"\b(services?|prestations?|sous[- ]?traitance|job shop|contract manufacturing|contract machining|manufacturing services?)\b"),
++        ("capability", r"\b(capabilities|capability|capacities|capacity|competences?|savoir faire|expertises?)\b"),
+         ("technology", r"\b(technology|technologies|processes?|procedes?|laser processing|micromachining)\b"),
+-        ("market", r"\b(markets?|industries|sectors?|marches?)\b"),
++        ("market", r"\b(markets?|industries|sectors?|secteurs?|marches?)\b"),
+         ("product", r"\b(products?|produits?|solutions?)\b"),
+         ("publication", r"\b(publications?|papers?|white papers?|technical papers?|scientific)\b"),
+         ("equipment", r"\b(equipments?|equipements?|machines?|systems?)\b"),
+--- /mnt/data/observatoire_v3_3_dev/scrapers.py	2026-08-23 16:12:22.222089002 +0000
++++ /mnt/data/observatoire_v3_3_1_dev/scrapers.py	2026-08-23 16:37:57.926679324 +0000
+@@ -6,14 +6,16 @@
+ import json
+ import re
+ import unicodedata
++from collections import defaultdict
++from urllib.parse import urlparse
+ 
+ import httpx
+ 
+-from db import ACTORS_DB, MARKET_DB, TECH_DB, connect, utc_now
++from db import ACTORS_DB, MARKET_DB, TECH_DB, connect, market_fact_key, offer_fact_key, utc_now
+ from hybrid import ContentBlock, OllamaClient, block_payload, build_profile, canonical_url, classify_source, parse_document, profile_json
+-from site_profiles import crawl_budget, get_site_profile
++from site_profiles import crawl_budget, get_site_profile, seed_urls
+ 
+-HEADERS = {"User-Agent": "ObservatoireLaser/3.3-dev (+deterministic crawler)"}
++HEADERS = {"User-Agent": "ObservatoireLaser/3.3.1-dev (+coverage-first deterministic crawler)"}
+ TIMEOUT = httpx.Timeout(18.0, connect=8.0)
+ 
+ LASER_RULES = {
+@@ -237,6 +239,17 @@
+     return _match_label_details(text, lexicon)[0]
+ 
+ 
++def _match_all_labels(text: str, lexicon: dict[str, dict[str, tuple[str, ...]]]) -> list[tuple[str, list[str]]]:
++    """Return all matching canonical labels, ordered by specificity, not just the first one."""
++    matches: list[tuple[tuple[int, int, int], str, list[str]]] = []
++    for label, rule in lexicon.items():
++        hits = _rule_match_terms(text, rule)
++        if hits:
++            matches.append((_specificity_score(rule, hits), label, hits))
++    matches.sort(key=lambda item: item[0], reverse=True)
++    return [(label, hits) for _, label, hits in matches]
++
++
+ def _matching_terms(text: str, lexicon: dict[str, dict[str, tuple[str, ...]]]) -> list[str]:
+     hits: list[str] = []
+     for rule in lexicon.values():
+@@ -281,12 +294,21 @@
+ 
+ 
+ def _context_for_block(title: str, blocks: list[ContentBlock], index: int) -> tuple[str, str]:
+-    """Use hierarchy captured during parsing instead of borrowing neighboring blocks."""
++    """Return direct block text and local section context, deliberately excluding the page title.
++
++    The page title is useful for inheriting the laser theme, but it must not silently inject a market,
++    component or operation into every block on a multi-market page.
++    """
+     block = blocks[index]
+     direct = " ".join(dict.fromkeys(filter(None, (block.heading, block.text, block.media_context))))
+     hierarchy = (getattr(block, "h1", ""), getattr(block, "h2", ""), getattr(block, "h3", ""))
+-    context = " ".join(dict.fromkeys(filter(None, (title, *hierarchy, block.heading, block.text, block.media_context))))
+-    return direct, context
++    section = " ".join(dict.fromkeys(filter(None, (*hierarchy, block.heading, block.text, block.media_context))))
++    return direct, section
++
++
++def _laser_context(title: str, block: ContentBlock, section_context: str | None = None) -> str:
++    section = section_context or " ".join(filter(None, (block.section_context, block.text, block.media_context)))
++    return " ".join(dict.fromkeys(filter(None, (title, section))))
+ 
+ 
+ def _independent_core_count(details: dict[str, tuple[str | None, list[str]]]) -> int:
+@@ -324,33 +346,33 @@
+ 
+ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode: str = "block-rules",
+                context_text: str | None = None) -> dict | None:
+-    """Accept only explainable femtosecond evidence with independent semantic support."""
++    """Create only a strict market-application fact.
++
++    A market fact requires an explicit/local Market + Component + Operation chain. Process, material,
++    architecture and performance are complementary dimensions and are never substituted for a missing core field.
++    """
+     if _is_noise_block(block):
+         return None
+     direct = " ".join(filter(None, (block.heading, block.text, block.media_context)))
+-    context = context_text or direct
++    section = context_text or " ".join(filter(None, (block.section_context, block.text, block.media_context)))
++    laser_context = _laser_context(title, block, section)
+     direct_laser = _laser_match(direct)
+-    context_laser = _laser_match(context)
+-    if not context_laser:
++    if not _laser_match(laser_context):
+         return None
+ 
+     details = {
+-        "market": _match_label_details(context, MARKETS),
+-        "component": _match_label_details(context, COMPONENTS),
+-        "operation": _match_label_details(context, OPERATIONS),
+-        "process": _match_label_details(context, PROCESS_TECHNOLOGIES),
+-        "architecture": _match_label_details(context, APPLICATION_ARCHITECTURES),
+-        "material": _match_label_details(context, MATERIALS),
+-        "performance": _match_label_details(context, PERFORMANCE_TERMS),
++        "market": _match_label_details(section, MARKETS),
++        "component": _match_label_details(section, COMPONENTS),
++        "operation": _match_label_details(section, OPERATIONS),
++        "process": _match_label_details(section, PROCESS_TECHNOLOGIES),
++        "architecture": _match_label_details(section, APPLICATION_ARCHITECTURES),
++        "material": _match_label_details(section, MATERIALS),
++        "performance": _match_label_details(section, PERFORMANCE_TERMS),
+     }
+     direct_details = {
+         "market": _match_label_details(direct, MARKETS),
+         "component": _match_label_details(direct, COMPONENTS),
+         "operation": _match_label_details(direct, OPERATIONS),
+-        "process": _match_label_details(direct, PROCESS_TECHNOLOGIES),
+-        "architecture": _match_label_details(direct, APPLICATION_ARCHITECTURES),
+-        "material": _match_label_details(direct, MATERIALS),
+-        "performance": _match_label_details(direct, PERFORMANCE_TERMS),
+     }
+ 
+     market, _ = details["market"]
+@@ -360,48 +382,23 @@
+     architecture, _ = details["architecture"]
+     material, _ = details["material"]
+     performance, _ = details["performance"]
+-    bucket, maturity = _detect_maturity(context)
+-    maturity_signal = bucket != "pending"
+ 
+-    core_count = _independent_core_count(details)
+-    direct_core_count = _independent_core_count(direct_details)
+-    support_count = sum(value is not None for value in (material, performance))
+-
+-    # If laser is inherited only from page/section context, require strong evidence
+-    # in the current block. This prevents every paragraph on a laser-themed page
+-    # from becoming a candidate.
+-    if not direct_laser:
+-        if direct_core_count < 1:
+-            return None
+-        if core_count < 2 and not (direct_core_count >= 1 and maturity_signal):
+-            return None
+-    elif core_count < 2 and not (core_count >= 1 and (support_count >= 1 or maturity_signal)):
++    # No semantic substitution: an application fact remains incomplete if any core dimension is absent.
++    if not (market and component and operation):
+         return None
+ 
+-    weights = {
+-        "market": 0.08, "component": 0.16, "operation": 0.18,
+-        "process": 0.18, "architecture": 0.15, "material": 0.05,
+-        "performance": 0.05,
+-    }
+-    confidence = 0.44 + (0.08 if direct_laser else 0.0)
+-    for key, (label, _) in details.items():
+-        if label:
+-            confidence += weights[key]
+-            if direct_details[key][0]:
+-                confidence += 0.03
+-    if maturity_signal:
+-        confidence += 0.06
+-    raw_core_labels = sum(details[key][0] is not None for key in ("market", "component", "operation", "process", "architecture"))
+-    confidence -= max(0, raw_core_labels - core_count) * 0.06
+-    confidence = max(0.50, min(0.98, confidence))
+-
+-    inferred_market = None if market else _infer_market(component, architecture)
+-    market_value = market or inferred_market or "Non identifié"
+-    component_value = component or architecture or process or material or "Non identifié"
+-    operation_value = operation or ("Structuration de surface" if process in ("LIPSS", "LSFL", "HSFL") else process) or "Non identifié"
++    # At least one of component/operation must be explicit in the current block; section headings may provide market context.
++    if not (direct_details["component"][0] or direct_details["operation"][0]):
++        return None
++
++    bucket, maturity = _detect_maturity(section)
++    confidence = 0.68 + (0.06 if direct_laser else 0.0)
++    confidence += 0.05 * sum(bool(direct_details[key][0]) for key in ("market", "component", "operation"))
++    confidence += 0.03 * sum(value is not None for value in (process, architecture, material, performance))
++    if bucket != "pending":
++        confidence += 0.04
++    confidence = max(0.68, min(0.98, confidence))
+ 
+-    # Quote ranking must use evidence from the current block only; inherited context
+-    # may justify classification but must never fabricate the displayed proof.
+     terms: list[str] = []
+     for lexicon in (MARKETS, COMPONENTS, OPERATIONS, PROCESS_TECHNOLOGIES, APPLICATION_ARCHITECTURES, MATERIALS, PERFORMANCE_TERMS):
+         terms.extend(_matching_terms(direct, lexicon))
+@@ -409,12 +406,10 @@
+     if not quote:
+         return None
+ 
+-    group = re.sub(r"[^a-z0-9]+", "-", f"{actor_name}-{market_value}-{component_value}-{operation_value}".casefold()).strip("-")
+-    fingerprint = hashlib.sha256(f"{url}|{block.fingerprint}|{quote}".encode()).hexdigest()
+-
++    group = market_fact_key(actor_name, bucket, market, component, operation)
++    source_fingerprint = hashlib.sha256(f"{url}|{block.fingerprint}|{quote}".encode()).hexdigest()
++    fact_fingerprint = hashlib.sha256(group.encode()).hexdigest()
+     stage_parts = [maturity]
+-    if inferred_market:
+-        stage_parts.append(f"Marché inféré: {inferred_market}")
+     if process:
+         stage_parts.append(f"Procédé: {process}")
+     if architecture:
+@@ -425,15 +420,107 @@
+         stage_parts.append(f"Performance: {performance}")
+ 
+     return {
+-        "actor": actor_name, "bucket": bucket, "market": market_value,
+-        "component": component_value, "operation": operation_value,
+-        "stage": " | ".join(stage_parts)[:180], "url": url, "title": title,
+-        "quote": quote, "group": group, "fingerprint": fingerprint,
+-        "block_heading": block.heading, "block_path": block.path, "mode": mode,
++        "kind": "market_application",
++        "actor": actor_name,
++        "bucket": bucket,
++        "market": market,
++        "component": component,
++        "operation": operation,
++        "process": process,
++        "architecture": architecture,
++        "material": material,
++        "performance": performance,
++        "maturity": maturity,
++        "stage": " | ".join(stage_parts)[:240],
++        "url": url,
++        "title": title,
++        "quote": quote,
++        "group": group,
++        "fact_key": group,
++        "fingerprint": fact_fingerprint,
++        "source_fingerprint": source_fingerprint,
++        "block_heading": block.heading,
++        "block_path": block.path,
++        "mode": mode,
+         "confidence": round(confidence, 2),
+     }
+ 
+ 
++def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock, *, page_type: str,
++                      mode: str = "block-rules") -> list[dict]:
++    """Extract competitor offer/capability facts without inventing a market or component."""
++    if _is_noise_block(block):
++        return []
++    direct = " ".join(filter(None, (block.heading, block.text, block.media_context)))
++    section = " ".join(filter(None, (block.section_context, block.text, block.media_context)))
++    if not _laser_match(_laser_context(title, block, section)):
++        return []
++
++    operations = _match_all_labels(section, OPERATIONS)
++    processes = _match_all_labels(section, PROCESS_TECHNOLOGIES)
++    materials = _match_all_labels(section, MATERIALS)
++    performances = _match_all_labels(section, PERFORMANCE_TERMS)
++    bucket, maturity = _detect_maturity(section)
++
++    # Offer pages can be valuable even without a market/component. On generic pages, demand explicit capability evidence.
++    page_offer_type = page_type if page_type in {"service", "capability", "technology", "product"} else "capability"
++    capabilities: list[tuple[str, str | None, str | None]] = []
++    for operation, _ in operations:
++        capabilities.append((operation, operation, None))
++    for process, _ in processes:
++        capabilities.append((process, None, process))
++
++    if not capabilities:
++        if page_type not in {"service", "capability", "technology", "product"}:
++            return []
++        # A laser-focused service page is still a useful competitor signal even if the block is generic.
++        if not _laser_match(direct):
++            return []
++        capabilities.append(("Procédés laser femtoseconde / ultrarapides", None, None))
++
++    material = materials[0][0] if materials else None
++    performance = performances[0][0] if performances else None
++    results: list[dict] = []
++    for capability, operation, process in capabilities:
++        terms: list[str] = []
++        if operation:
++            terms.extend(_matching_terms(direct, OPERATIONS))
++        if process:
++            terms.extend(_matching_terms(direct, PROCESS_TECHNOLOGIES))
++        terms.extend(_matching_terms(direct, MATERIALS))
++        terms.extend(_matching_terms(direct, PERFORMANCE_TERMS))
++        quote = _quote(block.text, terms)
++        if not quote:
++            continue
++        fact_key = offer_fact_key(actor_name, page_offer_type, capability, operation, process)
++        confidence = 0.70 + (0.08 if _laser_match(direct) else 0.0) + (0.05 if page_type in {"service", "capability", "technology"} else 0.0)
++        confidence = min(0.97, confidence)
++        results.append({
++            "kind": "offer",
++            "actor": actor_name,
++            "offer_type": page_offer_type,
++            "capability": capability,
++            "operation": operation,
++            "process": process,
++            "material": material,
++            "performance": performance,
++            "maturity": maturity,
++            "stage": maturity,
++            "page_type": page_type,
++            "url": url,
++            "title": title,
++            "quote": quote,
++            "fact_key": fact_key,
++            "fingerprint": hashlib.sha256(fact_key.encode()).hexdigest(),
++            "source_fingerprint": hashlib.sha256(f"{url}|{block.fingerprint}|{quote}|{capability}".encode()).hexdigest(),
++            "block_heading": block.heading,
++            "block_path": block.path,
++            "mode": mode,
++            "confidence": round(confidence, 2),
++        })
++    return results
++
++
+ def _validate_ai_value(value: object, allowed: set[str]) -> str:
+     text = str(value or "").strip()
+     if not text or text == "Non identifié":
+@@ -442,13 +529,20 @@
+ 
+ 
+ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBlock], ollama: OllamaClient) -> list[dict]:
++    """Conservative AI fallback for strict market applications only.
++
++    Ollama may resolve wording, but it cannot invent or substitute Market / Component / Operation.
++    Each of the three core labels must also be supported by the deterministic local-section lexicons.
++    """
+     relevant: list[tuple[int, ContentBlock, str]] = []
+     for i, block in enumerate(blocks):
+         if _is_noise_block(block):
+             continue
+-        direct, context = _context_for_block(title, blocks, i)
+-        if _laser_match(context) and (_laser_match(direct) or any(_match_label(direct, lex) for lex in (COMPONENTS, OPERATIONS, PROCESS_TECHNOLOGIES, APPLICATION_ARCHITECTURES))):
+-            relevant.append((i, block, context))
++        direct, section = _context_for_block(title, blocks, i)
++        if _laser_match(_laser_context(title, block, section)) and (
++            _laser_match(direct) or any(_match_label(section, lex) for lex in (MARKETS, COMPONENTS, OPERATIONS))
++        ):
++            relevant.append((i, block, section))
+         if len(relevant) >= 12:
+             break
+     if not relevant or not ollama.available():
+@@ -462,14 +556,15 @@
+             "materials": list(MATERIALS), "performance": list(PERFORMANCE_TERMS),
+             "maturity": [stage for stage, _, _ in MATURITY_RULES],
+         },
+-        "blocks": [dict(index=i, context=context[:2500], **block_payload(block)) for i, block, context in relevant],
++        "blocks": [dict(index=i, context=section[:2500], **block_payload(block)) for i, block, section in relevant],
+     }, ensure_ascii=False)
+     system = (
+-        "Analyse chaque bloc avec son contexte hiérarchique. Utilise uniquement les labels autorisés fournis dans le JSON. "
+-        "Réponds en JSON avec facts. Chaque fait contient block_index, market, component, operation, process_technology, "
+-        "application_architecture, material, performance, maturity, bucket(existing|radar|pending), stage, quote, confidence. "
+-        "Utilise 'Non identifié' si une dimension n'est pas explicitement justifiée. quote doit être une sous-chaîne exacte "
+-        "du texte du bloc courant. N'utilise jamais un menu/navigation comme preuve et n'invente aucun label."
++        "Analyse uniquement des applications marché explicitement documentées. Utilise uniquement les labels autorisés. "
++        "Un fait doit avoir market, component et operation explicitement justifiés par le bloc ou ses titres de section locaux. "
++        "Ne remplace jamais un composant manquant par un matériau, une architecture ou un procédé, et ne remplace jamais une "
++        "opération manquante par un procédé. Réponds en JSON avec facts contenant block_index, market, component, operation, "
++        "process_technology, application_architecture, material, performance, maturity, bucket, stage, quote, confidence. "
++        "quote doit être une sous-chaîne exacte du bloc courant."
+     )
+     try:
+         response = ollama.ask_json(system, prompt)
+@@ -477,52 +572,46 @@
+     except Exception:
+         return []
+ 
+-    candidates: list[dict] = []
+-    block_by_index = {i: block for i, block, _ in relevant}
++    block_by_index = {i: (block, section) for i, block, section in relevant}
+     allowed = {
+         "market": set(MARKETS), "component": set(COMPONENTS), "operation": set(OPERATIONS),
+         "process_technology": set(PROCESS_TECHNOLOGIES), "application_architecture": set(APPLICATION_ARCHITECTURES),
+         "material": set(MATERIALS), "performance": set(PERFORMANCE_TERMS),
+     }
+     maturity_to_bucket = {stage: bucket for stage, bucket, _ in MATURITY_RULES}
++    candidates: list[dict] = []
+ 
+     for fact in facts[:20]:
+         try:
+             original_index = int(fact["block_index"])
+-            block = block_by_index[original_index]
++            block, section = block_by_index[original_index]
+             quote = str(fact["quote"]).strip()
+             confidence = float(fact.get("confidence", 0))
+         except (KeyError, ValueError, TypeError, IndexError):
+             continue
+-        if not quote or quote not in block.text or confidence < 0.65:
++        if not quote or quote not in block.text or confidence < 0.72:
+             continue
+ 
+         fields = {key: _validate_ai_value(fact.get(key), values) for key, values in allowed.items()}
+-        maturity = _validate_ai_value(fact.get("maturity"), set(maturity_to_bucket))
+-        reported_bucket = str(fact.get("bucket", "pending"))
+-        expected_bucket = maturity_to_bucket.get(maturity, "pending")
+-        bucket = expected_bucket if maturity != "Non identifié" else (reported_bucket if reported_bucket in ("existing", "radar", "pending") else "pending")
++        if any(fields[key] == "Non identifié" for key in ("market", "component", "operation")):
++            continue
+ 
+-        core_known = sum(fields[key] != "Non identifié" for key in ("market", "component", "operation", "process_technology", "application_architecture"))
+-        support_known = sum(fields[key] != "Non identifié" for key in ("material", "performance"))
+-        if core_known < 2 and not (core_known >= 1 and (support_known >= 1 or bucket != "pending")):
++        deterministic_core = {
++            "market": _match_label(section, MARKETS),
++            "component": _match_label(section, COMPONENTS),
++            "operation": _match_label(section, OPERATIONS),
++        }
++        if any(deterministic_core[key] != fields[key] for key in deterministic_core):
+             continue
+ 
++        maturity = _validate_ai_value(fact.get("maturity"), set(maturity_to_bucket))
++        reported_bucket = str(fact.get("bucket", "pending"))
++        bucket = maturity_to_bucket.get(maturity, reported_bucket if reported_bucket in {"existing", "radar", "pending"} else "pending")
+         market = fields["market"]
+-        inferred_market = None
+-        if market == "Non identifié":
+-            inferred_market = _infer_market(None if fields["component"] == "Non identifié" else fields["component"], None if fields["application_architecture"] == "Non identifié" else fields["application_architecture"])
+-            market = inferred_market or market
+         component = fields["component"]
+-        if component == "Non identifié":
+-            component = next((fields[k] for k in ("application_architecture", "process_technology", "material") if fields[k] != "Non identifié"), "Non identifié")
+         operation = fields["operation"]
+-        if operation == "Non identifié" and fields["process_technology"] != "Non identifié":
+-            operation = "Structuration de surface" if fields["process_technology"] in ("LIPSS", "LSFL", "HSFL") else fields["process_technology"]
+-
++        fact_key = market_fact_key(actor_name, bucket, market, component, operation)
+         extras = []
+-        if inferred_market:
+-            extras.append(f"Marché inféré: {inferred_market}")
+         for key, label in (("process_technology", "Procédé"), ("application_architecture", "Architecture"), ("material", "Matériau"), ("performance", "Performance")):
+             if fields[key] != "Non identifié":
+                 extras.append(f"{label}: {fields[key]}")
+@@ -530,30 +619,50 @@
+         if extras:
+             stage = f"{stage} | {' | '.join(extras)}"
+ 
+-        group = re.sub(r"[^a-z0-9]+", "-", f"{actor_name}-{market}-{component}-{operation}".casefold()).strip("-")
+         candidates.append({
+-            "actor": actor_name, "bucket": bucket, "market": market, "component": component, "operation": operation,
+-            "stage": stage[:180], "url": url, "title": title, "quote": quote[:700], "group": group,
+-            "fingerprint": hashlib.sha256(f"{url}|{block.fingerprint}|{quote}".encode()).hexdigest(),
+-            "block_heading": block.heading, "block_path": block.path, "mode": f"ollama:{ollama.model}",
++            "kind": "market_application",
++            "actor": actor_name,
++            "bucket": bucket,
++            "market": market,
++            "component": component,
++            "operation": operation,
++            "process": None if fields["process_technology"] == "Non identifié" else fields["process_technology"],
++            "architecture": None if fields["application_architecture"] == "Non identifié" else fields["application_architecture"],
++            "material": None if fields["material"] == "Non identifié" else fields["material"],
++            "performance": None if fields["performance"] == "Non identifié" else fields["performance"],
++            "maturity": maturity if maturity != "Non identifié" else "Maturité à confirmer",
++            "stage": stage[:240],
++            "url": url,
++            "title": title,
++            "quote": quote[:700],
++            "group": fact_key,
++            "fact_key": fact_key,
++            "fingerprint": hashlib.sha256(fact_key.encode()).hexdigest(),
++            "source_fingerprint": hashlib.sha256(f"{url}|{block.fingerprint}|{quote}".encode()).hexdigest(),
++            "block_heading": block.heading,
++            "block_path": block.path,
++            "mode": f"ollama:{ollama.model}",
+             "confidence": min(0.98, max(0.0, confidence)),
+         })
+     return candidates
+ 
+ 
+ def _dedupe_candidates(candidates: list[dict]) -> list[dict]:
+-    """Prefer the highest-confidence representation of the same evidence."""
+-    best: dict[tuple[str, str, str, str, str], dict] = {}
++    """Prefer the richest/highest-confidence representation of the same language-independent fact."""
++    best: dict[str, dict] = {}
+     for candidate in candidates:
+-        key = (
+-            candidate["url"], _normalize_text(candidate.get("quote", "")),
+-            candidate.get("market", ""), candidate.get("component", ""), candidate.get("operation", ""),
+-        )
++        key = str(candidate.get("fact_key") or candidate.get("group") or candidate.get("fingerprint"))
+         current = best.get(key)
+-        if current is None or float(candidate.get("confidence", 0)) > float(current.get("confidence", 0)):
++        if current is None:
++            best[key] = candidate
++            continue
++        current_rank = (float(current.get("confidence", 0)), sum(current.get(k) is not None for k in ("process", "material", "performance", "architecture")))
++        new_rank = (float(candidate.get("confidence", 0)), sum(candidate.get(k) is not None for k in ("process", "material", "performance", "architecture")))
++        if new_rank > current_rank:
+             best[key] = candidate
+     return list(best.values())
+ 
++
+ def adaptive_decision(priority: bool, document_count: int, block_count: int, errors: int, source_count: int) -> tuple[str, bool]:
+     anomaly = document_count == 0 or block_count == 0 or errors >= max(1, source_count // 2)
+     return ("adaptive" if priority or anomaly else "generic", anomaly)
+@@ -573,7 +682,48 @@
+     heapq.heappush(heap, (-score, int(item.get("depth", 0)), next(counter), item))
+ 
+ 
+-def _source_coverage(actor_id: int) -> dict[str, dict[str, int | str]]:
++def _effective_crawl_score(item: dict, visited_by_type: dict[str, int], profile: dict) -> int:
++    base = int(item.get("score", 0))
++    page_type = str(item.get("page_type") or "other")
++    target = int(profile.get("coverage_targets", {}).get(page_type, 0))
++    if target and int(visited_by_type.get(page_type, 0)) < target:
++        base += int(profile.get("crawl", {}).get("coverage_boost", 500))
++        order = list(profile.get("coverage_order", ()))
++        if page_type in order:
++            base += max(0, len(order) - order.index(page_type))
++    return base
++
++
++def _pop_crawl_item(
++    heap: list[tuple[int, int, int, dict]],
++    queued_scores: dict[str, int],
++    visited: set[str],
++    visited_by_type: dict[str, int],
++    profile: dict,
++) -> tuple[dict, int] | None:
++    """Select the best current item with a temporary boost for uncovered strategic families.
++
++    Budgets are small, so rescoring the queue on each pop is simpler and more correct than keeping stale
++    heap priorities after coverage state changes.
++    """
++    candidates: list[tuple[int, int, int, int, dict]] = []
++    while heap:
++        neg_score, depth, seq, item = heapq.heappop(heap)
++        key = canonical_url(item["url"])
++        base_score = -int(neg_score)
++        if key in visited or base_score < queued_scores.get(key, base_score):
++            continue
++        candidates.append((_effective_crawl_score(item, visited_by_type, profile), base_score, -depth, -seq, item))
++    if not candidates:
++        return None
++    candidates.sort(key=lambda row: (row[0], row[1], row[2], row[3]), reverse=True)
++    chosen = candidates[0]
++    for _, base_score, neg_depth, neg_seq, item in candidates[1:]:
++        heapq.heappush(heap, (-base_score, -neg_depth, -neg_seq, item))
++    return chosen[4], chosen[1]
++
++
++def _source_coverage(actor_id: int, profile: dict | None = None) -> dict[str, dict[str, int | str]]:
+     coverage: dict[str, dict[str, int | str]] = {}
+     with connect(ACTORS_DB) as db:
+         rows = db.execute(
+@@ -583,14 +733,15 @@
+                GROUP BY page_type""",
+             (actor_id,),
+         ).fetchall()
++    strategic = set((profile or {}).get("coverage_targets", {}).keys()) or {"application", "project", "news"}
+     for row in rows:
+         discovered = int(row["discovered"] or 0)
+         ready = int(row["ready"] or 0)
+         status = "ready" if ready else "pending"
+-        if discovered and not ready:
+-            status = "error" if row["page_type"] in ("application", "project", "news") else "pending"
++        if discovered and not ready and str(row["page_type"]) in strategic:
++            status = "error"
+         coverage[str(row["page_type"])] = {"discovered": discovered, "ready": ready, "status": status}
+-    for category in ("application", "project", "news"):
++    for category in strategic:
+         coverage.setdefault(category, {"discovered": 0, "ready": 0, "status": "missing"})
+     return coverage
+ 
+@@ -612,12 +763,21 @@
+             max_depth = int(site_profile.get("crawl", {}).get("max_depth", 2))
+ 
+             with connect(ACTORS_DB) as db:
+-                db.execute(
+-                    """INSERT INTO actor_sources(actor_id,url,source_kind,page_type,source_score,discovery_depth,discovery_reason)
+-                       VALUES(?,?, 'official', 'homepage', 60, 0, 'seed')
+-                       ON CONFLICT(url) DO UPDATE SET actor_id=excluded.actor_id,active=1""",
+-                    (actor["id"], actor["official_url"]),
+-                )
++                for seed_url in seed_urls(site_profile, actor["official_url"]):
++                    seed_type, seed_score = classify_source(seed_url, profile=site_profile)
++                    source_kind = "official" if canonical_url(seed_url) == canonical_url(actor["official_url"]) else "profile-seed"
++                    if source_kind == "official":
++                        seed_type, seed_score = "homepage", max(seed_score, 60)
++                    else:
++                        seed_score = max(seed_score, 95)
++                    db.execute(
++                        """INSERT INTO actor_sources(actor_id,url,source_kind,page_type,source_score,discovery_depth,discovery_reason)
++                           VALUES(?,?,?,?,?,0,'profile-seed')
++                           ON CONFLICT(url) DO UPDATE SET actor_id=excluded.actor_id,active=1,
++                               source_score=MAX(actor_sources.source_score,excluded.source_score),
++                               page_type=CASE WHEN actor_sources.page_type IS NULL OR actor_sources.page_type='' THEN excluded.page_type ELSE actor_sources.page_type END""",
++                        (actor["id"], seed_url, source_kind, seed_type, seed_score),
++                    )
+                 initial_sources = db.execute(
+                     "SELECT * FROM actor_sources WHERE actor_id=? AND active=1",
+                     (actor["id"],),
+@@ -626,6 +786,7 @@
+             heap: list[tuple[int, int, int, dict]] = []
+             queued_scores: dict[str, int] = {}
+             visited: set[str] = set()
++            visited_by_type: dict[str, int] = defaultdict(int)
+             counter = itertools.count()
+ 
+             for source_row in initial_sources:
+@@ -648,15 +809,22 @@
+ 
+             documents: list[tuple[str, object]] = []
+             actor_errors = 0
+-
+-            while heap and len(visited) < budget:
+-                neg_score, depth, _, item = heapq.heappop(heap)
++            successful_visits = 0
++            attempts = 0
++            max_attempts = max(budget * 3, budget + 4)
++
++            while heap and successful_visits < budget and attempts < max_attempts:
++                popped = _pop_crawl_item(heap, queued_scores, visited, visited_by_type, site_profile)
++                if not popped:
++                    break
++                item, score = popped
+                 url = item["url"]
++                depth = int(item.get("depth", 0))
+                 key = canonical_url(url)
+-                score = -neg_score
+-                if key in visited or score < queued_scores.get(key, score):
++                if key in visited:
+                     continue
+                 visited.add(key)
++                attempts += 1
+ 
+                 source_id = item.get("source_id")
+                 if not source_id:
+@@ -688,6 +856,7 @@
+                         profile=site_profile,
+                     )
+                     fetched_score = max(int(fetched_score), int(document.page_score))
++                    visited_by_type[fetched_type] += 1
+ 
+                     with connect(ACTORS_DB) as db:
+                         db.execute(
+@@ -738,6 +907,7 @@
+                                     })
+ 
+                     scanned += 1
++                    successful_visits += 1
+                     changed += int(is_changed)
+                 except Exception as exc:
+                     errors += 1
+@@ -748,14 +918,15 @@
+                             (utc_now(), str(exc)[:300], source_id),
+                         )
+ 
+-            coverage = _source_coverage(actor["id"])
++            coverage = _source_coverage(actor["id"], site_profile)
+             profile, generated_by, confidence = build_profile(actor, documents, ollama, coverage=coverage, site_profile=site_profile)
+             encoded, digest = profile_json(profile)
+             block_count = sum(len(document.blocks) for _, document in documents)
+             strategy, anomaly = adaptive_decision(bool(actor["priority"]), len(documents), block_count, actor_errors, max(1, len(visited)))
+             fallback += int(anomaly and not actor["priority"])
+ 
+-            core = [coverage[name] for name in ("application", "project", "news")]
++            strategic_names = list(site_profile.get("coverage_targets", {}).keys())
++            core = [coverage[name] for name in strategic_names]
+             coverage_discovered = sum(int(item["discovered"]) > 0 for item in core)
+             coverage_ready = sum(int(item["ready"]) > 0 for item in core)
+             if anomaly or (coverage_discovered > 0 and coverage_ready == 0):
+@@ -788,7 +959,7 @@
+             "UPDATE collection_runs SET finished_at=?,status=?,scanned=?,changed=?,errors=?,message=? WHERE id=?",
+             (
+                 utc_now(), "completed", scanned, changed, errors,
+-                f"{profiled} profils; {discovered} pages découvertes; file dynamique; {fallback} bascules adaptatives",
++                f"{profiled} profils; {discovered} pages découvertes; file dynamique coverage-first; {fallback} bascules adaptatives",
+                 run_id,
+             ),
+         )
+@@ -800,19 +971,206 @@
+         "profiled": profiled,
+         "adaptive_fallbacks": fallback,
+         "ollama": ollama.available(),
+-        "crawler": "deterministic-priority-queue-v1",
++        "crawler": "deterministic-coverage-first-v2",
+     }
+ 
+-def scrape_market(max_pages: int = 80) -> dict:
++def _source_family(page_type: str | None) -> str:
++    page_type = str(page_type or "other")
++    if page_type in {"service", "capability", "product"}:
++        return "service_capability"
++    if page_type in {"application", "case_study", "market"}:
++        return "application_market"
++    if page_type == "technology":
++        return "technology"
++    if page_type == "project":
++        return "project"
++    if page_type == "news":
++        return "news"
++    return "other"
++
++
++def _select_market_sources(max_pages: int = 120) -> list[dict]:
++    """Coverage-balanced source selection: first one page/family/actor, then deepen priority actors."""
++    with connect(ACTORS_DB) as db:
++        rows = [dict(row) for row in db.execute(
++            """SELECT a.id AS actor_id,a.name,a.priority,a.official_url,p.strategy,
++                      s.id AS source_id,s.url,s.page_type,s.source_score
++               FROM actor_sources s
++               JOIN actors a ON a.id=s.actor_id
++               LEFT JOIN site_profiles p ON p.actor_id=a.id
++               WHERE s.active=1 AND COALESCE(s.page_type,'')!='ignore'
++                 AND (s.last_http_status IS NULL OR s.last_http_status BETWEEN 200 AND 399)
++               ORDER BY a.priority DESC,a.name,s.source_score DESC,s.id"""
++        ).fetchall()]
++
++    by_actor: dict[int, list[dict]] = defaultdict(list)
++    actor_meta: dict[int, dict] = {}
++    for row in rows:
++        actor_id = int(row["actor_id"])
++        row["source_family"] = _source_family(row.get("page_type"))
++        by_actor[actor_id].append(row)
++        actor_meta.setdefault(actor_id, row)
++
++    selected: list[dict] = []
++    selected_ids: set[int] = set()
++    actor_ids = sorted(by_actor, key=lambda aid: (-int(actor_meta[aid]["priority"]), str(actor_meta[aid]["name"])))
++    family_order = ["service_capability", "application_market", "technology", "project", "news", "other"]
++
++    def take(actor_id: int, family: str, count: int) -> None:
++        if len(selected) >= max_pages or count <= 0:
++            return
++        options = [row for row in by_actor[actor_id] if row["source_family"] == family and int(row["source_id"]) not in selected_ids]
++        options.sort(key=lambda row: (-int(row.get("source_score") or 0), int(row["source_id"])))
++        for row in options[:count]:
++            if len(selected) >= max_pages:
++                break
++            selected.append(row)
++            selected_ids.add(int(row["source_id"]))
++
++    # Pass 1: broad coverage for every actor before one rich category can monopolise the global limit.
++    for family in family_order:
++        for actor_id in actor_ids:
++            take(actor_id, family, 1)
++            if len(selected) >= max_pages:
++                return selected
++
++    # Pass 2: deepen priority actors according to their profile quotas.
++    for actor_id in actor_ids:
++        meta = actor_meta[actor_id]
++        if not int(meta["priority"]):
++            continue
++        profile = get_site_profile({"name": meta["name"], "official_url": meta["official_url"]})
++        quotas = profile.get("market_source_quotas", {})
++        for family in family_order:
++            already = sum(1 for row in selected if int(row["actor_id"]) == actor_id and row["source_family"] == family)
++            take(actor_id, family, max(0, int(quotas.get(family, 0)) - already))
++            if len(selected) >= max_pages:
++                return selected
++
++    # Pass 3: fill remaining capacity by score, still preserving deterministic ordering.
++    remaining = [row for row in rows if int(row["source_id"]) not in selected_ids]
++    remaining.sort(key=lambda row: (-int(row["priority"]), -int(row.get("source_score") or 0), str(row["name"]), int(row["source_id"])))
++    selected.extend(remaining[: max(0, max_pages - len(selected))])
++    return selected[:max_pages]
++
++
++def _language_from_url(url: str) -> str | None:
++    parts = [part.casefold() for part in urlparse(url).path.split("/") if part]
++    if not parts:
++        return None
++    if parts[0] in {"fr", "fr-fr"}:
++        return "fr"
++    if parts[0] in {"en", "en-gb", "en-us"}:
++        return "en"
++    if parts[0] in {"de", "de-de"}:
++        return "de"
++    return None
++
++
++def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
++    """Store one canonical fact and one or more multilingual source proofs."""
++    stamp = utc_now()
++    fact_key = candidate["fact_key"]
++    row = db.execute("SELECT id,field_confidence FROM evidence WHERE fact_key=?", (fact_key,)).fetchone()
++    fact_added = 0
++    if row:
++        evidence_id = int(row["id"])
++        old_confidence = float(row["field_confidence"] or 0)
++        if float(candidate.get("confidence", 0)) > old_confidence:
++            db.execute(
++                """UPDATE evidence SET industrial_stage=?,source_url=?,source_title=?,quote=?,field_confidence=?,
++                          laser_process=COALESCE(?,laser_process),material=COALESCE(?,material),performance=COALESCE(?,performance),
++                          maturity_level=COALESCE(?,maturity_level),updated_at=? WHERE id=?""",
++                (
++                    candidate["stage"], candidate["url"], candidate["title"], candidate["quote"], candidate["confidence"],
++                    candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("maturity"),
++                    stamp, evidence_id,
++                ),
++            )
++    else:
++        review_status = "accepted" if candidate["bucket"] in {"existing", "radar"} else "review"
++        evidence_id = db.execute(
++            """INSERT INTO evidence(
++                   actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,quote,source_group,
++                   fingerprint,fact_key,evidence_kind,language,review_status,created_at,updated_at,block_heading,block_path,
++                   extraction_mode,field_confidence,laser_process,material,performance,maturity_level
++               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?)""",
++            (
++                candidate["actor"], candidate["bucket"], candidate["market"], candidate["component"], candidate["operation"],
++                candidate["stage"], candidate["url"], candidate["title"], candidate["quote"], fact_key,
++                candidate["fingerprint"], fact_key, _language_from_url(candidate["url"]), review_status, stamp, stamp,
++                candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
++                candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("maturity"),
++            ),
++        ).lastrowid
++        fact_added = 1
++
++    before = db.total_changes
++    db.execute(
++        """INSERT OR IGNORE INTO evidence_sources(
++               evidence_id,source_url,source_title,quote,language,block_heading,block_path,extraction_mode,field_confidence,
++               fingerprint,created_at
++           ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
++        (
++            evidence_id, candidate["url"], candidate["title"], candidate["quote"], _language_from_url(candidate["url"]),
++            candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
++            candidate["source_fingerprint"], stamp,
++        ),
++    )
++    source_added = int(db.total_changes > before)
++    return fact_added, source_added
++
++
++def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
++    stamp = utc_now()
++    row = db.execute("SELECT id,field_confidence FROM offers WHERE fact_key=?", (candidate["fact_key"],)).fetchone()
++    fact_added = 0
++    if row:
++        offer_id = int(row["id"])
++        if float(candidate.get("confidence", 0)) > float(row["field_confidence"] or 0):
++            db.execute(
++                """UPDATE offers SET industrial_stage=?,source_url=?,source_title=?,quote=?,field_confidence=?,
++                          material=COALESCE(?,material),performance=COALESCE(?,performance),updated_at=? WHERE id=?""",
++                (
++                    candidate["stage"], candidate["url"], candidate["title"], candidate["quote"], candidate["confidence"],
++                    candidate.get("material"), candidate.get("performance"), stamp, offer_id,
++                ),
++            )
++    else:
++        offer_id = db.execute(
++            """INSERT INTO offers(
++                   actor_name,offer_type,capability,operation,laser_process,material,performance,industrial_stage,page_type,
++                   source_url,source_title,quote,fact_key,fingerprint,review_status,field_confidence,created_at,updated_at
++               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
++            (
++                candidate["actor"], candidate["offer_type"], candidate["capability"], candidate.get("operation"), candidate.get("process"),
++                candidate.get("material"), candidate.get("performance"), candidate["stage"], candidate["page_type"], candidate["url"],
++                candidate["title"], candidate["quote"], candidate["fact_key"], candidate["fingerprint"], candidate["confidence"], stamp, stamp,
++            ),
++        ).lastrowid
++        fact_added = 1
++
++    before = db.total_changes
++    db.execute(
++        """INSERT OR IGNORE INTO offer_sources(
++               offer_id,source_url,source_title,quote,language,block_heading,block_path,extraction_mode,field_confidence,fingerprint,created_at
++           ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
++        (
++            offer_id, candidate["url"], candidate["title"], candidate["quote"], _language_from_url(candidate["url"]),
++            candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"], candidate["source_fingerprint"], stamp,
++        ),
++    )
++    source_added = int(db.total_changes > before)
++    return fact_added, source_added
++
++
++def scrape_market(max_pages: int = 120) -> dict:
+     with connect(MARKET_DB) as db:
+         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
+-    with connect(ACTORS_DB) as db:
+-        sources = db.execute("""SELECT a.name,a.priority,a.official_url,p.strategy,s.id AS source_id,s.url,s.page_type,s.source_score FROM actor_sources s
+-                                JOIN actors a ON a.id=s.actor_id LEFT JOIN site_profiles p ON p.actor_id=a.id
+-                                WHERE s.active=1 AND COALESCE(s.page_type,'')!='ignore'
+-                                ORDER BY a.priority DESC,s.source_score DESC,s.id LIMIT ?""", (max_pages,)).fetchall()
+-    scanned = added = rejected = errors = 0
++    sources = _select_market_sources(max_pages=max_pages)
++    scanned = market_added = offers_added = sources_added = rejected = errors = 0
+     ollama = OllamaClient()
++
+     with httpx.Client(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as client:
+         for source in sources:
+             try:
+@@ -820,39 +1178,63 @@
+                 response.raise_for_status()
+                 site_profile = get_site_profile({"name": source["name"], "official_url": source["official_url"]})
+                 document = parse_document(response.text, str(response.url), profile=site_profile)
+-                candidates = []
++                market_candidates: list[dict] = []
++                offer_candidates: list[dict] = []
++
+                 for index, block in enumerate(document.blocks):
+-                    _, context = _context_for_block(document.title, document.blocks, index)
+-                    candidate = _candidate(source["name"], str(response.url), document.title, block, context_text=context)
++                    _, section = _context_for_block(document.title, document.blocks, index)
++                    candidate = _candidate(source["name"], str(response.url), document.title, block, context_text=section)
+                     if candidate:
+-                        candidates.append(candidate)
+-                if source["strategy"] == "adaptive":
+-                    candidates.extend(_ai_candidates(source["name"], str(response.url), document.title, document.blocks, ollama))
+-                candidates = _dedupe_candidates(candidates)
++                        market_candidates.append(candidate)
++                    offer_candidates.extend(
++                        _offer_candidates(source["name"], str(response.url), document.title, block, page_type=document.page_type)
++                    )
++
++                # AI remains a conservative secondary route for complete market facts only.
++                if source.get("strategy") == "adaptive":
++                    market_candidates.extend(_ai_candidates(source["name"], str(response.url), document.title, document.blocks, ollama))
++
++                market_candidates = _dedupe_candidates(market_candidates)
++                offer_candidates = _dedupe_candidates(offer_candidates)
+                 scanned += 1
+-                if not candidates:
++                if not market_candidates and not offer_candidates:
+                     rejected += 1
+                     continue
++
+                 with connect(MARKET_DB) as db:
+-                    for candidate in candidates:
+-                        before = db.total_changes
+-                        db.execute("""INSERT OR IGNORE INTO evidence(actor_name,bucket,market,component,operation,industrial_stage,
+-                                      source_url,source_title,quote,source_group,fingerprint,review_status,created_at,updated_at,
+-                                      block_heading,block_path,extraction_mode,field_confidence)
+-                                      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+-                                   (candidate["actor"], candidate["bucket"], candidate["market"], candidate["component"],
+-                                    candidate["operation"], candidate["stage"], candidate["url"], candidate["title"], candidate["quote"],
+-                                    candidate["group"], candidate["fingerprint"], "accepted" if candidate["bucket"] in ("existing", "radar") else "review",
+-                                    utc_now(), utc_now(), candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"]))
+-                        added += int(db.total_changes > before)
++                    for candidate in market_candidates:
++                        fact_added, proof_added = _upsert_market_candidate(db, candidate)
++                        market_added += fact_added
++                        sources_added += proof_added
++                    for candidate in offer_candidates:
++                        fact_added, proof_added = _upsert_offer_candidate(db, candidate)
++                        offers_added += fact_added
++                        sources_added += proof_added
+             except Exception as exc:
+                 errors += 1
+                 with connect(ACTORS_DB) as db:
+                     db.execute("UPDATE actor_sources SET last_error=?,ambiguous=1 WHERE id=?", (str(exc)[:300], source["source_id"]))
++
+     with connect(MARKET_DB) as db:
+-        db.execute("UPDATE collection_runs SET finished_at=?,status=?,scanned=?,added=?,rejected=?,errors=?,message=? WHERE id=?",
+-                   (utc_now(), "completed", scanned, added, rejected, errors, "Extraction par blocs; menus exclus des preuves", run_id))
+-    return {"scanned": scanned, "added": added, "rejected": rejected, "errors": errors, "ollama": ollama.available()}
++        db.execute(
++            """UPDATE collection_runs SET finished_at=?,status=?,scanned=?,added=?,offers_added=?,sources_added=?,rejected=?,errors=?,message=?
++               WHERE id=?""",
++            (
++                utc_now(), "completed", scanned, market_added, offers_added, sources_added, rejected, errors,
++                "Collecte coverage-balanced; faits marché stricts; offres/capacités séparées; preuves multilingues dédupliquées",
++                run_id,
++            ),
++        )
++    return {
++        "scanned": scanned,
++        "market_added": market_added,
++        "offers_added": offers_added,
++        "proof_sources_added": sources_added,
++        "rejected": rejected,
++        "errors": errors,
++        "ollama": ollama.available(),
++        "source_selection": "coverage-balanced-v2",
++    }
+ 
+ 
+ def scrape_technology(limit: int = 25) -> dict:
+--- /mnt/data/observatoire_v3_3_dev/site_profiles.py	2026-08-23 16:12:22.194089002 +0000
++++ /mnt/data/observatoire_v3_3_1_dev/site_profiles.py	2026-08-23 16:38:17.085141789 +0000
+@@ -2,11 +2,11 @@
+ 
+ from copy import deepcopy
+ from typing import Any
+-from urllib.parse import urlparse
++from urllib.parse import urljoin, urlparse
+ 
+ 
+ DEFAULT_SITE_PROFILE: dict[str, Any] = {
+-    "profile_version": 1,
++    "profile_version": 2,
+     "ollama_profile_assist": False,
+     "languages": ["en", "fr", "de"],
+     "crawl": {
+@@ -14,7 +14,28 @@
+         "standard_budget": 6,
+         "max_depth": 2,
+         "max_links_per_page": 160,
++        # Coverage-first: an uncovered strategic family receives a large temporary boost.
++        "coverage_boost": 500,
+     },
++    # Minimum number of visited pages to aim for when the family is discovered.
++    # The queue may then deepen the best-scoring families with remaining budget.
++    "coverage_targets": {
++        "service": 1,
++        "capability": 1,
++        "technology": 1,
++        "application": 1,
++        "case_study": 1,
++        "market": 1,
++        "project": 1,
++        "news": 1,
++    },
++    "coverage_order": [
++        "service", "capability", "technology", "application", "case_study",
++        "market", "project", "news", "product", "publication", "equipment", "other",
++    ],
++    # Explicit deterministic hubs are useful when menus are incomplete or JS-driven.
++    # Paths are joined to the actor's official URL and are still subject to HTTP validation.
++    "seed_paths": [],
+     "priority_paths": [],
+     "ignore_paths": [
+         "/contact", "/privacy", "/cookies", "/legal", "/mentions-legales",
+@@ -23,18 +44,27 @@
+     "page_type_boosts": {
+         "application": 12,
+         "case_study": 12,
+-        "project": 10,
+-        "news": 6,
+-        "service": 10,
+-        "capability": 10,
+-        "technology": 8,
+-        "market": 5,
+-        "product": 3,
++        "project": 8,
++        "news": 3,
++        "service": 16,
++        "capability": 16,
++        "technology": 14,
++        "market": 12,
++        "product": 8,
+         "publication": 2,
+         "equipment": -5,
+         "about": -8,
+         "other": 0,
+     },
++    # Market extraction must not be monopolised by one page family.
++    "market_source_quotas": {
++        "service_capability": 3,
++        "application_market": 3,
++        "technology": 2,
++        "project": 2,
++        "news": 1,
++        "other": 1,
++    },
+     "preferred_content_roots": ["main", "[role=main]", "body"],
+     "extra_candidate_selectors": [],
+     "priority_terms": [
+@@ -44,14 +74,46 @@
+ }
+ 
+ 
+-# Overrides intentionally stay small. The generic crawler remains authoritative;
+-# these entries only express durable site-specific exceptions/known high-value paths.
++# Overrides intentionally remain compact. The generic crawler stays authoritative;
++# profiles only encode stable high-value hubs and site-specific exceptions.
+ SITE_OVERRIDES: dict[str, dict[str, Any]] = {
+     "ALPHANOV": {
+-        "priority_paths": ["/collaborative-projects/", "/applications/", "/news/"],
+-        "priority_terms": ["pilot line", "collaborative project"],
++        "seed_paths": [
++            "/produits-et-services/procedes-laser",
++            "/en/products-and-services/laser-machining-and-micro-machining",
++            "/secteurs-applicatifs/lasers",
++            "/en/application-sectors/lasers",
++            "/produits-et-services/",
++            "/en/products-and-services/",
++            "/secteurs-applicatifs/",
++            "/en/application-sectors/",
++            "/collaborative-projects/",
++            "/news/",
++        ],
++        "priority_paths": [
++            "/produits-et-services/", "/products-and-services/", "/en/products-and-services/",
++            "/secteurs-applicatifs/", "/application-sectors/", "/en/application-sectors/",
++            "/collaborative-projects/", "/projets-collaboratifs/",
++            "/applications/", "/news/", "/actualites/",
++        ],
++        "priority_terms": [
++            "procédés laser", "procedes laser", "laser machining", "micro-machining",
++            "surface engineering", "ingénierie de surface", "transparent materials",
++            "matériaux transparents", "pilot line", "collaborative project",
++        ],
++        "coverage_targets": {
++            "service": 2,
++            "capability": 1,
++            "technology": 2,
++            "application": 1,
++            "case_study": 1,
++            "market": 1,
++            "project": 1,
++            "news": 1,
++        },
+     },
+     "MANUTECH USD": {
++        "seed_paths": ["/en/applications/", "/en/projects/", "/en/blog/"],
+         "priority_paths": ["/applications/", "/projects/", "/blog/"],
+         "extra_candidate_selectors": ["[class*=application]", "[class*=project]"],
+     },
+@@ -84,7 +146,6 @@
+         if isinstance(value, dict) and isinstance(merged.get(key), dict):
+             merged[key].update(value)
+         elif isinstance(value, list) and isinstance(merged.get(key), list):
+-            # Preserve generic defaults, then append site exceptions without duplicates.
+             merged[key] = list(dict.fromkeys([*merged[key], *value]))
+         else:
+             merged[key] = deepcopy(value)
+@@ -113,3 +174,11 @@
+ def crawl_budget(profile: dict[str, Any], priority: bool) -> int:
+     crawl = profile.get("crawl", {})
+     return int(crawl.get("priority_budget" if priority else "standard_budget", 12 if priority else 6))
++
++
++def seed_urls(profile: dict[str, Any], official_url: str) -> list[str]:
++    """Return deterministic high-value entry points, preserving the official host/language routing."""
++    urls = [official_url]
++    for path in profile.get("seed_paths", ()):
++        urls.append(urljoin(official_url.rstrip("/") + "/", str(path).lstrip("/")))
++    return list(dict.fromkeys(urls))
