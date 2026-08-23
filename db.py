@@ -136,6 +136,19 @@ def market_fact_key(actor: str, bucket: str, market: str, component: str, operat
     return "|".join(_slug(value) for value in (actor, bucket, market, component, operation))
 
 
+def application_key(actor: str, market: str, component: str, operation: str) -> str:
+    """Language- and maturity-independent identity for one market application.
+
+    Unlike ``market_fact_key``, this deliberately excludes the bucket, so an application that
+    moves from radar to industrial production keeps the same evidence row instead of forking
+    into a second fact. See ``evidence_bucket_transitions`` for the maturity history.
+    """
+    return "|".join(_slug(value) for value in (actor, market, component, operation))
+
+
+BUCKET_RANK = {"existing": 2, "radar": 1, "pending": 0, "rejected": -1}
+
+
 def offer_fact_key(actor: str, offer_type: str, capability: str, operation: str | None, laser_process: str | None) -> str:
     return "|".join(_slug(value) for value in (actor, offer_type, capability, operation or "", laser_process or ""))
 
@@ -196,6 +209,51 @@ def _migrate_evidence_fact_model(db: sqlite3.Connection) -> None:
             )
             if int(row["id"]) != rep_id:
                 db.execute("DELETE FROM evidence WHERE id=?", (row["id"],))
+
+
+def _migrate_application_keys(db: sqlite3.Connection) -> None:
+    """Backfill application_key and merge rows that only differed by bucket.
+
+    Before this migration, ``market_fact_key`` embedded the bucket, so the same application
+    moving from radar to industrial production created a second evidence row instead of
+    updating the first. This merges those pairs, keeps the highest-maturity bucket as the
+    canonical one, moves every source proof onto the surviving row, and records the merge as
+    a transition (stamped with the migration time, since the real transition date predates
+    this column and is not recoverable).
+    """
+    rows = db.execute("SELECT * FROM evidence WHERE evidence_kind='market_application'").fetchall()
+    if not rows:
+        return
+
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        key = application_key(row["actor_name"], row["market"] or "", row["component"] or "", row["operation"] or "")
+        grouped.setdefault(key, []).append(row)
+
+    stamp = utc_now()
+    for key, members in grouped.items():
+        if len(members) == 1:
+            db.execute("UPDATE evidence SET application_key=? WHERE id=?", (key, members[0]["id"]))
+            continue
+
+        def rank(row: sqlite3.Row) -> tuple[int, float, int]:
+            confidence = float(row["field_confidence"] or 0) if "field_confidence" in row.keys() else 0.0
+            return (BUCKET_RANK.get(row["bucket"], -1), confidence, int(row["id"]))
+
+        ordered = sorted(members, key=rank, reverse=True)
+        representative = ordered[0]
+        rep_id = int(representative["id"])
+        db.execute("UPDATE evidence SET application_key=? WHERE id=?", (key, rep_id))
+
+        for row in ordered[1:]:
+            old_id = int(row["id"])
+            db.execute("UPDATE evidence_sources SET evidence_id=? WHERE evidence_id=?", (rep_id, old_id))
+            if row["bucket"] != representative["bucket"]:
+                db.execute(
+                    "INSERT INTO evidence_bucket_transitions(evidence_id,from_bucket,to_bucket,changed_at) VALUES(?,?,?,?)",
+                    (rep_id, row["bucket"], representative["bucket"], stamp),
+                )
+            db.execute("DELETE FROM evidence WHERE id=?", (old_id,))
 
 
 def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: str) -> None:
@@ -394,6 +452,7 @@ def init_databases() -> None:
             "language": "TEXT",
             "fact_status": "TEXT NOT NULL DEFAULT 'review'",
             "last_seen_at": "TEXT",
+            "application_key": "TEXT",
         })
         db.executescript(
             """
@@ -451,6 +510,16 @@ def init_databases() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS offer_sources_fact_idx ON offer_sources(offer_id);
+
+            CREATE TABLE IF NOT EXISTS evidence_bucket_transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                evidence_id INTEGER NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
+                from_bucket TEXT,
+                to_bucket TEXT NOT NULL,
+                changed_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS evidence_bucket_transitions_evidence_idx
+                ON evidence_bucket_transitions(evidence_id);
             """
         )
         _add_columns(db, "offers", {
@@ -473,9 +542,12 @@ def init_databases() -> None:
         db.execute("UPDATE evidence SET last_seen_at=COALESCE(last_seen_at,updated_at,created_at)")
         db.execute("UPDATE offers SET last_seen_at=COALESCE(last_seen_at,updated_at,created_at)")
         _migrate_evidence_fact_model(db)
+        _migrate_application_keys(db)
         db.executescript(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS evidence_fact_key_uq ON evidence(fact_key) WHERE fact_key IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS evidence_application_key_uq
+                ON evidence(application_key) WHERE application_key IS NOT NULL;
             CREATE INDEX IF NOT EXISTS evidence_status_bucket_idx
                 ON evidence(fact_status,evidence_kind,bucket,created_at);
             CREATE INDEX IF NOT EXISTS evidence_last_seen_idx

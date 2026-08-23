@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from db import ACTORS_DB, MARKET_DB, TECH_DB, connect, market_fact_key, offer_fact_key, utc_now
+from db import ACTORS_DB, BUCKET_RANK, MARKET_DB, TECH_DB, application_key, connect, market_fact_key, offer_fact_key, utc_now
 from hybrid import ContentBlock, OllamaClient, block_payload, build_profile, canonical_url, classify_source, normalize_page_type, parse_document, profile_json
 from site_profiles import crawl_budget, get_site_profile, seed_urls
 
@@ -820,6 +820,7 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
         return None
 
     group = market_fact_key(actor_name, bucket, market, component, operation)
+    app_key = application_key(actor_name, market, component, operation)
     source_fingerprint = hashlib.sha256(f"{url}|{block.fingerprint}|{quote}".encode()).hexdigest()
     fact_fingerprint = hashlib.sha256(group.encode()).hexdigest()
     stage_parts = [maturity]
@@ -852,6 +853,7 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
         "quote": quote,
         "group": group,
         "fact_key": group,
+        "application_key": app_key,
         "fingerprint": fact_fingerprint,
         "source_fingerprint": source_fingerprint,
         "block_heading": block.heading,
@@ -1032,6 +1034,7 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
         component = fields["component"]
         operation = fields["operation"]
         fact_key = market_fact_key(actor_name, bucket, market, component, operation)
+        app_key = application_key(actor_name, market, component, operation)
         extras = []
         for key, label in (("process_technology", "Procédé"), ("application_architecture", "Architecture"), ("material", "Matériau"), ("performance", "Performance")):
             if fields[key] != "Non identifié":
@@ -1060,6 +1063,7 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
             "quote": quote[:700],
             "group": fact_key,
             "fact_key": fact_key,
+            "application_key": app_key,
             "fingerprint": hashlib.sha256(fact_key.encode()).hexdigest(),
             "source_fingerprint": hashlib.sha256(f"{url}|{block.fingerprint}|{quote}".encode()).hexdigest(),
             "block_heading": block.heading,
@@ -1544,24 +1548,56 @@ def _ensure_market_fact_status_column(db) -> None:
         db.execute("ALTER TABLE evidence ADD COLUMN fact_status TEXT NOT NULL DEFAULT 'review'")
     if "last_seen_at" not in columns:
         db.execute("ALTER TABLE evidence ADD COLUMN last_seen_at TEXT")
+    if "application_key" not in columns:
+        db.execute("ALTER TABLE evidence ADD COLUMN application_key TEXT")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS evidence_bucket_transitions (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               evidence_id INTEGER NOT NULL,
+               from_bucket TEXT,
+               to_bucket TEXT NOT NULL,
+               changed_at TEXT NOT NULL
+           )"""
+    )
 
 
 def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
-    """Store one canonical fact and one or more multilingual source proofs."""
+    """Store one canonical fact and one or more multilingual source proofs.
+
+    Facts are looked up by ``application_key`` (actor+market+component+operation, independent
+    of maturity) instead of the legacy bucket-inclusive ``fact_key``, so an application that
+    moves from radar to industrial production between two collections updates the same row
+    instead of forking a second one. Maturity only ever moves forward automatically
+    (radar -> existing, tracked in ``evidence_bucket_transitions``); a later radar-level signal
+    for an already-existing application is kept as supporting evidence but does not downgrade
+    the canonical bucket. Callers that don't supply ``application_key`` (legacy/hand-built
+    candidates, e.g. in tests) fall back to ``fact_key``, preserving the previous bucket-scoped
+    behaviour rather than crashing.
+    """
     _ensure_market_fact_status_column(db)
     stamp = utc_now()
     fact_key = candidate["fact_key"]
-    row = db.execute("SELECT id,field_confidence FROM evidence WHERE fact_key=?", (fact_key,)).fetchone()
+    app_key = candidate.get("application_key") or fact_key
+    row = db.execute("SELECT id,field_confidence,bucket FROM evidence WHERE application_key=?", (app_key,)).fetchone()
     fact_added = 0
     if row:
         evidence_id = int(row["id"])
         old_confidence = float(row["field_confidence"] or 0)
+        old_bucket = row["bucket"]
+        new_bucket = candidate["bucket"]
+        upgrades_bucket = BUCKET_RANK.get(new_bucket, -1) > BUCKET_RANK.get(old_bucket, -1)
+        effective_bucket = new_bucket if upgrades_bucket else old_bucket
+        if upgrades_bucket and new_bucket != old_bucket:
+            db.execute(
+                "INSERT INTO evidence_bucket_transitions(evidence_id,from_bucket,to_bucket,changed_at) VALUES(?,?,?,?)",
+                (evidence_id, old_bucket, new_bucket, stamp),
+            )
         # Validity is independent from maturity and from confidence ranking: a fresh deterministic
         # relation may validate an older review fact even when its numeric confidence is not higher.
         if candidate.get("fact_status") == "validated":
             db.execute(
                 "UPDATE evidence SET fact_status='validated',review_status='accepted',bucket=?,updated_at=? WHERE id=?",
-                (candidate["bucket"], stamp, evidence_id),
+                (effective_bucket, stamp, evidence_id),
             )
         if float(candidate.get("confidence", 0)) > old_confidence:
             db.execute(
@@ -1572,7 +1608,7 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
                 (
                     candidate["stage"], candidate["url"], candidate["title"], candidate["quote"], candidate["confidence"],
                     candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("maturity"),
-                    candidate.get("relation_strength"), candidate.get("source_role"), candidate["bucket"],
+                    candidate.get("relation_strength"), candidate.get("source_role"), effective_bucket,
                     candidate.get("fact_status", "validated"), "accepted" if candidate.get("fact_status") == "validated" else "review",
                     stamp, evidence_id,
                 ),
@@ -1583,18 +1619,22 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
         evidence_id = db.execute(
             """INSERT INTO evidence(
                    actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,quote,source_group,
-                   fingerprint,fact_key,evidence_kind,language,review_status,created_at,updated_at,block_heading,block_path,
+                   fingerprint,fact_key,application_key,evidence_kind,language,review_status,created_at,updated_at,block_heading,block_path,
                    extraction_mode,field_confidence,laser_process,material,performance,maturity_level,relation_strength,relation_evidence,source_role,fact_status
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 candidate["actor"], candidate["bucket"], candidate["market"], candidate["component"], candidate["operation"],
                 candidate["stage"], candidate["url"], candidate["title"], candidate["quote"], fact_key,
-                candidate["fingerprint"], fact_key, _language_from_url(candidate["url"]), review_status, stamp, stamp,
+                candidate["fingerprint"], fact_key, app_key, _language_from_url(candidate["url"]), review_status, stamp, stamp,
                 candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
                 candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("maturity"),
                 candidate.get("relation_strength"), candidate.get("relation_evidence"), candidate.get("source_role"), fact_status,
             ),
         ).lastrowid
+        db.execute(
+            "INSERT INTO evidence_bucket_transitions(evidence_id,from_bucket,to_bucket,changed_at) VALUES(?,?,?,?)",
+            (evidence_id, None, candidate["bucket"], stamp),
+        )
         fact_added = 1
 
     # ``updated_at`` means the canonical representation changed; ``last_seen_at`` means
