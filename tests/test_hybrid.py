@@ -10,8 +10,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import db as dbmod
 import scrapers
-from db import ACTORS_DB, connect, init_databases, scalar
+from db import connect, scalar
 from hybrid import ContentBlock, classify_source, parse_document
 from scrapers import APPLICATION_ARCHITECTURES, PROCESS_TECHNOLOGIES, _candidate, _context_for_block, _match_label, adaptive_decision
 
@@ -93,7 +94,6 @@ class HybridExtractionTests(unittest.TestCase):
         self.assertEqual("TGV", _match_label("Femtosecond laser TGV glass via drilling for interposer packaging.", APPLICATION_ARCHITECTURES))
 
     def test_first_mapping_checks_three_manutech_sections_immediately(self):
-        init_databases()
         homepage = """<html><head><title>MANUTECH USD</title></head><body><header><nav>
           <a href="/en/applications/">Applications</a><a href="/en/projects/">Projects</a>
           <a href="/en/blog/">News</a><a href="/en/contact/">Contact</a>
@@ -123,8 +123,19 @@ class HybridExtractionTests(unittest.TestCase):
                 return FakeResponse(url)
 
         with TemporaryDirectory() as directory:
-            isolated_db = Path(directory) / "actors.db"
-            copy2(ACTORS_DB, isolated_db)
+            directory_path = Path(directory)
+            # Build a freshly-seeded template in an isolated location instead of touching the
+            # project's real data/ files: init_databases() mutates whatever ACTORS_DB/MARKET_DB/
+            # TECH_DB point to, including running destructive migrations (dedup merges), so it
+            # must never run against the real paths from a test.
+            template_actors_db = directory_path / "template_actors.db"
+            with patch.object(dbmod, "ACTORS_DB", template_actors_db), \
+                 patch.object(dbmod, "MARKET_DB", directory_path / "template_market.db"), \
+                 patch.object(dbmod, "TECH_DB", directory_path / "template_technology.db"):
+                dbmod.init_databases()
+
+            isolated_db = directory_path / "actors.db"
+            copy2(template_actors_db, isolated_db)
             with connect(isolated_db) as db:
                 db.execute("UPDATE actors SET active=CASE WHEN name='MANUTECH USD' THEN 1 ELSE 0 END")
                 actor_id = db.execute("SELECT id FROM actors WHERE name='MANUTECH USD'").fetchone()[0]
@@ -152,9 +163,15 @@ class HybridExtractionTests(unittest.TestCase):
         self.assertEqual(("adaptive", True), adaptive_decision(False, 0, 0, 2, 2))
 
     def test_exactly_four_priority_profiles_are_seeded(self):
-        init_databases()
-        count = scalar(ACTORS_DB, """SELECT COUNT(*) FROM site_profiles p JOIN actors a ON a.id=p.actor_id
-                                      WHERE a.priority=1 AND p.strategy='adaptive'""")
+        with TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            actors_db = directory_path / "actors.db"
+            with patch.object(dbmod, "ACTORS_DB", actors_db), \
+                 patch.object(dbmod, "MARKET_DB", directory_path / "market.db"), \
+                 patch.object(dbmod, "TECH_DB", directory_path / "technology.db"):
+                dbmod.init_databases()
+            count = scalar(actors_db, """SELECT COUNT(*) FROM site_profiles p JOIN actors a ON a.id=p.actor_id
+                                          WHERE a.priority=1 AND p.strategy='adaptive'""")
         self.assertEqual(4, count)
 
 
