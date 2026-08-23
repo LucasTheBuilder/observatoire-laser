@@ -106,5 +106,43 @@ class V34MarketEngineTests(unittest.TestCase):
         self.assertEqual(1, diagnostics["relation_too_weak"])
 
 
+class NegationGuardTests(unittest.TestCase):
+    def test_explicit_denial_does_not_validate_the_relation(self):
+        diagnostics: dict[str, int] = {}
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            text="We do not offer femtosecond laser texturing of medical stents.",
+            path="main > article",
+        )
+        candidate = _candidate("Example", "https://example.test/medical", "Applications", block, diagnostics=diagnostics)
+        self.assertIsNone(candidate)
+        self.assertGreaterEqual(diagnostics.get("relation_negated_rejected", 0), 1)
+        self.assertNotIn("candidate_valid", diagnostics)
+
+    def test_contrastive_unlike_sentence_does_not_validate_the_relation(self):
+        diagnostics: dict[str, int] = {}
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            text="Unlike femtosecond laser texturing of medical stents, we specialize in metal stamping.",
+            path="main > article",
+        )
+        candidate = _candidate("Example", "https://example.test/medical", "Applications", block, diagnostics=diagnostics)
+        self.assertIsNone(candidate)
+        self.assertGreaterEqual(diagnostics.get("relation_negated_rejected", 0), 1)
+
+    def test_positive_sentence_without_negation_still_validates(self):
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            text="We offer femtosecond laser texturing of medical stents for production customers.",
+            path="main > article",
+        )
+        candidate = _candidate("Example", "https://example.test/medical", "Applications", block)
+        self.assertIsNotNone(candidate)
+        self.assertEqual("direct", candidate["relation_strength"])
+
+
 if __name__ == "__main__":
     unittest.main()

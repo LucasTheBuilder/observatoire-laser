@@ -223,6 +223,23 @@ NAVIGATION_NOISE = (
     "skip to content", "sign in", "log in", "newsletter", "contact us",
 )
 
+# Explicit negation/contrast markers. A sentence or window carrying one of these cannot
+# establish a positive relation even when it lexically contains market+component+operation
+# terms (e.g. "unlike laser cutting, we use..." or "n'offre pas de découpe laser pour...").
+# Deliberately excludes ambiguous cues such as "without"/"sans": those are routinely used
+# descriptively in this domain ("contactless cutting" / "découpe sans contact") rather than
+# to negate the claim, and a false rejection there would just widen the recall gap further.
+NEGATION_CUES = (
+    "unlike", "contrairement à", "contrairement a",
+    "rather than", "instead of", "plutôt que", "plutot que", "au lieu de",
+    "no longer", "not yet", "not currently",
+    "does not", "do not", "did not", "cannot", "can not", "will not",
+    "doesn't", "don't", "didn't", "isn't", "aren't", "wasn't", "weren't",
+    "won't", "can't", "couldn't", "wouldn't", "shouldn't",
+    "ne propose pas", "n'offre pas", "ne fait pas", "ne fabrique pas", "ne fournit pas",
+    "n'est pas encore", "ne sont pas encore",
+)
+
 # Conservative market inference used only for display when the market is not explicit.
 # Inferred values never count as an independent acceptance signal.
 MARKET_INFERENCE = {
@@ -472,6 +489,13 @@ def _sentences(text: str) -> list[str]:
     return [part.strip() for part in parts if len(part.strip()) >= 12]
 
 
+def _is_negated(text: str) -> bool:
+    """Conservative negation/contrast guard for one relation window (sentence, heading+sentence
+    pair, or combined structured unit). Kept lexicon-based, like the rest of this module, rather
+    than attempting real negation-scope parsing."""
+    return any(_contains_term(text, cue) for cue in NEGATION_CUES)
+
+
 def _section_role(block: ContentBlock) -> str:
     """Describe the local editorial zone without excluding it from market evidence."""
     heading = _normalize_text(" ".join(filter(None, (block.h2, block.h3, block.heading))))
@@ -590,12 +614,19 @@ def _inc_diagnostic(diagnostics: dict[str, int] | None, key: str, amount: int = 
         diagnostics[key] = int(diagnostics.get(key, 0)) + amount
 
 
-def _relation_evidence(block: ContentBlock, structured_blocks: list[ContentBlock] | None = None) -> tuple[str | None, str]:
+def _relation_evidence(
+    block: ContentBlock,
+    structured_blocks: list[ContentBlock] | None = None,
+    diagnostics: dict[str, int] | None = None,
+) -> tuple[str | None, str]:
     """Validate Market ↔ Component ↔ Operation without cross-context recombination.
 
     ``direct`` is sentence-local; ``contextual`` uses only the block's immediate heading or a
     two-sentence window; ``structured`` may cross blocks only when they share the exact
-    ``editorial_group_id``. Repeated cards/list items are isolated micro-contexts.
+    ``editorial_group_id``. Repeated cards/list items are isolated micro-contexts. A window
+    carrying an explicit negation/contrast cue (see NEGATION_CUES) is skipped even when it
+    would otherwise satisfy the lexical relation, since the sentence is denying or contrasting
+    the claim rather than making it (e.g. "unlike laser cutting, we use...").
     """
     sentences = _sentences(block.text)
     if not sentences:
@@ -606,6 +637,9 @@ def _relation_evidence(block: ContentBlock, structured_blocks: list[ContentBlock
     for sentence in sentences:
         market, component, operation = _resolved_core_labels(sentence)
         if market and component and operation and not _relation_window_is_ambiguous(sentence):
+            if _is_negated(sentence):
+                _inc_diagnostic(diagnostics, "relation_negated_rejected")
+                continue
             return "direct", sentence[:900]
 
     multi_context = _is_multi_context_block(block)
@@ -620,6 +654,9 @@ def _relation_evidence(block: ContentBlock, structured_blocks: list[ContentBlock
             if component and operation and not _relation_window_is_ambiguous(sentence):
                 evidence = f"{local_heading} | {sentence}"
                 if not _relation_window_is_ambiguous(evidence):
+                    if _is_negated(sentence) or _is_negated(local_heading):
+                        _inc_diagnostic(diagnostics, "relation_negated_rejected")
+                        continue
                     return "contextual", evidence[:900]
 
     # 3) Adjacent sentence windows are allowed only inside a single-purpose block.
@@ -633,6 +670,9 @@ def _relation_evidence(block: ContentBlock, structured_blocks: list[ContentBlock
                     sum(bool(x) for x in _core_labels(sentences[i + 1])),
                 )
                 if density >= 2:
+                    if _is_negated(window):
+                        _inc_diagnostic(diagnostics, "relation_negated_rejected")
+                        continue
                     return "contextual", window[:900]
 
     # 4) Structured relation: every contributing block must belong to exactly the same local
@@ -655,7 +695,10 @@ def _relation_evidence(block: ContentBlock, structured_blocks: list[ContentBlock
             and max(densities, default=0) >= 2
             and not _relation_window_is_ambiguous(combined)
         ):
-            return "structured", combined[:1400]
+            if _is_negated(combined):
+                _inc_diagnostic(diagnostics, "relation_negated_rejected")
+            else:
+                return "structured", combined[:1400]
 
     return None, ""
 
@@ -729,7 +772,7 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
     if supplied_neighbors and len(safe_neighbors) < len(supplied_neighbors):
         _inc_diagnostic(diagnostics, "cross_group_rejected", len(supplied_neighbors) - len(safe_neighbors))
 
-    relation_strength, relation_text = _relation_evidence(block, safe_neighbors)
+    relation_strength, relation_text = _relation_evidence(block, safe_neighbors, diagnostics)
     if not relation_strength:
         if _is_multi_context_block(block):
             _inc_diagnostic(diagnostics, "multi_context_rejected")
