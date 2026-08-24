@@ -1128,6 +1128,9 @@ class AnthropicClient:
             return {}
         tool_choice: ToolChoiceToolParam = {"type": "tool", "name": self._TOOL_NAME}
         try:
+            # Note: this SDK's messages.create() has no temperature/top_p/top_k parameter at
+            # all (verified against the installed anthropic==1.0.0 signature, not just assumed) --
+            # sampling isn't controllable here, unlike Ollama's options.temperature=0 below.
             response = self._client.messages.create(
                 model=self.model,
                 max_tokens=4096,

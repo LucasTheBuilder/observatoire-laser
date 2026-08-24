@@ -1003,6 +1003,19 @@ def _ai_mode_label(ollama: AiClient) -> str:
     return f"{provider}:{ollama.model}"
 
 
+# Observed in real Claude Haiku output: when the model genuinely can't identify a dimension
+# (e.g. a publication snippet about a process with no clear physical component), it sometimes
+# answers with a placeholder like "<UNKNOWN>" instead of leaving the field blank. These are not
+# real proposals -- queuing them would put dead entries in front of whoever reviews the queue.
+_NON_PROPOSAL_SENTINELS = {
+    "unknown", "<unknown>", "n a", "na", "none", "non identifie", "non applicable", "aucun", "aucune",
+}
+
+
+def _is_real_proposal(value: str) -> bool:
+    return bool(value) and _normalize_text(value) not in _NON_PROPOSAL_SENTINELS
+
+
 def _vocabulary_candidate(
     actor_name: str,
     url: str,
@@ -1015,10 +1028,11 @@ def _vocabulary_candidate(
     """Build a triage record when an AI-proposed core label matches no known lexicon entry.
 
     Only genuinely-proposed-but-unresolved dimensions are queued -- a dimension the model left
-    blank isn't a vocabulary gap worth a human's time. Resolved dimensions are kept alongside
-    for context (e.g. "component already resolved to Stents, but market has no match").
+    blank, or answered with a non-answer placeholder (see _NON_PROPOSAL_SENTINELS), isn't a
+    vocabulary gap worth a human's time. Resolved dimensions are kept alongside for context
+    (e.g. "component already resolved to Stents, but market has no match").
     """
-    missing = {key: value for key, value in proposed.items() if value and not resolved.get(key)}
+    missing = {key: value for key, value in proposed.items() if _is_real_proposal(value) and not resolved.get(key)}
     if not missing:
         return None
     known = {key: value for key, value in resolved.items() if value}
@@ -1038,7 +1052,10 @@ def _vocabulary_candidate(
     }
 
 
-def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBlock], ollama: AiClient) -> list[dict]:
+def _ai_candidates(
+    actor_name: str, url: str, title: str, blocks: list[ContentBlock], ollama: AiClient,
+    diagnostics: dict[str, int] | None = None,
+) -> list[dict]:
     """Conservative AI fallback for market applications, with an open-vocabulary escape hatch.
 
     The AI may resolve wording, but it cannot invent or substitute Market / Component /
@@ -1061,8 +1078,14 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
             relevant.append((i, block, section))
         if len(relevant) >= 12:
             break
-    if not relevant or not ollama.available():
+    if not relevant:
+        _inc_diagnostic(diagnostics, "ai_no_relevant_blocks")
         return []
+    if not ollama.available():
+        _inc_diagnostic(diagnostics, "ai_unavailable")
+        return []
+    _inc_diagnostic(diagnostics, "ai_pages_queried")
+    _inc_diagnostic(diagnostics, "ai_relevant_blocks_sent", len(relevant))
 
     prompt = json.dumps({
         "actor": actor_name, "url": url,
@@ -1091,7 +1114,9 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
         response = ollama.ask_json(system, prompt)
         facts = response.get("facts", []) if isinstance(response, dict) else []
     except Exception:
+        _inc_diagnostic(diagnostics, "ai_call_failed")
         return []
+    _inc_diagnostic(diagnostics, "ai_facts_proposed", len(facts))
 
     block_by_index = {i: (block, section) for i, block, section in relevant}
     complementary = {
@@ -1109,8 +1134,13 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
             quote = str(fact["quote"]).strip()
             confidence = float(fact.get("confidence", 0))
         except (KeyError, ValueError, TypeError, IndexError):
+            _inc_diagnostic(diagnostics, "ai_fact_malformed")
             continue
-        if not quote or quote not in block.text or confidence < 0.72:
+        if not quote or quote not in block.text:
+            _inc_diagnostic(diagnostics, "ai_fact_quote_not_verbatim")
+            continue
+        if confidence < 0.72:
+            _inc_diagnostic(diagnostics, "ai_fact_low_confidence")
             continue
 
         fields = {key: _validate_ai_value(fact.get(key), values) for key, values in complementary.items()}
@@ -1133,6 +1163,9 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
             vocabulary_candidate = _vocabulary_candidate(actor_name, url, title, quote, block, proposed, resolved)
             if vocabulary_candidate:
                 candidates.append(vocabulary_candidate)
+                _inc_diagnostic(diagnostics, "ai_vocabulary_queued")
+            else:
+                _inc_diagnostic(diagnostics, "ai_fact_nothing_proposed")
             continue
 
         # Known-label path: the AI's wording resolving to a known label is not enough on its
@@ -1144,7 +1177,9 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
             "operation": _match_label(section, OPERATIONS),
         }
         if any(deterministic_core[key] != resolved[key] for key in resolved):
+            _inc_diagnostic(diagnostics, "ai_known_label_not_independently_confirmed")
             continue
+        _inc_diagnostic(diagnostics, "ai_fact_validated")
 
         maturity = _validate_ai_value(fact.get("maturity"), set(maturity_to_bucket))
         maturity_class = maturity_to_bucket.get(maturity, "unknown")
@@ -1905,7 +1940,7 @@ def scrape_market(max_pages: int = 120, actor_names: list[str] | None = None) ->
                 # AI remains a conservative secondary route for complete market facts only.
                 vocabulary_candidates: list[dict] = []
                 if source.get("strategy") == "adaptive":
-                    for candidate in _ai_candidates(source["name"], source_url, source_title, blocks, ollama):
+                    for candidate in _ai_candidates(source["name"], source_url, source_title, blocks, ollama, diagnostics):
                         if candidate.get("kind") == "vocabulary_candidate":
                             vocabulary_candidates.append(candidate)
                         else:

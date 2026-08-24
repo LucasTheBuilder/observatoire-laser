@@ -178,6 +178,28 @@ class AiCandidatesOpenVocabularyTests(unittest.TestCase):
         candidates = _ai_candidates("Example", "https://example.test/generic", "Applications", [block], fake)
         self.assertEqual([], candidates)
 
+    def test_unknown_placeholder_is_treated_as_nothing_proposed_not_a_real_label(self):
+        # Observed against the real Anthropic API: Claude Haiku sometimes answers a dimension
+        # with the literal string "<UNKNOWN>" instead of leaving it blank, when a block
+        # genuinely has no clear component/market/operation of its own (e.g. a process-only
+        # publication snippet). That must not land in the vocabulary triage queue as if it
+        # were a genuine proposal.
+        block = ContentBlock(
+            heading="Publications",
+            text="Femtosecond laser processing enables novel manufacturing approaches for aerospace parts.",
+            path="main > article",
+        )
+        diagnostics: dict[str, int] = {}
+        fake = FakeAiClient([{
+            "block_index": 0, "market": "Aéronautique", "component": "<UNKNOWN>", "operation": "Soudage",
+            "quote": "Femtosecond laser processing enables novel manufacturing approaches for aerospace parts.",
+            "confidence": 0.9,
+        }])
+        candidates = _ai_candidates("Example", "https://example.test/aero", "Applications", [block], fake, diagnostics)
+        self.assertEqual([], candidates)
+        self.assertEqual(1, diagnostics.get("ai_fact_nothing_proposed", 0))
+        self.assertNotIn("ai_vocabulary_queued", diagnostics)
+
 
 class VocabularyCandidateUpsertTests(unittest.TestCase):
     def test_repeated_upsert_dedupes_by_fingerprint_and_bumps_last_seen(self):
