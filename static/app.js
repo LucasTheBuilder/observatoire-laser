@@ -102,6 +102,65 @@ function splitBarComparison(rows) {
   </div>`;
 }
 
+function stackedHBar(rows, series, {barHeight = 20, gap = 14, labelWidth = 150} = {}) {
+  if (!rows.length) return `<div class="empty">Pas encore assez de données pour ce graphique.</div>`;
+  const width = 560;
+  const segGap = 2;
+  const totals = rows.map(r => series.reduce((sum, s) => sum + (r[s.key] || 0), 0));
+  const max = Math.max(...totals, 1);
+  const plotWidth = width - labelWidth - 50;
+  const rowHeight = barHeight + gap;
+  const height = rows.length * rowHeight - gap;
+  const bars = rows.map((row, i) => {
+    const y = i * rowHeight;
+    const total = totals[i];
+    let x = labelWidth;
+    const nonZero = series.filter(s => (row[s.key] || 0) > 0);
+    const segments = nonZero.map((s, idx) => {
+      const raw = total > 0 ? (row[s.key] / max) * plotWidth : 0;
+      const isLast = idx === nonZero.length - 1;
+      const w = Math.max(0, raw - (isLast ? 0 : segGap));
+      const path = isLast ? roundedEndBarPath(x, y, w, barHeight, 4) : `M${x},${y} h${w} v${barHeight} h${-w} Z`;
+      const seg = w > 0 ? `<path d="${path}" fill="${s.color}"><title>${esc(row.label)} — ${esc(s.label)} : ${row[s.key]}</title></path>` : "";
+      x += raw;
+      return seg;
+    }).join("");
+    return `<g>
+      <text x="${labelWidth - 12}" y="${y + barHeight / 2}" text-anchor="end" dominant-baseline="middle" class="chart-cat-label">${esc(row.label)}</text>
+      ${segments}
+      <text x="${labelWidth + Math.max(3, (total / max) * plotWidth) + 8}" y="${y + barHeight / 2}" dominant-baseline="middle" class="chart-value-label">${total}</text>
+    </g>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" class="hbar-chart" role="img" aria-label="Comparaison par marché">
+    <line x1="${labelWidth}" y1="0" x2="${labelWidth}" y2="${height}" class="chart-baseline"/>
+    ${bars}
+  </svg>`;
+}
+
+// --- Market family visual metadata (decorative icon + tint, not chart color) -----
+
+const MARKET_STYLE = {
+  "Médical": {bg: "#eaf7f1", fg: "#1f8a63", icon: '<path d="M10 3v14M3 10h14"/>'},
+  "Batteries": {bg: "#fff7e0", fg: "#a8790b", icon: '<rect x="3" y="6" width="12" height="9" rx="1.5"/><rect x="15" y="9" width="2" height="3"/><path d="M7 6V4h5v2"/>'},
+  "Optique": {bg: "#eef4fb", fg: "#2f6fb0", icon: '<circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="2.4"/>'},
+  "Semi-conducteurs": {bg: "#f3edfb", fg: "#6b4fb3", icon: '<rect x="6" y="6" width="8" height="8" rx="1"/><path d="M6 3v3M10 3v3M14 3v3M6 14v3M10 14v3M14 14v3M3 6h3M3 10h3M3 14h3M14 6h3M14 10h3M14 14h3"/>'},
+  "Aéronautique": {bg: "#e9f5fb", fg: "#1f7aa8", icon: '<path d="M2 11l16-6-3 6 3 6-16-6zM9 11h9"/>'},
+  "Spatial": {bg: "#efeefb", fg: "#5b4fa8", icon: '<path d="M10 2l2.5 6H15l-4 4 1.5 6-2.5-4-2.5 4L9 12 5 8h2.5z"/>'},
+  "Défense": {bg: "#fdeeec", fg: "#c14a2f", icon: '<path d="M10 2l7 3v5c0 5-3 7.5-7 8-4-.5-7-3-7-8V5z"/>'},
+  "Automobile": {bg: "#f1f3f5", fg: "#445566", icon: '<path d="M3 13l1.5-5A2 2 0 0 1 6.4 6.5h7.2A2 2 0 0 1 15.5 8L17 13"/><rect x="2" y="13" width="16" height="3" rx="1"/><circle cx="6" cy="16" r="1.4"/><circle cx="14" cy="16" r="1.4"/>'},
+  "Luxe": {bg: "#fbeef6", fg: "#a84f86", icon: '<path d="M4 8l3-5h6l3 5-6 9z"/>'},
+};
+const DEFAULT_MARKET_STYLE = {bg: "#eef2f1", fg: "#687683", icon: '<circle cx="10" cy="10" r="5"/>'};
+
+function marketStyle(label) {
+  return MARKET_STYLE[label] || DEFAULT_MARKET_STYLE;
+}
+
+function marketIcon(label) {
+  const s = marketStyle(label);
+  return `<span class="market-icon" style="background:${s.bg};color:${s.fg}"><svg viewBox="0 0 20 20" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${s.icon}</svg></span>`;
+}
+
 // --- CSV export -------------------------------------------------------------
 
 function toCSV(rows, columns) {
@@ -149,7 +208,7 @@ function marketFamilyCards(rows) {
   return `<div class="market-fam-grid">${groups.map(([market, bucket]) => {
     const chips = [...bucket.subthemes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
       .map(([label, count]) => `<span class="subtheme-chip">${esc(label)}<b>${count}</b></span>`).join("");
-    return `<article class="market-fam-card"><header><h3>${esc(market)}</h3><b>${bucket.total} faits</b></header><div class="subtheme-chips">${chips}</div></article>`;
+    return `<article class="market-fam-card"><header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${bucket.total} faits</b></div></header><div class="subtheme-chips">${chips}</div></article>`;
   }).join("")}</div>`;
 }
 
@@ -245,6 +304,31 @@ function evidenceTable(rows) {
   </div>`;
 }
 
+function marketComparisonChart(existingRows, radarRows) {
+  const totals = new Map();
+  for (const row of existingRows) {
+    const bucket = totals.get(row.market) || {label: row.market, existing: 0, radar: 0};
+    bucket.existing += 1;
+    totals.set(row.market, bucket);
+  }
+  for (const row of radarRows) {
+    const bucket = totals.get(row.market) || {label: row.market, existing: 0, radar: 0};
+    bucket.radar += 1;
+    totals.set(row.market, bucket);
+  }
+  const rows = [...totals.values()].sort((a, b) => (b.existing + b.radar) - (a.existing + a.radar));
+  const series = [
+    {key: "existing", label: "Existant", color: "var(--chart-teal)"},
+    {key: "radar", label: "Radar", color: "var(--chart-coral)"},
+  ];
+  return `<div class="chart-card">
+    <h3>Existant vs Radar par marché</h3>
+    <p>Part des faits déjà industrialisés face aux besoins encore au stade radar, marché par marché.</p>
+    <div class="chart-legend">${series.map(s => `<span><i style="background:${s.color}"></i>${s.label}</span>`).join("")}</div>
+    ${stackedHBar(rows, series)}
+  </div>`;
+}
+
 function renderMarket() {
   const market = state.market || {existing:[], radar:[]};
   const allRows = [...market.existing, ...market.radar];
@@ -255,8 +339,9 @@ function renderMarket() {
     `<div class="header-actions"><button class="export-btn" data-export="market">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser l’analyse</button></div>`
   ) +
   `<section><div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché, avec ses sous-thèmes (pièce / composant) les plus documentés.</p></div></div><b>${allRows.length} faits</b></div>${marketFamilyCards(allRows)}</section>
-   <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${market.existing.length} faits</b></div>${evidenceTable(market.existing)}</section>
-   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${market.radar.length} faits</b></div>${evidenceTable(market.radar)}</section>`;
+   <section><div class="section-title"><div><span>02</span><div><h2>Existant vs Radar par marché</h2><p>Comparaison visuelle de la maturité des faits détectés, marché par marché.</p></div></div></div>${marketComparisonChart(market.existing, market.radar)}</section>
+   <section><div class="section-title"><div><span>03</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${market.existing.length} faits</b></div>${evidenceTable(market.existing)}</section>
+   <section><div class="section-title"><div><span>04</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${market.radar.length} faits</b></div>${evidenceTable(market.radar)}</section>`;
   wireActions();
   const exportBtn = document.querySelector('[data-export="market"]');
   if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("marche.csv", allRows, [
