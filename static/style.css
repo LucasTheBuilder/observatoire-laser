@@ -16,3 +16,27 @@
 .signal-list.compact .signal-item{padding-block:13px}
 @media(max-width:900px){.signal-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:520px){.signal-grid{grid-template-columns:1fr}.signal-item{align-items:flex-start}.signal-item strong{white-space:normal}}
+
+.actor-add{display:grid;grid-template-columns:1.4fr 1fr 1fr 1.4fr auto auto;gap:10px;align-items:center;margin-bottom:20px;padding:16px;border:1px solid var(--line);border-radius:13px;background:#fff}
+.actor-add input[type=text],.actor-add input[type=url]{padding:11px 13px;border:1px solid var(--line);border-radius:9px;background:#fbfcfc;outline:none;font-size:13px}
+.actor-add input:focus{border-color:var(--teal);box-shadow:0 0 0 3px #0e8f8715}
+.actor-add label{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);white-space:nowrap}
+.actor-add button{padding:11px 16px;border:0;border-radius:9px;background:var(--teal);color:#fff;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap}
+.actor-add button:hover{background:#087a73}
+.actor-card .actor-pause{margin-top:10px;width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;background:#f8faf9;color:#68757d;font-size:11px;font-weight:750;cursor:pointer}
+.actor-card .actor-pause:hover{border-color:var(--coral);color:var(--coral)}
+@media(max-width:900px){.actor-add{grid-template-columns:1fr 1fr}}
+
+.vocab-list{display:flex;flex-direction:column;gap:14px}
+.vocab-card{padding:18px 20px;border:1px solid var(--line);border-radius:13px;background:#fff;box-shadow:0 8px 24px #17313c08}
+.vocab-card>header{display:flex;justify-content:space-between;gap:16px;margin-bottom:10px;font-size:11px;color:var(--muted)}
+.vocab-card blockquote{margin:0 0 14px;color:#4d5a63;font:italic 13px/1.6 Georgia,serif}
+.vocab-dims{display:flex;flex-wrap:wrap;gap:10px}
+.vocab-dim{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid var(--line);border-radius:20px;background:#fbfcfc;font-size:12px}
+.vocab-dim b{color:var(--ink)}
+.vocab-dim small{color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-size:9px}
+.vocab-accept,.vocab-reject{border:0;border-radius:14px;padding:5px 10px;font-size:11px;font-weight:800;cursor:pointer}
+.vocab-accept{background:#e5f3e9;color:#397148}
+.vocab-accept:hover{background:#d3ecd9}
+.vocab-reject{background:#fdece8;color:#c14a2f}
+.vocab-reject:hover{background:#fbdcd4}

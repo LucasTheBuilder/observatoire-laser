@@ -239,6 +239,33 @@ PERFORMANCE_TERMS: Lexicon = {
     "Haute puissance": {"any_of": ("high average power", "high-power ultrafast", "high power ultrafast", "high repetition rate", "mhz processing")},
 }
 
+
+def _load_custom_lexicon_entries(target: dict[str, Lexicon] | None = None) -> None:
+    """Merge operator-accepted vocabulary_candidates (db.accept_vocabulary_candidate) into
+    the live lexicons, so a label promoted through the triage queue is usable immediately --
+    no code change or redeploy needed to grow recall.
+
+    ``target`` defaults to the real module-level MARKETS/COMPONENTS/OPERATIONS dicts, mutated
+    in place (this is process-lifetime state, matching a long-running server); pass explicit
+    dicts to check the merge logic in isolation without touching that shared state.
+    """
+    target = target if target is not None else {"market": MARKETS, "component": COMPONENTS, "operation": OPERATIONS}
+    try:
+        with connect(MARKET_DB) as db:
+            entries = db.execute("SELECT dimension,label,match_terms FROM custom_lexicon_entries").fetchall()
+    except Exception:
+        return
+    for row in entries:
+        lexicon = target.get(row["dimension"])
+        if lexicon is None:
+            continue
+        try:
+            terms = tuple(json.loads(row["match_terms"]))
+        except (TypeError, ValueError):
+            continue
+        if terms:
+            lexicon[row["label"]] = {"any_of": terms}
+
 # Terms that very often belong to menus/legal/navigation rather than technical evidence.
 NAVIGATION_NOISE = (
     "cookie policy", "privacy policy", "terms of use", "all rights reserved",
@@ -1828,6 +1855,7 @@ def scrape_market(max_pages: int = 120, actor_names: list[str] | None = None) ->
     ``source["name"]``) -- meant for trying a prompt/provider change on 2-3 actors before
     opening it to the full roster, without touching the selection/coverage logic itself.
     """
+    _load_custom_lexicon_entries()
     with connect(MARKET_DB) as db:
         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
     sources = _select_market_sources(max_pages=max_pages)

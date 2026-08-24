@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -541,6 +542,16 @@ def init_databases() -> None:
             );
             CREATE INDEX IF NOT EXISTS vocabulary_candidates_status_idx
                 ON vocabulary_candidates(review_status, created_at);
+
+            CREATE TABLE IF NOT EXISTS custom_lexicon_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dimension TEXT NOT NULL CHECK(dimension IN ('market','component','operation')),
+                label TEXT NOT NULL,
+                match_terms TEXT NOT NULL,
+                source_vocabulary_candidate_id INTEGER REFERENCES vocabulary_candidates(id),
+                created_at TEXT NOT NULL,
+                UNIQUE(dimension, label)
+            );
             """
         )
         _add_columns(db, "offers", {
@@ -706,3 +717,82 @@ def scalar(path: Path, query: str, params: Iterable[Any] = ()) -> Any:
     with connect(path) as db:
         result = db.execute(query, tuple(params)).fetchone()
         return result[0] if result else None
+
+
+def create_actor(name: str, country: str, role: str, official_url: str, priority: bool = False) -> int:
+    """Add a new actor outside the static ACTORS seed list.
+
+    Growing coverage currently means editing the hardcoded ACTORS list in this module and
+    redeploying; this lets an analyst add one from the UI/API instead. Bootstraps a matching
+    site_profiles row so the crawler picks the actor up on its next run, exactly like a
+    seeded one. Raises ValueError on a blank/duplicate name or a non-http(s) URL.
+    """
+    name = name.strip()
+    if not name:
+        raise ValueError("Actor name is required")
+    official_url = official_url.strip()
+    if not official_url.startswith(("http://", "https://")):
+        raise ValueError("official_url must be an absolute http(s) URL")
+    stamp = utc_now()
+    with connect(ACTORS_DB) as db:
+        if db.execute("SELECT id FROM actors WHERE name=?", (name,)).fetchone():
+            raise ValueError(f"An actor named '{name}' already exists")
+        actor_id = db.execute(
+            "INSERT INTO actors(name,country,role,priority,official_url,updated_at) VALUES(?,?,?,?,?,?)",
+            (name, country.strip(), role.strip(), int(bool(priority)), official_url, stamp),
+        ).lastrowid
+        assert actor_id is not None
+        db.execute(
+            "INSERT INTO site_profiles(actor_id,strategy,status,generated_by) VALUES(?,?,?,?)",
+            (actor_id, "adaptive" if priority else "generic", "pending", "manual"),
+        )
+    return actor_id
+
+
+def set_actor_active(actor_id: int, active: bool) -> None:
+    """Pause or resume an actor without deleting its history. Raises ValueError if unknown."""
+    with connect(ACTORS_DB) as db:
+        updated = db.execute(
+            "UPDATE actors SET active=?,updated_at=? WHERE id=?", (int(bool(active)), utc_now(), actor_id)
+        ).rowcount
+    if not updated:
+        raise ValueError(f"Actor {actor_id} not found")
+
+
+def accept_vocabulary_candidate(candidate_id: int, dimension: str) -> dict[str, str]:
+    """Promote one proposed label from a vocabulary candidate into the live custom lexicon.
+
+    ``dimension`` selects which of the candidate's (possibly several) unresolved dimensions
+    to promote -- a candidate proposing both an unknown component and an unknown market
+    requires one call per dimension, so each can be reviewed on its own merits. The matching
+    rule created is a single-term "any_of" using the accepted label's own text, mirroring
+    how most existing lexicon entries already work (e.g. "Stents": any_of=("stent",)).
+    Raises ValueError if the candidate doesn't exist or has no proposal for that dimension.
+    """
+    with connect(MARKET_DB) as db:
+        row = db.execute("SELECT proposed_labels FROM vocabulary_candidates WHERE id=?", (candidate_id,)).fetchone()
+        if not row:
+            raise ValueError(f"Vocabulary candidate {candidate_id} not found")
+        proposed = json.loads(row["proposed_labels"])
+        label = proposed.get(dimension)
+        if not label:
+            raise ValueError(f"No proposed label for dimension '{dimension}' on candidate {candidate_id}")
+        stamp = utc_now()
+        db.execute(
+            """INSERT INTO custom_lexicon_entries(dimension,label,match_terms,source_vocabulary_candidate_id,created_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(dimension,label) DO NOTHING""",
+            (dimension, label, json.dumps([label], ensure_ascii=False), candidate_id, stamp),
+        )
+        db.execute("UPDATE vocabulary_candidates SET review_status='accepted' WHERE id=?", (candidate_id,))
+    return {"dimension": dimension, "label": label}
+
+
+def reject_vocabulary_candidate(candidate_id: int) -> None:
+    """Mark a vocabulary candidate reviewed-and-declined. Raises ValueError if unknown."""
+    with connect(MARKET_DB) as db:
+        updated = db.execute(
+            "UPDATE vocabulary_candidates SET review_status='rejected' WHERE id=?", (candidate_id,)
+        ).rowcount
+    if not updated:
+        raise ValueError(f"Vocabulary candidate {candidate_id} not found")

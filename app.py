@@ -22,8 +22,21 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-from db import ACTORS_DB, MARKET_DB, TECH_DB, backup_all_databases, connect, init_databases, rows
+from db import (
+    ACTORS_DB,
+    MARKET_DB,
+    TECH_DB,
+    accept_vocabulary_candidate,
+    backup_all_databases,
+    connect,
+    create_actor,
+    init_databases,
+    reject_vocabulary_candidate,
+    rows,
+    set_actor_active,
+)
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from scrapers import scrape_actors, scrape_market, scrape_technology
 
@@ -285,11 +298,45 @@ def monthly(days: int = Query(default=30, ge=1, le=365)):
 
 @app.get("/api/actors")
 def list_actors():
+    # Includes paused (active=0) actors too, with the flag exposed, so the UI can offer a
+    # "reactivate" action -- filtering them out here would make pausing one-way.
     return rows(ACTORS_DB, """SELECT a.id,a.name,a.country,a.role,a.priority,a.official_url,a.active,a.last_scraped_at,a.last_status,
                                p.strategy,p.status AS profile_status,p.confidence,p.generated_by,p.needs_reprofile,p.health_score,
                                p.coverage_ready,p.coverage_discovered
                                FROM actors a LEFT JOIN site_profiles p ON p.actor_id=a.id
-                               WHERE a.active=1 ORDER BY a.priority DESC,a.name""")
+                               ORDER BY a.active DESC,a.priority DESC,a.name""")
+
+
+class ActorCreateRequest(BaseModel):
+    name: str
+    country: str
+    role: str
+    official_url: str
+    priority: bool = False
+
+
+@app.post("/api/actors")
+def add_actor(payload: ActorCreateRequest):
+    """Add an actor outside the static seed list -- grows coverage without a code deploy."""
+    try:
+        actor_id = create_actor(payload.name, payload.country, payload.role, payload.official_url, payload.priority)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": actor_id, "name": payload.name}
+
+
+class ActorUpdateRequest(BaseModel):
+    active: bool
+
+
+@app.patch("/api/actors/{actor_id}")
+def update_actor(actor_id: int, payload: ActorUpdateRequest):
+    """Pause/resume an actor. History (sources, evidence) is kept; only active is toggled."""
+    try:
+        set_actor_active(actor_id, payload.active)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"id": actor_id, "active": payload.active}
 
 
 @app.get("/api/profiles")
@@ -359,9 +406,8 @@ def proofs(bucket: str, market: str, component: str, operation: str):
 def vocabulary_candidates(status: Literal["pending", "accepted", "rejected"] = "pending"):
     """AI-proposed market/component/operation labels that matched no known lexicon entry.
 
-    Read-only triage view: accepting a label into the lexicons themselves is still a code
-    change (scrapers.py's MARKETS/COMPONENTS/OPERATIONS), this endpoint only surfaces the
-    candidates so an analyst can decide which proposals are worth adding.
+    Triage queue: accept promotes one dimension's proposal into the live custom lexicon
+    (usable on the next collection, no code deploy); reject just marks it reviewed.
     """
     candidates = rows(
         MARKET_DB,
@@ -379,6 +425,27 @@ def vocabulary_candidates(status: Literal["pending", "accepted", "rejected"] = "
             except (TypeError, ValueError):
                 candidate[key] = {}
     return candidates
+
+
+class VocabularyDecisionRequest(BaseModel):
+    dimension: Literal["market", "component", "operation"]
+
+
+@app.post("/api/vocabulary-candidates/{candidate_id}/accept")
+def accept_vocabulary(candidate_id: int, payload: VocabularyDecisionRequest):
+    try:
+        return accept_vocabulary_candidate(candidate_id, payload.dimension)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/vocabulary-candidates/{candidate_id}/reject")
+def reject_vocabulary(candidate_id: int):
+    try:
+        reject_vocabulary_candidate(candidate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"id": candidate_id, "status": "rejected"}
 
 
 @app.get("/api/offers")

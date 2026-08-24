@@ -6,6 +6,7 @@ const state = {
   offers: [],
   actors: [],
   profiles: [],
+  vocabulary: [],
   query: "",
   offerQuery: "",
 };
@@ -229,11 +230,31 @@ function renderOffers() {
   wireActions();
 }
 
+function actorCard(a) {
+  const paused = !a.active;
+  return `<article class="actor-card ${a.priority?'priority':''}" ${paused?'style="opacity:.55"':''}>
+    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div>${a.priority?'<span>Prioritaire</span>':''}</div>
+    <h3>${esc(a.name)}</h3><p>${esc(a.role)}</p>
+    <div class="profile-line"><span class="profile-badge ${a.needs_reprofile?'warning':a.strategy}">${a.needs_reprofile?'À recalibrer':a.strategy==='adaptive'?'Adaptatif':'Générique'}</span><small>${a.profile_status==='ready'?'Profil prêt':a.profile_status==='partial'?'Profil partiel':a.profile_status==='degraded'?'Mode dégradé':'À cartographier'}</small></div>
+    <footer><span>${esc(a.country)}</span><a href="${esc(a.official_url)}" target="_blank" rel="noopener">Site officiel ↗</a></footer>
+    <button class="actor-pause" data-toggle-actor="${a.id}" data-next-active="${paused?'1':'0'}">${paused?'↻ Réactiver':'⏸ Mettre en pause'}</button>
+  </article>`;
+}
+
 function renderActors() {
   const q = state.query.toLowerCase();
   const filtered = state.actors.filter(a => `${a.name} ${a.country} ${a.role}`.toLowerCase().includes(q));
-  content.innerHTML = header("Écosystème suivi","20 acteurs","Rôles, sources officielles et pertinence des contenus suivis.",`<button class="primary" data-run="actors">↻ Mettre à jour</button>`)+
-  `<div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div><div class="actor-grid">${filtered.map(a=>`<article class="actor-card ${a.priority?'priority':''}"><div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div>${a.priority?'<span>Prioritaire</span>':''}</div><h3>${esc(a.name)}</h3><p>${esc(a.role)}</p><div class="profile-line"><span class="profile-badge ${a.needs_reprofile?'warning':a.strategy}">${a.needs_reprofile?'À recalibrer':a.strategy==='adaptive'?'Adaptatif':'Générique'}</span><small>${a.profile_status==='ready'?'Profil prêt':a.profile_status==='partial'?'Profil partiel':a.profile_status==='degraded'?'Mode dégradé':'À cartographier'}</small></div><footer><span>${esc(a.country)}</span><a href="${esc(a.official_url)}" target="_blank" rel="noopener">Site officiel ↗</a></footer></article>`).join("")}</div>`;
+  const activeCount = state.actors.filter(a => a.active).length;
+  content.innerHTML = header("Écosystème suivi",`${activeCount} acteurs actifs`,"Rôles, sources officielles et pertinence des contenus suivis.",`<button class="primary" data-run="actors">↻ Mettre à jour</button>`)+
+  `<form class="actor-add" id="actor-add-form">
+     <input type="text" name="name" placeholder="Nom de l'acteur" required>
+     <input type="text" name="country" placeholder="Pays" required>
+     <input type="text" name="role" placeholder="Rôle" required>
+     <input type="url" name="official_url" placeholder="https://site-officiel.example" required>
+     <label><input type="checkbox" name="priority"> Prioritaire</label>
+     <button type="submit">+ Ajouter</button>
+   </form>
+   <div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div><div class="actor-grid">${filtered.map(actorCard).join("")}</div>`;
   const input = document.querySelector("#actor-search");
   if (input) {
     input.focus({preventScroll:true});
@@ -243,6 +264,55 @@ function renderActors() {
       renderActors();
     }));
   }
+  const form = document.querySelector("#actor-add-form");
+  if (form) form.addEventListener("submit", async e => {
+    e.preventDefault();
+    const data = new FormData(form);
+    try {
+      await api("/api/actors", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          name: data.get("name"), country: data.get("country"), role: data.get("role"),
+          official_url: data.get("official_url"), priority: data.get("priority") === "on",
+        }),
+      });
+      toast("Acteur ajouté.");
+      state.actors = await api("/api/actors");
+      renderActors();
+    } catch (error) { toast(error.message); }
+  });
+  wireActions();
+}
+
+function dimensionLabel(dimension) {
+  return {market: "Marché", component: "Composant", operation: "Opération"}[dimension] || dimension;
+}
+
+function vocabCard(item) {
+  const dims = Object.entries(item.proposed_labels || {});
+  const context = Object.entries(item.resolved_labels || {}).map(([k, v]) => `${dimensionLabel(k)} : ${v}`).join(" · ");
+  return `<article class="vocab-card">
+    <header><span>${esc(item.actor_name)} · ${dateLabel(item.last_seen_at)}</span>${context ? `<span>${esc(context)}</span>` : ""}</header>
+    <blockquote>${esc(item.quote)}</blockquote>
+    <div class="vocab-dims">
+      ${dims.map(([dimension, label]) => `<div class="vocab-dim"><small>${esc(dimensionLabel(dimension))}</small><b>${esc(label)}</b><button class="vocab-accept" data-accept-vocab="${item.id}" data-dimension="${esc(dimension)}">Accepter</button></div>`).join("")}
+      <button class="vocab-reject" data-reject-vocab="${item.id}">Rejeter</button>
+    </div>
+    <a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>
+  </article>`;
+}
+
+function renderVocabulary() {
+  const items = state.vocabulary || [];
+  content.innerHTML = header(
+    "Enrichissement du lexique",
+    "Vocabulaire proposé par l'IA",
+    "Libellés marché/composant/opération proposés par le modèle mais absents du lexique connu. Accepter un libellé l’ajoute au lexique vivant, utilisable dès la prochaine collecte marché — sans déploiement de code."
+  ) +
+  (items.length
+    ? `<div class="vocab-list">${items.map(vocabCard).join("")}</div>`
+    : `<div class="empty">Aucune proposition en attente de revue.</div>`);
   wireActions();
 }
 
@@ -284,8 +354,40 @@ function render(){
   if(state.view==="market") renderMarket();
   if(state.view==="offers") renderOffers();
   if(state.view==="actors") renderActors();
+  if(state.view==="vocabulary") renderVocabulary();
   if(state.view==="collections") renderCollections();
   if(state.view==="settings") renderSettings();
+}
+
+async function toggleActorActive(id, nextActive) {
+  try {
+    await api(`/api/actors/${id}`, {
+      method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({active: nextActive}),
+    });
+    toast(nextActive ? "Acteur réactivé." : "Acteur mis en pause.");
+    state.actors = await api("/api/actors");
+    renderActors();
+  } catch (error) { toast(error.message); }
+}
+
+async function decideVocabulary(id, action, dimension) {
+  try {
+    if (action === "accept") {
+      await api(`/api/vocabulary-candidates/${id}/accept`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({dimension}),
+      });
+      toast("Libellé ajouté au lexique.");
+    } else {
+      await api(`/api/vocabulary-candidates/${id}/reject`, {method: "POST"});
+      toast("Proposition rejetée.");
+    }
+    state.vocabulary = await api("/api/vocabulary-candidates");
+    renderVocabulary();
+  } catch (error) { toast(error.message); }
 }
 
 async function showProofs(row) {
@@ -370,6 +472,9 @@ function wireActions(){
   document.querySelectorAll("[data-run]").forEach(button=>button.addEventListener("click",()=>run(button.dataset.run)));
   document.querySelectorAll("[data-proof]").forEach(button=>button.addEventListener("click",()=>showProofs(JSON.parse(button.dataset.proof))));
   document.querySelectorAll("[data-offer-proof]").forEach(button=>button.addEventListener("click",()=>showOfferProofs(Number(button.dataset.offerProof))));
+  document.querySelectorAll("[data-toggle-actor]").forEach(button=>button.addEventListener("click",()=>toggleActorActive(Number(button.dataset.toggleActor), button.dataset.nextActive==="1")));
+  document.querySelectorAll("[data-accept-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.acceptVocab),"accept",button.dataset.dimension)));
+  document.querySelectorAll("[data-reject-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.rejectVocab),"reject")));
 }
 
 document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click",()=>{
@@ -383,13 +488,14 @@ document.querySelector(".dialog-close").addEventListener("click",()=>dialog.clos
 dialog.addEventListener("click",e=>{if(e.target===dialog)dialog.close()});
 
 async function refresh(){
-  [state.overview,state.monthly,state.market,state.offers,state.actors,state.profiles]=await Promise.all([
+  [state.overview,state.monthly,state.market,state.offers,state.actors,state.profiles,state.vocabulary]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
     api("/api/market"),
     api("/api/offers"),
     api("/api/actors"),
     api("/api/profiles"),
+    api("/api/vocabulary-candidates"),
   ]);
   render();
 }
