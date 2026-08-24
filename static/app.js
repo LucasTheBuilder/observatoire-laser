@@ -56,6 +56,167 @@ function header(eyebrow, title, description, action="") {
   return `<header class="page-header"><div><p class="eyebrow">${eyebrow}</p><h1>${title}</h1><p>${description}</p></div>${action}</header>`;
 }
 
+// --- Charts (plain inline SVG, no library) --------------------------------
+
+function roundedEndBarPath(x, y, w, h, r) {
+  // 4px rounded "data-end" (right side, where the bar's value lives), square
+  // at the baseline (left) -- never a fully-rounded rect, per the bar mark spec.
+  if (w <= 0) return "";
+  const rr = Math.min(r, h / 2, w / 2);
+  return `M${x},${y} L${x + w - rr},${y} A${rr},${rr} 0 0 1 ${x + w},${y + rr} L${x + w},${y + h - rr} A${rr},${rr} 0 0 1 ${x + w - rr},${y + h} L${x},${y + h} Z`;
+}
+
+function hBarChart(rows, {barHeight = 20, gap = 12, color = "var(--chart-teal)", labelWidth = 168, unit = ""} = {}) {
+  if (!rows.length) return `<div class="empty">Pas encore assez de données pour ce graphique.</div>`;
+  const width = 620;
+  const max = Math.max(...rows.map(r => r.value), 1);
+  const plotWidth = width - labelWidth - 54;
+  const rowHeight = barHeight + gap;
+  const height = rows.length * rowHeight - gap;
+  const bars = rows.map((row, i) => {
+    const y = i * rowHeight;
+    const barWidth = Math.max(3, (row.value / max) * plotWidth);
+    const fill = row.color || color;
+    return `<g>
+      <text x="${labelWidth - 12}" y="${y + barHeight / 2}" text-anchor="end" dominant-baseline="middle" class="chart-cat-label">${esc(row.label)}</text>
+      <path d="${roundedEndBarPath(labelWidth, y, barWidth, barHeight, 4)}" fill="${fill}"><title>${esc(row.label)} : ${row.value}${unit}</title></path>
+      <text x="${labelWidth + barWidth + 8}" y="${y + barHeight / 2}" dominant-baseline="middle" class="chart-value-label">${row.value}${unit}</text>
+    </g>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" class="hbar-chart" role="img" aria-label="Graphique en barres">
+    <line x1="${labelWidth}" y1="0" x2="${labelWidth}" y2="${height}" class="chart-baseline"/>
+    ${bars}
+  </svg>`;
+}
+
+function splitBarComparison(rows) {
+  // A 2-series direct-labeled comparison: no SVG needed, plain divs with a
+  // shared 100%-width track so both bars are visually comparable at a glance.
+  const max = Math.max(...rows.map(r => r.value), 1);
+  return `<div class="split-bars">${rows.map(row => `
+    <div class="split-bar-row">
+      <span>${esc(row.label)}</span>
+      <div class="split-bar-track"><div class="split-bar-fill" style="width:${Math.max(2, row.value / max * 100)}%;background:${row.color}"></div></div>
+      <b>${row.value}</b>
+    </div>`).join("")}
+  </div>`;
+}
+
+// --- CSV export -------------------------------------------------------------
+
+function toCSV(rows, columns) {
+  const cell = value => {
+    const str = String(value ?? "");
+    return /[",;\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+  };
+  const lines = [columns.map(c => cell(c.label)).join(",")];
+  for (const row of rows) lines.push(columns.map(c => cell(row[c.key])).join(","));
+  return lines.join("\r\n");
+}
+
+function downloadCSV(filename, rows, columns) {
+  if (!rows.length) { toast("Rien à exporter pour le moment."); return; }
+  // BOM so Excel opens accented French text as UTF-8 instead of guessing wrong.
+  const blob = new Blob(["﻿" + toCSV(rows, columns)], {type: "text/csv;charset=utf-8;"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// --- Classification helpers (client-side grouping, no backend schema change) -----
+
+function groupByMarket(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const market = row.market || "Non classé";
+    if (!map.has(market)) map.set(market, {total: 0, subthemes: new Map()});
+    const bucket = map.get(market);
+    bucket.total += 1;
+    const sub = row.component || row.operation || "Autre";
+    bucket.subthemes.set(sub, (bucket.subthemes.get(sub) || 0) + 1);
+  }
+  return [...map.entries()].sort((a, b) => b[1].total - a[1].total);
+}
+
+function marketFamilyCards(rows) {
+  const groups = groupByMarket(rows);
+  if (!groups.length) return `<div class="empty">Pas encore assez de faits pour une lecture par marché.</div>`;
+  return `<div class="market-fam-grid">${groups.map(([market, bucket]) => {
+    const chips = [...bucket.subthemes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
+      .map(([label, count]) => `<span class="subtheme-chip">${esc(label)}<b>${count}</b></span>`).join("");
+    return `<article class="market-fam-card"><header><h3>${esc(market)}</h3><b>${bucket.total} faits</b></header><div class="subtheme-chips">${chips}</div></article>`;
+  }).join("")}</div>`;
+}
+
+// Capacity families: an operation/capability is bucketed by keyword family first
+// (usinage vs. fonctionnalisation vs. modification interne); only when no operation
+// keyword matches do we fall back to the material axis, then "Autres".
+const CAPABILITY_FAMILIES = [
+  {label: "Usinage", test: t => /découpe|perçage|gravure|ablation|soudage|scribing|dicing|milling|rainurage|usinage|drilling|cutting|welding|engraving/i.test(t)},
+  {label: "Fonctionnalisation", test: t => /fonctionnalisation|texturation|anti-?givre|hydrophob|hydrophile|oléophobe|olephobe|anti-?reflet|anti-?bu[ée]e|wetting|nettoyage|polissage|cleaning|polishing/i.test(t)},
+  {label: "Modification interne", test: t => /modification interne|guide d.onde|waveguide|debonding|volume modification/i.test(t)},
+];
+
+function capabilityFamily(row) {
+  const text = [row.operation, row.capability].filter(Boolean).join(" ");
+  const hit = CAPABILITY_FAMILIES.find(f => f.test(text));
+  if (hit) return hit.label;
+  if (row.material) return "Matériau";
+  return "Autres";
+}
+
+function groupByFamily(rows, familyOf) {
+  const map = new Map();
+  for (const row of rows) {
+    const family = familyOf(row);
+    if (!map.has(family)) map.set(family, []);
+    map.get(family).push(row);
+  }
+  const order = ["Usinage", "Fonctionnalisation", "Matériau", "Modification interne", "Autres"];
+  return [...map.entries()].sort((a, b) => {
+    const ia = order.indexOf(a[0]), ib = order.indexOf(b[0]);
+    return (ia === -1 ? order.length : ia) - (ib === -1 ? order.length : ib);
+  });
+}
+
+const ACTOR_CATEGORIES = [
+  {label: "Centre R&D / Recherche", test: t => /recherche|r\s?&\s?d|laboratoire|institut|universit|research (center|centre|institute)|fraunhofer|cnrs/i.test(t)},
+  {label: "Centre technologique / Plateforme", test: t => /centre technologique|plateforme|technology (center|centre|platform)/i.test(t)},
+  {label: "Industriel / Fabricant", test: t => /fabricant|manufactur|industriel|producteur|\boem\b|production|microfabrication|fabrication|usinage/i.test(t)},
+  {label: "Intégrateur / Équipementier", test: t => /intégrateur|integrator|équipementier|machine|système|equipment|system|ingénierie|engineering/i.test(t)},
+];
+
+function actorCategory(actor) {
+  const text = actor.role || "";
+  const hit = ACTOR_CATEGORIES.find(c => c.test(text));
+  return hit ? hit.label : "Distributeur / Autre";
+}
+
+function groupActorsByCategory(actors) {
+  const order = ACTOR_CATEGORIES.map(c => c.label).concat("Distributeur / Autre");
+  const map = new Map(order.map(label => [label, []]));
+  for (const actor of actors) map.get(actorCategory(actor)).push(actor);
+  return [...map.entries()].filter(([, list]) => list.length);
+}
+
+function topCounts(rows, key, limit = 8) {
+  const counts = new Map();
+  for (const row of rows) {
+    const label = row[key];
+    if (!label) continue;
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([label, value]) => ({label, value}))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, limit);
+}
+
 function aiProviderName(adaptive) {
   return adaptive.ai_provider === "anthropic" ? "Claude" : "Ollama";
 }
@@ -86,15 +247,22 @@ function evidenceTable(rows) {
 
 function renderMarket() {
   const market = state.market || {existing:[], radar:[]};
+  const allRows = [...market.existing, ...market.radar];
   content.innerHTML = header(
     "Lecture marché",
     "Applications femtoseconde",
     "Uniquement les faits où marché, pièce/composant et opération laser sont explicitement reliés. Les versions linguistiques d’un même fait sont regroupées comme preuves.",
-    `<button class="primary" data-run="market">↻ Actualiser l’analyse</button>`
+    `<div class="header-actions"><button class="export-btn" data-export="market">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser l’analyse</button></div>`
   ) +
-  `<section><div class="section-title"><div><span>01</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${market.existing.length} faits</b></div>${evidenceTable(market.existing)}</section>
-   <section><div class="section-title"><div><span>02</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${market.radar.length} faits</b></div>${evidenceTable(market.radar)}</section>`;
+  `<section><div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché, avec ses sous-thèmes (pièce / composant) les plus documentés.</p></div></div><b>${allRows.length} faits</b></div>${marketFamilyCards(allRows)}</section>
+   <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${market.existing.length} faits</b></div>${evidenceTable(market.existing)}</section>
+   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${market.radar.length} faits</b></div>${evidenceTable(market.radar)}</section>`;
   wireActions();
+  const exportBtn = document.querySelector('[data-export="market"]');
+  if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("marche.csv", allRows, [
+    {key: "market", label: "Marché"}, {key: "component", label: "Composant"},
+    {key: "operation", label: "Opération"}, {key: "languages", label: "Langues"},
+  ]));
 }
 
 
@@ -120,13 +288,16 @@ function renderMonthly() {
       </article>`).join("")}</div>`
     : `<div class="empty">Aucun nouveau fait marché validé sur la période.</div>`;
 
+  const offerFamilies = groupByFamily(monthly.new_offers || [], capabilityFamily);
   const offerList = (monthly.new_offers || []).length
-    ? `<div class="signal-list">${monthly.new_offers.map(row => `<article class="signal-item">
-        <div><small>NOUVELLE CAPACITÉ · ${esc(row.actor_name)}</small>
-        <strong>${esc(row.capability)}</strong>
-        <span>${esc([row.operation, row.laser_process, row.material].filter(Boolean).join(" · "))}</span></div>
-        <button class="proof-pill" data-offer-proof="${Number(row.id)}">preuve</button>
-      </article>`).join("")}</div>`
+    ? offerFamilies.map(([family, rows]) => `<div class="family-group"><h4>${esc(family)}<small>${rows.length}</small></h4>
+        <div class="signal-list">${rows.map(row => `<article class="signal-item">
+          <div><small>NOUVELLE CAPACITÉ · ${esc(row.actor_name)}</small>
+          <strong>${esc(row.capability)}</strong>
+          <span>${esc([row.operation, row.laser_process, row.material].filter(Boolean).join(" · "))}</span></div>
+          <button class="proof-pill" data-offer-proof="${Number(row.id)}">preuve</button>
+        </article>`).join("")}</div>
+      </div>`).join("")
     : `<div class="empty">Aucune nouvelle capacité concurrente détectée sur la période.</div>`;
 
   const techList = (monthly.technology || []).length
@@ -138,15 +309,6 @@ function renderMonthly() {
       </article>`).join("")}</div>`
     : `<div class="empty">Aucun nouveau document technologique collecté sur la période.</div>`;
 
-  const sourceList = (monthly.changed_sources || []).length
-    ? `<div class="signal-list compact">${monthly.changed_sources.slice(0, 20).map(row => `<article class="signal-item">
-        <div><small>${esc(row.actor_name)} · ${esc(row.page_type || "page")}</small>
-        <strong>${esc(row.last_title || row.url)}</strong>
-        <span>${esc(dateLabel(row.last_changed_at))}</span></div>
-        <a class="signal-link" href="${esc(row.url)}" target="_blank" rel="noopener">ouvrir ↗</a>
-      </article>`).join("")}</div>`
-    : `<div class="empty">Aucune page source modifiée détectée sur la période.</div>`;
-
   content.innerHTML = header(
     "Revue mensuelle",
     `Ce qui a changé sur les ${monthly.days || 30} derniers jours`,
@@ -157,12 +319,10 @@ function renderMonthly() {
       <article><small>Applications</small><strong>${Number(counts.new_market || 0)}</strong><span>nouveaux faits validés</span></article>
       <article><small>Concurrence</small><strong>${Number(counts.new_offers || 0)}</strong><span>nouvelles capacités</span></article>
       <article><small>Technologie</small><strong>${Number(counts.technology || 0)}</strong><span>nouveaux documents</span></article>
-      <article><small>Sources</small><strong>${Number(counts.changed_sources || 0)}</strong><span>pages modifiées</span></article>
    </div>
    <section><div class="section-title"><div><span>01</span><div><h2>Marché & opportunités</h2><p>Nouveaux faits validés et applications déjà connues mais observées de nouveau.</p></div></div><b>${marketSignals.length} signaux</b></div>${marketList}</section>
-   <section><div class="section-title"><div><span>02</span><div><h2>Mouvements concurrents</h2><p>Nouvelles offres, capacités et savoir-faire détectés chez les acteurs suivis.</p></div></div><b>${Number(counts.new_offers || 0)} signaux</b></div>${offerList}</section>
-   <section><div class="section-title"><div><span>03</span><div><h2>Technologies futures</h2><p>Publications, brevets, projets et autres documents collectés récemment.</p></div></div><b>${Number(counts.technology || 0)} signaux</b></div>${techList}</section>
-   <section><div class="section-title"><div><span>04</span><div><h2>Pages qui ont changé</h2><p>Modifications détectées dans les sources officielles surveillées.</p></div></div><b>${Number(counts.changed_sources || 0)} pages</b></div>${sourceList}</section>`;
+   <section><div class="section-title"><div><span>02</span><div><h2>Mouvements concurrents</h2><p>Nouvelles offres, capacités et savoir-faire détectés chez les acteurs suivis, classés par famille.</p></div></div><b>${Number(counts.new_offers || 0)} signaux</b></div>${offerList}</section>
+   <section><div class="section-title"><div><span>03</span><div><h2>Technologies futures</h2><p>Publications, brevets, projets et autres documents collectés récemment.</p></div></div><b>${Number(counts.technology || 0)} signaux</b></div>${techList}</section>`;
   wireActions();
 }
 
@@ -210,14 +370,18 @@ function renderOffers() {
     return haystack.includes(q);
   });
   const actors = new Set(filtered.map(row => row.actor_name)).size;
+  const families = groupByFamily(filtered, capabilityFamily);
+  const familySections = families.map(([family, rows]) =>
+    `<div class="family-group"><h4>${esc(family)}<small>${rows.length} capacités</small></h4>${offersTable(rows)}</div>`
+  ).join("");
   content.innerHTML = header(
     "Veille concurrentielle",
     "Offres & capacités",
-    "Prestations, procédés et savoir-faire détectés chez les acteurs suivis. Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.",
-    `<button class="primary" data-run="market">↻ Actualiser les preuves</button>`
+    "Prestations, procédés et savoir-faire détectés chez les acteurs suivis, classés par famille de capacité (usinage, fonctionnalisation, matériau…). Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.",
+    `<div class="header-actions"><button class="export-btn" data-export="offers">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser les preuves</button></div>`
   ) +
   `<div class="actor-toolbar offer-toolbar"><input id="offer-search" value="${esc(state.offerQuery)}" placeholder="Rechercher un acteur, un procédé, une opération, un matériau…"><span>${filtered.length} capacités · ${actors} acteurs</span></div>
-   <section><div class="section-title"><div><span>01</span><div><h2>Cartographie des offres détectées</h2><p>Une capacité peut avoir plusieurs sources et plusieurs langues sans créer de doublon métier.</p></div></div><b>${filtered.length} capacités</b></div>${offersTable(filtered)}</section>`;
+   <section><div class="section-title"><div><span>01</span><div><h2>Cartographie des offres détectées</h2><p>Une capacité peut avoir plusieurs sources et plusieurs langues sans créer de doublon métier.</p></div></div><b>${filtered.length} capacités</b></div>${familySections || offersTable(filtered)}</section>`;
   const input = document.querySelector("#offer-search");
   if (input) {
     input.focus({preventScroll:true});
@@ -228,6 +392,12 @@ function renderOffers() {
     }));
   }
   wireActions();
+  const exportBtn = document.querySelector('[data-export="offers"]');
+  if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("offres-capacites.csv", filtered, [
+    {key: "actor_name", label: "Acteur"}, {key: "offer_type", label: "Type"},
+    {key: "capability", label: "Capacité"}, {key: "operation", label: "Opération"},
+    {key: "laser_process", label: "Procédé"}, {key: "material", label: "Matériau"},
+  ]));
 }
 
 function actorCard(a) {
@@ -245,7 +415,11 @@ function renderActors() {
   const q = state.query.toLowerCase();
   const filtered = state.actors.filter(a => `${a.name} ${a.country} ${a.role}`.toLowerCase().includes(q));
   const activeCount = state.actors.filter(a => a.active).length;
-  content.innerHTML = header("Écosystème suivi",`${activeCount} acteurs actifs`,"Rôles, sources officielles et pertinence des contenus suivis.",`<button class="primary" data-run="actors">↻ Mettre à jour</button>`)+
+  const categories = groupActorsByCategory(filtered);
+  const categorySections = categories.map(([category, list]) =>
+    `<div class="actor-category"><p>${esc(category)}<small>${list.length}</small></p><div class="actor-grid">${list.map(actorCard).join("")}</div></div>`
+  ).join("");
+  content.innerHTML = header("Écosystème suivi",`${activeCount} acteurs actifs`,"Rôles, sources officielles et pertinence des contenus suivis, classés par catégorie d'acteur.",`<button class="primary" data-run="actors">↻ Mettre à jour</button>`)+
   `<form class="actor-add" id="actor-add-form">
      <input type="text" name="name" placeholder="Nom de l'acteur" required>
      <input type="text" name="country" placeholder="Pays" required>
@@ -254,7 +428,7 @@ function renderActors() {
      <label><input type="checkbox" name="priority"> Prioritaire</label>
      <button type="submit">+ Ajouter</button>
    </form>
-   <div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div><div class="actor-grid">${filtered.map(actorCard).join("")}</div>`;
+   <div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div>${categorySections || '<div class="empty">Aucun acteur ne correspond à cette recherche.</div>'}`;
   const input = document.querySelector("#actor-search");
   if (input) {
     input.focus({preventScroll:true});
