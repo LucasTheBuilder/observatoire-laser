@@ -266,14 +266,7 @@ function renderMonthly() {
 
   const offerFamilies = groupByFamily(monthly.new_offers || [], capabilityFamily);
   const offerList = (monthly.new_offers || []).length
-    ? offerFamilies.map(([family, rows]) => `<div class="family-group"><h4>${esc(family)}<small>${rows.length}</small></h4>
-        <div class="signal-list">${rows.map(row => `<article class="signal-item">
-          <div><small>NOUVELLE CAPACITÉ · ${esc(row.actor_name)}</small>
-          <strong>${esc(row.capability)}</strong>
-          <span>${esc([row.operation, row.laser_process, row.material].filter(Boolean).join(" · "))}</span></div>
-          <button class="proof-pill" data-offer-proof="${Number(row.id)}">preuve</button>
-        </article>`).join("")}</div>
-      </div>`).join("")
+    ? offerFamilyGrid(offerFamilies)
     : `<div class="empty">Aucune nouvelle capacité concurrente détectée sur la période.</div>`;
 
   const techList = (monthly.technology || []).length
@@ -308,7 +301,7 @@ function offerTypeLabel(value) {
     service: "Service",
     capability: "Capacité",
     technology: "Technologie",
-    product: "Produit / offre",
+    product: "Produit",
   };
   return labels[value] || value || "Capacité";
 }
