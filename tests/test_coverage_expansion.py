@@ -48,6 +48,26 @@ class ActorManagementTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     dbmod.create_actor("Another Co", "France", "Intégrateur", "not-a-url")
 
+    def test_init_databases_does_not_crash_with_a_manually_added_actor(self):
+        # Regression test: init_databases() re-runs on every app startup and used to derive
+        # each actor's priority by looking it up in the static ACTORS list, which raised
+        # StopIteration (crash-looping the whole app on every restart, in a real deployment)
+        # the moment a non-seed actor -- created via create_actor()/POST /api/actors -- existed.
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example", priority=True)
+            # init_databases() touches all three databases, so all three must stay isolated --
+            # not just ACTORS_DB -- for this regression call, same as _fresh_actors_db above.
+            with patch.object(dbmod, "ACTORS_DB", actors_db), \
+                 patch.object(dbmod, "MARKET_DB", directory / "market.db"), \
+                 patch.object(dbmod, "TECH_DB", directory / "technology.db"):
+                dbmod.init_databases()  # simulates the next app startup/container restart
+            with dbmod.connect(actors_db) as db:
+                profile = db.execute("SELECT strategy FROM site_profiles WHERE actor_id=?", (actor_id,)).fetchone()
+            self.assertEqual("adaptive", profile["strategy"])
+
     def test_set_actor_active_toggles_and_rejects_unknown_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             actors_db = self._fresh_actors_db(tmp)

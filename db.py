@@ -397,8 +397,12 @@ def init_databases() -> None:
                 "INSERT OR IGNORE INTO actor_sources(actor_id,url,source_kind) VALUES(?,?,?)",
                 (actor_ids[name], url, source_kind),
             )
-        for name, actor_id in actor_ids.items():
-            priority = next(actor[3] for actor in ACTORS if actor[0] == name)
+        # Read priority back from the actors table itself, not the static ACTORS list: this
+        # loop must also cover actors added later via create_actor() (POST /api/actors), which
+        # are not and never will be in ACTORS. Looking them up in ACTORS raised StopIteration
+        # here and crashed every startup once a single manually-added actor existed.
+        for row in db.execute("SELECT id,priority FROM actors"):
+            actor_id, priority = row["id"], row["priority"]
             db.execute(
                 """INSERT INTO site_profiles(actor_id,strategy,status,generated_by)
                    VALUES(?,?,?,?) ON CONFLICT(actor_id) DO UPDATE SET strategy=excluded.strategy""",
