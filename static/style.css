@@ -48,23 +48,6 @@
 .export-btn{padding:13px 16px;margin-top:14px;border:1px solid var(--line);border-radius:9px;background:#fff;color:#41515d;font-size:13px;font-weight:800;cursor:pointer}
 .export-btn:hover{border-color:var(--teal);color:var(--teal)}
 
-.chart-row{display:grid;grid-template-columns:1.6fr 1fr;gap:18px;margin-bottom:52px}
-.chart-card{padding:22px 24px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 9px 28px #17313c0a}
-.chart-card h3{margin:0 0 3px;font:500 18px Georgia,serif}
-.chart-card p{margin:0 0 18px;color:var(--muted);font-size:12px}
-.chart-legend{display:flex;gap:16px;margin-bottom:14px;font-size:11px;color:var(--muted)}
-.chart-legend span{display:inline-flex;align-items:center;gap:6px}
-.chart-legend i{width:9px;height:9px;border-radius:3px;display:inline-block}
-.hbar-chart{overflow:visible}
-.hbar-chart .chart-baseline{stroke:var(--chart-baseline);stroke-width:1}
-.hbar-chart .chart-cat-label{fill:var(--ink);font-size:12px;font-family:Inter,system-ui,sans-serif}
-.hbar-chart .chart-value-label{fill:var(--muted);font-size:11.5px;font-weight:800;font-variant-numeric:tabular-nums;font-family:Inter,system-ui,sans-serif}
-.split-bars{display:flex;flex-direction:column;gap:16px}
-.split-bar-row{display:grid;grid-template-columns:70px 1fr 44px;align-items:center;gap:12px}
-.split-bar-row span:first-child{font-size:12px;color:var(--ink);font-weight:700}
-.split-bar-track{height:20px;border-radius:5px;background:#f0f2f1;overflow:hidden}
-.split-bar-fill{height:100%;border-radius:5px}
-.split-bar-row b{font-size:13px;font-variant-numeric:tabular-nums;text-align:right}
 .market-fam-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;margin-bottom:52px}
 .market-fam-card{padding:19px 20px;border:1px solid var(--line);border-radius:13px;background:#fff;box-shadow:0 8px 24px #17313c08}
 .market-fam-card header{display:flex;gap:12px;align-items:center;margin-bottom:14px}
@@ -76,6 +59,17 @@
 .subtheme-chip{padding:5px 10px;border-radius:20px;background:#eef2f1;color:#41515d;font-size:11px;font-weight:700}
 .subtheme-chip b{color:var(--coral);font-weight:800;margin-left:4px}
 
+.fam-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.fam-card{display:flex;flex-direction:column;padding:18px 20px;border:1px solid var(--line);border-radius:13px;background:#fff;box-shadow:0 8px 24px #17313c08}
+.fam-card header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}
+.fam-card h3{margin:0;font:500 16px Georgia,serif}
+.fam-card header b{padding:3px 9px;border-radius:20px;background:#eef2f1;color:var(--muted);font-size:11px;font-weight:800}
+.fam-list{list-style:none;margin:0;padding:0;max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:5px}
+.fam-item{display:flex;flex-direction:column;gap:2px;width:100%;padding:8px 10px;border:0;border-radius:8px;background:#f8faf9;text-align:left;cursor:pointer}
+.fam-item:hover{background:#eef2f1}
+.fam-actor{font-size:12px;font-weight:750;color:var(--ink)}
+.fam-cap{font-size:11.5px;color:var(--muted)}
+
 .family-group{margin-bottom:30px}
 .family-group h4{display:flex;align-items:center;gap:10px;margin:0 0 14px;font:500 16px Georgia,serif;color:var(--ink)}
 .family-group h4 small{padding:4px 10px;border-radius:20px;background:#eef2f1;color:var(--muted);font-size:11px;font-weight:800}
@@ -83,5 +77,4 @@
 .actor-category>p{display:flex;align-items:center;gap:10px;margin:0 0 16px;text-transform:uppercase;letter-spacing:.08em;color:#5c7986;font-size:11.5px;font-weight:850}
 .actor-category>p small{padding:3px 9px;border-radius:20px;background:#eef2f1;color:var(--muted);text-transform:none;letter-spacing:0;font-size:11px;font-weight:800}
 
-@media(max-width:1100px){.chart-row{grid-template-columns:1fr}}
 @media(max-width:760px){.nav-section{display:none}}

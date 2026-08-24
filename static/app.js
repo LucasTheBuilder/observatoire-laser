@@ -56,87 +56,6 @@ function header(eyebrow, title, description, action="") {
   return `<header class="page-header"><div><p class="eyebrow">${eyebrow}</p><h1>${title}</h1><p>${description}</p></div>${action}</header>`;
 }
 
-// --- Charts (plain inline SVG, no library) --------------------------------
-
-function roundedEndBarPath(x, y, w, h, r) {
-  // 4px rounded "data-end" (right side, where the bar's value lives), square
-  // at the baseline (left) -- never a fully-rounded rect, per the bar mark spec.
-  if (w <= 0) return "";
-  const rr = Math.min(r, h / 2, w / 2);
-  return `M${x},${y} L${x + w - rr},${y} A${rr},${rr} 0 0 1 ${x + w},${y + rr} L${x + w},${y + h - rr} A${rr},${rr} 0 0 1 ${x + w - rr},${y + h} L${x},${y + h} Z`;
-}
-
-function hBarChart(rows, {barHeight = 20, gap = 12, color = "var(--chart-teal)", labelWidth = 168, unit = ""} = {}) {
-  if (!rows.length) return `<div class="empty">Pas encore assez de données pour ce graphique.</div>`;
-  const width = 620;
-  const max = Math.max(...rows.map(r => r.value), 1);
-  const plotWidth = width - labelWidth - 54;
-  const rowHeight = barHeight + gap;
-  const height = rows.length * rowHeight - gap;
-  const bars = rows.map((row, i) => {
-    const y = i * rowHeight;
-    const barWidth = Math.max(3, (row.value / max) * plotWidth);
-    const fill = row.color || color;
-    return `<g>
-      <text x="${labelWidth - 12}" y="${y + barHeight / 2}" text-anchor="end" dominant-baseline="middle" class="chart-cat-label">${esc(row.label)}</text>
-      <path d="${roundedEndBarPath(labelWidth, y, barWidth, barHeight, 4)}" fill="${fill}"><title>${esc(row.label)} : ${row.value}${unit}</title></path>
-      <text x="${labelWidth + barWidth + 8}" y="${y + barHeight / 2}" dominant-baseline="middle" class="chart-value-label">${row.value}${unit}</text>
-    </g>`;
-  }).join("");
-  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" class="hbar-chart" role="img" aria-label="Graphique en barres">
-    <line x1="${labelWidth}" y1="0" x2="${labelWidth}" y2="${height}" class="chart-baseline"/>
-    ${bars}
-  </svg>`;
-}
-
-function splitBarComparison(rows) {
-  // A 2-series direct-labeled comparison: no SVG needed, plain divs with a
-  // shared 100%-width track so both bars are visually comparable at a glance.
-  const max = Math.max(...rows.map(r => r.value), 1);
-  return `<div class="split-bars">${rows.map(row => `
-    <div class="split-bar-row">
-      <span>${esc(row.label)}</span>
-      <div class="split-bar-track"><div class="split-bar-fill" style="width:${Math.max(2, row.value / max * 100)}%;background:${row.color}"></div></div>
-      <b>${row.value}</b>
-    </div>`).join("")}
-  </div>`;
-}
-
-function stackedHBar(rows, series, {barHeight = 20, gap = 14, labelWidth = 150} = {}) {
-  if (!rows.length) return `<div class="empty">Pas encore assez de données pour ce graphique.</div>`;
-  const width = 560;
-  const segGap = 2;
-  const totals = rows.map(r => series.reduce((sum, s) => sum + (r[s.key] || 0), 0));
-  const max = Math.max(...totals, 1);
-  const plotWidth = width - labelWidth - 50;
-  const rowHeight = barHeight + gap;
-  const height = rows.length * rowHeight - gap;
-  const bars = rows.map((row, i) => {
-    const y = i * rowHeight;
-    const total = totals[i];
-    let x = labelWidth;
-    const nonZero = series.filter(s => (row[s.key] || 0) > 0);
-    const segments = nonZero.map((s, idx) => {
-      const raw = total > 0 ? (row[s.key] / max) * plotWidth : 0;
-      const isLast = idx === nonZero.length - 1;
-      const w = Math.max(0, raw - (isLast ? 0 : segGap));
-      const path = isLast ? roundedEndBarPath(x, y, w, barHeight, 4) : `M${x},${y} h${w} v${barHeight} h${-w} Z`;
-      const seg = w > 0 ? `<path d="${path}" fill="${s.color}"><title>${esc(row.label)} — ${esc(s.label)} : ${row[s.key]}</title></path>` : "";
-      x += raw;
-      return seg;
-    }).join("");
-    return `<g>
-      <text x="${labelWidth - 12}" y="${y + barHeight / 2}" text-anchor="end" dominant-baseline="middle" class="chart-cat-label">${esc(row.label)}</text>
-      ${segments}
-      <text x="${labelWidth + Math.max(3, (total / max) * plotWidth) + 8}" y="${y + barHeight / 2}" dominant-baseline="middle" class="chart-value-label">${total}</text>
-    </g>`;
-  }).join("");
-  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" class="hbar-chart" role="img" aria-label="Comparaison par marché">
-    <line x1="${labelWidth}" y1="0" x2="${labelWidth}" y2="${height}" class="chart-baseline"/>
-    ${bars}
-  </svg>`;
-}
-
 // --- Market family visual metadata (decorative icon + tint, not chart color) -----
 
 const MARKET_STYLE = {
@@ -263,19 +182,6 @@ function groupActorsByCategory(actors) {
   return [...map.entries()].filter(([, list]) => list.length);
 }
 
-function topCounts(rows, key, limit = 8) {
-  const counts = new Map();
-  for (const row of rows) {
-    const label = row[key];
-    if (!label) continue;
-    counts.set(label, (counts.get(label) || 0) + 1);
-  }
-  return [...counts.entries()]
-    .map(([label, value]) => ({label, value}))
-    .sort((a, b) => b.value - a.value)
-    .slice(0, limit);
-}
-
 function aiProviderName(adaptive) {
   return adaptive.ai_provider === "anthropic" ? "Claude" : "Ollama";
 }
@@ -304,31 +210,6 @@ function evidenceTable(rows) {
   </div>`;
 }
 
-function marketComparisonChart(existingRows, radarRows) {
-  const totals = new Map();
-  for (const row of existingRows) {
-    const bucket = totals.get(row.market) || {label: row.market, existing: 0, radar: 0};
-    bucket.existing += 1;
-    totals.set(row.market, bucket);
-  }
-  for (const row of radarRows) {
-    const bucket = totals.get(row.market) || {label: row.market, existing: 0, radar: 0};
-    bucket.radar += 1;
-    totals.set(row.market, bucket);
-  }
-  const rows = [...totals.values()].sort((a, b) => (b.existing + b.radar) - (a.existing + a.radar));
-  const series = [
-    {key: "existing", label: "Existant", color: "var(--chart-teal)"},
-    {key: "radar", label: "Radar", color: "var(--chart-coral)"},
-  ];
-  return `<div class="chart-card">
-    <h3>Existant vs Radar par marché</h3>
-    <p>Part des faits déjà industrialisés face aux besoins encore au stade radar, marché par marché.</p>
-    <div class="chart-legend">${series.map(s => `<span><i style="background:${s.color}"></i>${s.label}</span>`).join("")}</div>
-    ${stackedHBar(rows, series)}
-  </div>`;
-}
-
 function renderMarket() {
   const market = state.market || {existing:[], radar:[]};
   const allRows = [...market.existing, ...market.radar];
@@ -339,9 +220,8 @@ function renderMarket() {
     `<div class="header-actions"><button class="export-btn" data-export="market">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser l’analyse</button></div>`
   ) +
   `<section><div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché, avec ses sous-thèmes (pièce / composant) les plus documentés.</p></div></div><b>${allRows.length} faits</b></div>${marketFamilyCards(allRows)}</section>
-   <section><div class="section-title"><div><span>02</span><div><h2>Existant vs Radar par marché</h2><p>Comparaison visuelle de la maturité des faits détectés, marché par marché.</p></div></div></div>${marketComparisonChart(market.existing, market.radar)}</section>
-   <section><div class="section-title"><div><span>03</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${market.existing.length} faits</b></div>${evidenceTable(market.existing)}</section>
-   <section><div class="section-title"><div><span>04</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${market.radar.length} faits</b></div>${evidenceTable(market.radar)}</section>`;
+   <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${market.existing.length} faits</b></div>${evidenceTable(market.existing)}</section>
+   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${market.radar.length} faits</b></div>${evidenceTable(market.radar)}</section>`;
   wireActions();
   const exportBtn = document.querySelector('[data-export="market"]');
   if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("marche.csv", allRows, [
@@ -448,6 +328,19 @@ function offersTable(rows) {
   </div>`;
 }
 
+function offerFamilyCard(family, rows) {
+  const items = rows.map(row => `<li><button class="fam-item" data-offer-proof="${Number(row.id)}">
+      <span class="fam-actor">${esc(row.actor_name)}</span>
+      <span class="fam-cap">${esc(row.capability)}${row.material ? ` · ${esc(row.material)}` : ""}</span>
+    </button></li>`).join("");
+  return `<article class="fam-card"><header><h3>${esc(family)}</h3><b>${rows.length}</b></header><ul class="fam-list">${items}</ul></article>`;
+}
+
+function offerFamilyGrid(families) {
+  if (!families.length) return "";
+  return `<div class="fam-grid">${families.map(([family, rows]) => offerFamilyCard(family, rows)).join("")}</div>`;
+}
+
 function renderOffers() {
   const q = state.offerQuery.trim().toLowerCase();
   const filtered = state.offers.filter(row => {
@@ -456,9 +349,6 @@ function renderOffers() {
   });
   const actors = new Set(filtered.map(row => row.actor_name)).size;
   const families = groupByFamily(filtered, capabilityFamily);
-  const familySections = families.map(([family, rows]) =>
-    `<div class="family-group"><h4>${esc(family)}<small>${rows.length} capacités</small></h4>${offersTable(rows)}</div>`
-  ).join("");
   content.innerHTML = header(
     "Veille concurrentielle",
     "Offres & capacités",
@@ -466,7 +356,7 @@ function renderOffers() {
     `<div class="header-actions"><button class="export-btn" data-export="offers">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser les preuves</button></div>`
   ) +
   `<div class="actor-toolbar offer-toolbar"><input id="offer-search" value="${esc(state.offerQuery)}" placeholder="Rechercher un acteur, un procédé, une opération, un matériau…"><span>${filtered.length} capacités · ${actors} acteurs</span></div>
-   <section><div class="section-title"><div><span>01</span><div><h2>Cartographie des offres détectées</h2><p>Une capacité peut avoir plusieurs sources et plusieurs langues sans créer de doublon métier.</p></div></div><b>${filtered.length} capacités</b></div>${familySections || offersTable(filtered)}</section>`;
+   <section><div class="section-title"><div><span>01</span><div><h2>Cartographie des offres détectées</h2><p>Une famille de capacité par carré ; cliquer une ligne ouvre ses preuves.</p></div></div><b>${filtered.length} capacités</b></div>${offerFamilyGrid(families) || offersTable(filtered)}</section>`;
   const input = document.querySelector("#offer-search");
   if (input) {
     input.focus({preventScroll:true});
