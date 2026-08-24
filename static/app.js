@@ -56,6 +56,10 @@ function header(eyebrow, title, description, action="") {
   return `<header class="page-header"><div><p class="eyebrow">${eyebrow}</p><h1>${title}</h1><p>${description}</p></div>${action}</header>`;
 }
 
+function statGrid(items) {
+  return `<div class="signal-grid">${items.map(i => `<article><small>${esc(i.label)}</small><strong>${esc(i.value)}</strong><span>${esc(i.caption)}</span></article>`).join("")}</div>`;
+}
+
 // --- Market family visual metadata (decorative icon + tint, not chart color) -----
 
 const MARKET_STYLE = {
@@ -213,12 +217,19 @@ function evidenceTable(rows) {
 function renderMarket() {
   const market = state.market || {existing:[], radar:[]};
   const allRows = [...market.existing, ...market.radar];
+  const marketCount = new Set(allRows.map(r => r.market)).size;
   content.innerHTML = header(
     "Lecture marché",
     "Applications femtoseconde",
     "Uniquement les faits où marché, pièce/composant et opération laser sont explicitement reliés. Les versions linguistiques d’un même fait sont regroupées comme preuves.",
     `<div class="header-actions"><button class="export-btn" data-export="market">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser l’analyse</button></div>`
   ) +
+  statGrid([
+    {label: "Faits marché", value: allRows.length, caption: "au total"},
+    {label: "Marchés couverts", value: marketCount, caption: "familles distinctes"},
+    {label: "Confirmées", value: market.existing.length, caption: "applications existantes"},
+    {label: "Radar", value: market.radar.length, caption: "besoins à confirmer"},
+  ]) +
   `<section><div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché, avec ses sous-thèmes (pièce / composant) les plus documentés.</p></div></div><b>${allRows.length} faits</b></div>${marketFamilyCards(allRows)}</section>
    <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${market.existing.length} faits</b></div>${evidenceTable(market.existing)}</section>
    <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${market.radar.length} faits</b></div>${evidenceTable(market.radar)}</section>`;
@@ -330,7 +341,7 @@ function offersTable(rows) {
 
 function offerFamilyCard(family, rows) {
   const items = rows.map(row => `<li><button class="fam-item" data-offer-proof="${Number(row.id)}">
-      <span class="fam-actor">${esc(row.actor_name)}</span>
+      <span class="fam-row-top"><span class="fam-actor">${esc(row.actor_name)}</span><span class="offer-type-badge ${esc(row.offer_type)}">${esc(offerTypeLabel(row.offer_type))}</span></span>
       <span class="fam-cap">${esc(row.capability)}${row.material ? ` · ${esc(row.material)}` : ""}</span>
     </button></li>`).join("");
   return `<article class="fam-card"><header><h3>${esc(family)}</h3><b>${rows.length}</b></header><ul class="fam-list">${items}</ul></article>`;
@@ -349,12 +360,19 @@ function renderOffers() {
   });
   const actors = new Set(filtered.map(row => row.actor_name)).size;
   const families = groupByFamily(filtered, capabilityFamily);
+  const multiSource = filtered.filter(row => Number(row.languages || 0) > 1).length;
   content.innerHTML = header(
     "Veille concurrentielle",
     "Offres & capacités",
     "Prestations, procédés et savoir-faire détectés chez les acteurs suivis, classés par famille de capacité (usinage, fonctionnalisation, matériau…). Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.",
     `<div class="header-actions"><button class="export-btn" data-export="offers">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser les preuves</button></div>`
   ) +
+  statGrid([
+    {label: "Capacités", value: filtered.length, caption: "détectées"},
+    {label: "Acteurs actifs", value: actors, caption: "sur ce périmètre"},
+    {label: "Familles", value: families.length, caption: "usinage, fonctionnalisation…"},
+    {label: "Multi-sources", value: multiSource, caption: "capacités recoupées"},
+  ]) +
   `<div class="actor-toolbar offer-toolbar"><input id="offer-search" value="${esc(state.offerQuery)}" placeholder="Rechercher un acteur, un procédé, une opération, un matériau…"><span>${filtered.length} capacités · ${actors} acteurs</span></div>
    <section><div class="section-title"><div><span>01</span><div><h2>Cartographie des offres détectées</h2><p>Une famille de capacité par carré ; cliquer une ligne ouvre ses preuves.</p></div></div><b>${filtered.length} capacités</b></div>${offerFamilyGrid(families) || offersTable(filtered)}</section>`;
   const input = document.querySelector("#offer-search");
