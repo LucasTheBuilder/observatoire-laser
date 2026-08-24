@@ -104,6 +104,29 @@ class StrictMarketVsOfferTests(unittest.TestCase):
         self.assertIn("Ablation", capabilities)
 
 
+class DuplicateProofDedupTests(unittest.TestCase):
+    def test_same_quote_from_two_blocks_gets_the_same_source_fingerprint(self):
+        # Two different DOM blocks (different path/heading) can expose the exact same
+        # sentence -- e.g. a page that repeats a paragraph in a mobile and desktop layout.
+        # The fingerprint must key on the fact + url + quote, not the block, so the second
+        # occurrence collapses onto the first via INSERT OR IGNORE instead of showing as a
+        # duplicate proof in the UI.
+        text = (
+            "We provide femtosecond laser micromachining and laser texturing as a technical "
+            "service for industrial customers."
+        )
+        block_a = ContentBlock(heading="Services", h1="Services", h2="", h3="", path="main > section:nth-child(1)", text=text)
+        block_b = ContentBlock(heading="Services (mobile)", h1="Services", h2="Mobile", h3="", path="aside > section:nth-child(3)", text=text)
+        url = "https://www.example.test/en/services"
+        offers_a = {item["capability"]: item for item in _offer_candidates("ACME", url, "Services", block_a, page_type="service")}
+        offers_b = {item["capability"]: item for item in _offer_candidates("ACME", url, "Services", block_b, page_type="service")}
+        self.assertTrue(offers_a)
+        shared = set(offers_a) & set(offers_b)
+        self.assertTrue(shared)
+        for capability in shared:
+            self.assertEqual(offers_a[capability]["source_fingerprint"], offers_b[capability]["source_fingerprint"])
+
+
 class MultilingualFactTests(unittest.TestCase):
     def _db(self):
         conn = sqlite3.connect(":memory:")

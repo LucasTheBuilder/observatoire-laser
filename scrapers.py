@@ -869,7 +869,10 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
 
     group = market_fact_key(actor_name, bucket, market, component, operation)
     app_key = application_key(actor_name, market, component, operation)
-    source_fingerprint = hashlib.sha256(f"{url}|{block.fingerprint}|{quote}".encode()).hexdigest()
+    # Keyed on the fact + url + quote, not the DOM block: two different blocks that happen
+    # to expose the exact same quote for the same fact are the same proof to a reader, and
+    # must collapse to one row instead of showing as duplicate sources.
+    source_fingerprint = hashlib.sha256(f"{group}|{url}|{quote}".encode()).hexdigest()
     fact_fingerprint = hashlib.sha256(group.encode()).hexdigest()
     stage_parts = [maturity]
     if process:
@@ -982,7 +985,7 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
             "quote": quote,
             "fact_key": fact_key,
             "fingerprint": hashlib.sha256(fact_key.encode()).hexdigest(),
-            "source_fingerprint": hashlib.sha256(f"{url}|{block.fingerprint}|{quote}|{capability}".encode()).hexdigest(),
+            "source_fingerprint": hashlib.sha256(f"{fact_key}|{url}|{quote}".encode()).hexdigest(),
             "block_heading": block.heading,
             "block_path": block.path,
             "mode": mode,
@@ -1218,7 +1221,7 @@ def _ai_candidates(
             "fact_key": fact_key,
             "application_key": app_key,
             "fingerprint": hashlib.sha256(fact_key.encode()).hexdigest(),
-            "source_fingerprint": hashlib.sha256(f"{url}|{block.fingerprint}|{quote}".encode()).hexdigest(),
+            "source_fingerprint": hashlib.sha256(f"{fact_key}|{url}|{quote}".encode()).hexdigest(),
             "block_heading": block.heading,
             "block_path": block.path,
             "mode": mode,
