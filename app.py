@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from dotenv import load_dotenv
+
+# Must run before importing db/hybrid/scrapers: those modules read several settings
+# (BACKUP_RETENTION_COUNT, CRAWL_DELAY_SECONDS, CRAWLER_CONTACT, ...) from the environment
+# at import time, so .env has to be loaded first for a local (non-Docker) run to pick them
+# up. Docker Compose already injects its own environment/env_file, so this is a no-op there.
+load_dotenv()
+
 import json
 import threading
 import webbrowser
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -15,7 +24,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from db import ACTORS_DB, MARKET_DB, TECH_DB, backup_all_databases, connect, init_databases, rows
-from hybrid import OllamaClient
+from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from scrapers import scrape_actors, scrape_market, scrape_technology
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -40,7 +49,7 @@ def _collect_monthly() -> dict:
     }
 
 
-collectors = {
+collectors: dict[str, Callable[[], dict]] = {
     "actors": scrape_actors,
     "market": scrape_market,
     "technology": scrape_technology,
@@ -78,7 +87,7 @@ def _last_run(path: Path) -> dict | None:
 
 @app.get("/api/overview")
 def overview():
-    ollama = OllamaClient()
+    ai_client = get_ai_client()
 
     # One connection per database instead of opening a new SQLite connection for every scalar.
     with connect(ACTORS_DB) as db:
@@ -112,6 +121,15 @@ def overview():
             + db.execute("SELECT COUNT(*) FROM offer_sources").fetchone()[0]
         )
         market_last = db.execute("SELECT * FROM collection_runs ORDER BY id DESC LIMIT 1").fetchone()
+        month_start = datetime.now(timezone.utc).strftime("%Y-%m-01")
+        ai_usage_month = db.execute(
+            "SELECT COALESCE(SUM(ai_input_tokens),0) AS input_tokens, COALESCE(SUM(ai_output_tokens),0) AS output_tokens "
+            "FROM collection_runs WHERE started_at>=?",
+            (month_start,),
+        ).fetchone()
+        vocabulary_pending = db.execute(
+            "SELECT COUNT(*) FROM vocabulary_candidates WHERE review_status='pending'"
+        ).fetchone()[0]
 
     with connect(TECH_DB) as db:
         technology_count = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
@@ -130,6 +148,7 @@ def overview():
             "offers": int(offers_count or 0),
             "proof_sources": int(proof_sources or 0),
             "last_run": dict(market_last) if market_last else None,
+            "vocabulary_pending": int(vocabulary_pending or 0),
         },
         "technology": {
             "documents": int(technology_count or 0),
@@ -141,8 +160,16 @@ def overview():
             "partial": int(adaptive_stats["partial"] or 0),
             "degraded": int(adaptive_stats["degraded"] or 0),
             "needs_reprofile": int(adaptive_stats["needs_reprofile"] or 0),
-            "ollama_available": ollama.available(),
-            "model": ollama.model,
+            "ollama_available": ai_client.available(),
+            "model": ai_client.model,
+            "ai_provider": "anthropic" if isinstance(ai_client, AnthropicClient) else "ollama",
+            "ai_cost_month_usd": (
+                estimate_anthropic_cost_usd(
+                    ai_client.model, int(ai_usage_month["input_tokens"]), int(ai_usage_month["output_tokens"])
+                )
+                if isinstance(ai_client, AnthropicClient)
+                else None
+            ),
         },
         "jobs": _jobs_snapshot(),
     }
@@ -326,6 +353,32 @@ def proofs(bucket: str, market: str, component: str, operation: str):
            ORDER BY COALESCE(es.source_date,es.created_at) DESC""",
         (bucket, market, component, operation),
     )
+
+
+@app.get("/api/vocabulary-candidates")
+def vocabulary_candidates(status: Literal["pending", "accepted", "rejected"] = "pending"):
+    """AI-proposed market/component/operation labels that matched no known lexicon entry.
+
+    Read-only triage view: accepting a label into the lexicons themselves is still a code
+    change (scrapers.py's MARKETS/COMPONENTS/OPERATIONS), this endpoint only surfaces the
+    candidates so an analyst can decide which proposals are worth adding.
+    """
+    candidates = rows(
+        MARKET_DB,
+        """SELECT id,actor_name,source_url,source_title,quote,block_heading,
+                  proposed_labels,resolved_labels,review_status,created_at,last_seen_at
+           FROM vocabulary_candidates
+           WHERE review_status=?
+           ORDER BY last_seen_at DESC""",
+        (status,),
+    )
+    for candidate in candidates:
+        for key in ("proposed_labels", "resolved_labels"):
+            try:
+                candidate[key] = json.loads(candidate[key])
+            except (TypeError, ValueError):
+                candidate[key] = {}
+    return candidates
 
 
 @app.get("/api/offers")

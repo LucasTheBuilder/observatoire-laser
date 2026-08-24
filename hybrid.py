@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
+import anthropic
 import httpx
+from anthropic.types import ToolChoiceToolParam, ToolParam
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from site_profiles import DEFAULT_SITE_PROFILE
@@ -1052,6 +1054,11 @@ class OllamaClient:
         self.base_url = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434").rstrip("/")
         self.model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
         self.timeout = float(os.getenv("OLLAMA_TIMEOUT", "90"))
+        # Ollama has no per-request token accounting worth wiring up (it's a local daemon,
+        # not billed); kept at 0 so callers can read *.total_*_tokens uniformly regardless
+        # of which provider get_ai_client() returned.
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
 
     def available(self) -> bool:
         now = time.monotonic()
@@ -1081,10 +1088,89 @@ class OllamaClient:
         return json.loads(content)
 
 
+class AnthropicClient:
+    """Cloud fallback for market-fact extraction, selected via AI_PROVIDER=anthropic.
+
+    Implements the same duck-typed contract as OllamaClient (available(), ask_json(),
+    .model, .total_input_tokens/.total_output_tokens) so callers don't need to know which
+    provider they got from get_ai_client().
+
+    ask_json() stays schema-agnostic on purpose, like Ollama's `format: "json"` -- it is
+    also used by build_profile() with a completely different expected JSON shape than the
+    market-fact extraction in scrapers._ai_candidates(). Forcing a fixed tool schema here
+    would silently return the wrong shape to whichever caller didn't design it. Instead,
+    tool_choice forces *some* tool call (so the reply is always structured JSON, never prose
+    or markdown fences) via a deliberately schema-less tool -- the caller's system prompt is
+    still what defines the actual expected shape, exactly as it already does for Ollama.
+    """
+
+    _TOOL_NAME = "respond_json"
+    _TOOL_SCHEMA: ToolParam = {
+        "name": _TOOL_NAME,
+        "description": "Renvoie la réponse structurée demandée par les instructions du message, au format JSON.",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": True},
+    }
+
+    def __init__(self) -> None:
+        self.api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        # No date suffix: Anthropic model IDs are complete as-is (claude-haiku-4-5, not
+        # claude-haiku-4-5-20251001) -- a dated suffix is simply an invalid model id.
+        self.model = os.getenv("ANTHROPIC_EXTRACTION_MODEL", "claude-haiku-4-5")
+        self._client = anthropic.Anthropic(api_key=self.api_key) if self.api_key else None
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+
+    def available(self) -> bool:
+        return self._client is not None
+
+    def ask_json(self, system: str, prompt: str) -> dict[str, Any] | list[Any]:
+        if not self._client:
+            return {}
+        tool_choice: ToolChoiceToolParam = {"type": "tool", "name": self._TOOL_NAME}
+        try:
+            response = self._client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[self._TOOL_SCHEMA],
+                tool_choice=tool_choice,
+            )
+        except anthropic.APIError:
+            return {}
+        self.total_input_tokens += response.usage.input_tokens
+        self.total_output_tokens += response.usage.output_tokens
+        tool_block = next((block for block in response.content if block.type == "tool_use"), None)
+        return tool_block.input if tool_block else {}
+
+
+def get_ai_client() -> OllamaClient | AnthropicClient:
+    return AnthropicClient() if os.getenv("AI_PROVIDER", "").strip().lower() == "anthropic" else OllamaClient()
+
+
+# (input $/1M tokens, output $/1M tokens). This is a maintained snapshot, not a live lookup --
+# check console.anthropic.com/settings/billing before trusting it for real budgeting, and update
+# it if ANTHROPIC_EXTRACTION_MODEL changes to a model not listed here.
+ANTHROPIC_PRICING_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-sonnet-5": (3.00, 15.00),
+    "claude-opus-5": (5.00, 25.00),
+}
+
+
+def estimate_anthropic_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | None:
+    """Rough cost estimate from accumulated token counts; None for an unlisted model."""
+    prices = ANTHROPIC_PRICING_PER_MTOK.get(model)
+    if not prices:
+        return None
+    input_price, output_price = prices
+    return round(input_tokens / 1_000_000 * input_price + output_tokens / 1_000_000 * output_price, 4)
+
+
 def build_profile(
     actor: dict[str, Any],
     documents: list[tuple[str, ParsedDocument]],
-    ollama: OllamaClient | None = None,
+    ollama: OllamaClient | AnthropicClient | None = None,
     coverage: dict[str, dict[str, Any]] | None = None,
     site_profile: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str, float]:

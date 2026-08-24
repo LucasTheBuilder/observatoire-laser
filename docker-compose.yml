@@ -16,6 +16,9 @@ services:
       CRAWL_DELAY_SECONDS: ${CRAWL_DELAY_SECONDS:-0.5}
       CRAWL_MAX_RETRIES: ${CRAWL_MAX_RETRIES:-2}
       CRAWLER_CONTACT: ${CRAWLER_CONTACT:-}
+      AI_PROVIDER: ${AI_PROVIDER:-ollama}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_EXTRACTION_MODEL: ${ANTHROPIC_EXTRACTION_MODEL:-claude-haiku-4-5}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

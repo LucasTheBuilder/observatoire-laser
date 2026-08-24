@@ -524,6 +524,23 @@ def init_databases() -> None:
             );
             CREATE INDEX IF NOT EXISTS evidence_bucket_transitions_evidence_idx
                 ON evidence_bucket_transitions(evidence_id);
+
+            CREATE TABLE IF NOT EXISTS vocabulary_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_name TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                source_title TEXT,
+                quote TEXT NOT NULL,
+                block_heading TEXT,
+                proposed_labels TEXT NOT NULL,
+                resolved_labels TEXT NOT NULL DEFAULT '{}',
+                review_status TEXT NOT NULL DEFAULT 'pending' CHECK(review_status IN ('pending','accepted','rejected')),
+                fingerprint TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS vocabulary_candidates_status_idx
+                ON vocabulary_candidates(review_status, created_at);
             """
         )
         _add_columns(db, "offers", {
@@ -541,6 +558,8 @@ def init_databases() -> None:
             "laser_blocks": "INTEGER NOT NULL DEFAULT 0",
             "candidate_count": "INTEGER NOT NULL DEFAULT 0",
             "diagnostics_json": "TEXT NOT NULL DEFAULT '{}'",
+            "ai_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "ai_output_tokens": "INTEGER NOT NULL DEFAULT 0",
         })
         db.execute("UPDATE evidence SET fact_status=CASE WHEN review_status='accepted' THEN 'validated' WHEN review_status='rejected' THEN 'rejected' ELSE 'review' END WHERE fact_status IS NULL OR fact_status='' OR fact_status='review'")
         db.execute("UPDATE evidence SET last_seen_at=COALESCE(last_seen_at,updated_at,created_at)")

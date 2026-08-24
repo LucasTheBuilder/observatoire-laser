@@ -18,6 +18,7 @@ import httpx
 
 from db import ACTORS_DB, BUCKET_RANK, MARKET_DB, TECH_DB, application_key, connect, market_fact_key, offer_fact_key, utc_now
 from hybrid import (
+    AnthropicClient,
     ContentBlock,
     OllamaClient,
     ParsedDocument,
@@ -25,11 +26,14 @@ from hybrid import (
     build_profile,
     canonical_url,
     classify_source,
+    get_ai_client,
     normalize_page_type,
     parse_document,
     profile_json,
 )
 from site_profiles import crawl_budget, get_site_profile, seed_urls
+
+AiClient = OllamaClient | AnthropicClient
 
 CRAWLER_CONTACT = os.getenv("CRAWLER_CONTACT", "").strip()
 USER_AGENT = "ObservatoireLaser/3.4.1-optimized (+local-relation deterministic crawler" + (
@@ -967,11 +971,57 @@ def _validate_ai_value(value: object, allowed: set[str]) -> str:
     return text if text in allowed else "Non identifié"
 
 
-def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBlock], ollama: OllamaClient) -> list[dict]:
-    """Conservative AI fallback for strict market applications only.
+def _ai_mode_label(ollama: AiClient) -> str:
+    provider = "anthropic" if isinstance(ollama, AnthropicClient) else "ollama"
+    return f"{provider}:{ollama.model}"
 
-    Ollama may resolve wording, but it cannot invent or substitute Market / Component / Operation.
-    Each of the three core labels must also be supported by the deterministic local-section lexicons.
+
+def _vocabulary_candidate(
+    actor_name: str,
+    url: str,
+    title: str,
+    quote: str,
+    block: ContentBlock,
+    proposed: dict[str, str],
+    resolved: dict[str, str | None],
+) -> dict | None:
+    """Build a triage record when an AI-proposed core label matches no known lexicon entry.
+
+    Only genuinely-proposed-but-unresolved dimensions are queued -- a dimension the model left
+    blank isn't a vocabulary gap worth a human's time. Resolved dimensions are kept alongside
+    for context (e.g. "component already resolved to Stents, but market has no match").
+    """
+    missing = {key: value for key, value in proposed.items() if value and not resolved.get(key)}
+    if not missing:
+        return None
+    known = {key: value for key, value in resolved.items() if value}
+    fingerprint = hashlib.sha256(
+        "|".join([actor_name, url, quote, json.dumps(missing, sort_keys=True, ensure_ascii=False)]).encode()
+    ).hexdigest()
+    return {
+        "kind": "vocabulary_candidate",
+        "actor": actor_name,
+        "url": url,
+        "title": title,
+        "quote": quote[:500],
+        "block_heading": block.heading,
+        "proposed_labels": missing,
+        "resolved_labels": known,
+        "fingerprint": fingerprint,
+    }
+
+
+def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBlock], ollama: AiClient) -> list[dict]:
+    """Conservative AI fallback for market applications, with an open-vocabulary escape hatch.
+
+    The AI may resolve wording, but it cannot invent or substitute Market / Component /
+    Operation on the strict path: when its answer for all three normalizes to a known label,
+    that label must also be independently supported by the deterministic local-section
+    lexicon, exactly as before. When at least one of the three doesn't match any known label,
+    the fact isn't discarded outright -- it's queued in ``vocabulary_candidates`` for human
+    review instead, carrying the model's actual proposed wording (not just "unresolved").
+    Complementary dimensions (process/architecture/material/performance/maturity) stay
+    restricted to the known lexicons in both cases.
     """
     relevant: list[tuple[int, ContentBlock, str]] = []
     for i, block in enumerate(blocks):
@@ -998,11 +1048,16 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
         "blocks": [dict(index=i, context=section[:2500], **block_payload(block)) for i, block, section in relevant],
     }, ensure_ascii=False)
     system = (
-        "Analyse uniquement des applications marché explicitement documentées. Utilise uniquement les labels autorisés. "
-        "Un fait doit avoir market, component et operation explicitement justifiés par le bloc ou ses titres de section locaux. "
-        "Ne remplace jamais un composant manquant par un matériau, une architecture ou un procédé, et ne remplace jamais une "
-        "opération manquante par un procédé. Réponds en JSON avec facts contenant block_index, market, component, operation, "
-        "process_technology, application_architecture, material, performance, maturity, bucket, stage, quote, confidence. "
+        "Analyse uniquement des applications marché explicitement documentées. "
+        "Pour market, component et operation : utilise en priorité un des libellés connus listés dans allowed_labels "
+        "si le contenu correspond clairement. Si le contenu décrit une application, un composant ou une opération réels "
+        "mais qui ne correspond à AUCUN libellé connu, propose un libellé court et précis en français plutôt que de "
+        "forcer une correspondance approximative ou d'inventer une valeur non justifiée par le texte. "
+        "Pour process_technology, application_architecture, material, performance et maturity, utilise uniquement les "
+        "labels autorisés listés. Ne remplace jamais un composant manquant par un matériau, une architecture ou un "
+        "procédé, et ne remplace jamais une opération manquante par un procédé. "
+        "Réponds en JSON avec facts contenant block_index, market, component, operation, process_technology, "
+        "application_architecture, material, performance, maturity, bucket, stage, quote, confidence. "
         "quote doit être une sous-chaîne exacte du bloc courant."
     )
     try:
@@ -1012,12 +1067,12 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
         return []
 
     block_by_index = {i: (block, section) for i, block, section in relevant}
-    allowed = {
-        "market": set(MARKETS), "component": set(COMPONENTS), "operation": set(OPERATIONS),
+    complementary = {
         "process_technology": set(PROCESS_TECHNOLOGIES), "application_architecture": set(APPLICATION_ARCHITECTURES),
         "material": set(MATERIALS), "performance": set(PERFORMANCE_TERMS),
     }
     maturity_to_bucket = {stage: bucket for stage, bucket, _ in MATURITY_RULES}
+    mode = _ai_mode_label(ollama)
     candidates: list[dict] = []
 
     for fact in facts[:20]:
@@ -1031,24 +1086,44 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
         if not quote or quote not in block.text or confidence < 0.72:
             continue
 
-        fields = {key: _validate_ai_value(fact.get(key), values) for key, values in allowed.items()}
-        if any(fields[key] == "Non identifié" for key in ("market", "component", "operation")):
+        fields = {key: _validate_ai_value(fact.get(key), values) for key, values in complementary.items()}
+
+        proposed = {
+            "market": str(fact.get("market") or "").strip(),
+            "component": str(fact.get("component") or "").strip(),
+            "operation": str(fact.get("operation") or "").strip(),
+        }
+        # A resolved core dimension means the AI's answer is *exactly* one of the known
+        # canonical labels (allowed_labels lists those verbatim in the prompt) -- this is a
+        # membership check, not a lexical/keyword match: _match_label() looks for descriptive
+        # keywords *inside* a piece of text ("medical" inside a sentence), which is a
+        # different question from "is this string itself one of our label names".
+        resolved: dict[str, str | None] = {
+            key: None if (value := _validate_ai_value(fact.get(key), core)) == "Non identifié" else value
+            for key, core in (("market", set(MARKETS)), ("component", set(COMPONENTS)), ("operation", set(OPERATIONS)))
+        }
+        if not all(resolved.values()):
+            vocabulary_candidate = _vocabulary_candidate(actor_name, url, title, quote, block, proposed, resolved)
+            if vocabulary_candidate:
+                candidates.append(vocabulary_candidate)
             continue
 
+        # Known-label path: the AI's wording resolving to a known label is not enough on its
+        # own -- that label must also be independently present via the deterministic
+        # local-section lexicon, exactly as before this open-vocabulary escape hatch existed.
         deterministic_core = {
             "market": _match_label(section, MARKETS),
             "component": _match_label(section, COMPONENTS),
             "operation": _match_label(section, OPERATIONS),
         }
-        if any(deterministic_core[key] != fields[key] for key in deterministic_core):
+        if any(deterministic_core[key] != resolved[key] for key in resolved):
             continue
 
         maturity = _validate_ai_value(fact.get("maturity"), set(maturity_to_bucket))
         maturity_class = maturity_to_bucket.get(maturity, "unknown")
         bucket = "existing" if maturity_class == "existing" else "radar"
-        market = fields["market"]
-        component = fields["component"]
-        operation = fields["operation"]
+        market, component, operation = resolved["market"], resolved["component"], resolved["operation"]
+        assert market is not None and component is not None and operation is not None  # guaranteed by all(resolved.values()) above
         fact_key = market_fact_key(actor_name, bucket, market, component, operation)
         app_key = application_key(actor_name, market, component, operation)
         extras = []
@@ -1084,7 +1159,7 @@ def _ai_candidates(actor_name: str, url: str, title: str, blocks: list[ContentBl
             "source_fingerprint": hashlib.sha256(f"{url}|{block.fingerprint}|{quote}".encode()).hexdigest(),
             "block_heading": block.heading,
             "block_path": block.path,
-            "mode": f"ollama:{ollama.model}",
+            "mode": mode,
             "confidence": min(0.98, max(0.0, confidence)),
         })
     return candidates
@@ -1196,7 +1271,7 @@ def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
         actors = db.execute("SELECT * FROM actors WHERE active=1 ORDER BY priority DESC,name").fetchall()
 
     scanned = changed = errors = discovered = profiled = fallback = 0
-    ollama = OllamaClient()
+    ollama = get_ai_client()
 
     with httpx.Client(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as client:
         for actor_row in actors:
@@ -1719,13 +1794,49 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
     return fact_added, source_added
 
 
-def scrape_market(max_pages: int = 120) -> dict:
+def _upsert_vocabulary_candidate(db, candidate: dict) -> int:
+    """Queue one AI-proposed label that matched no known lexicon entry for human review.
+
+    Returns 1 when a new row was created, 0 when an existing one was just refreshed
+    (``last_seen_at`` bumped) -- mirrors the fact-added/source-added return convention used
+    by the other _upsert_* helpers in this module.
+    """
+    stamp = utc_now()
+    row = db.execute("SELECT id FROM vocabulary_candidates WHERE fingerprint=?", (candidate["fingerprint"],)).fetchone()
+    if row:
+        db.execute("UPDATE vocabulary_candidates SET last_seen_at=? WHERE id=?", (stamp, row["id"]))
+        return 0
+    db.execute(
+        """INSERT INTO vocabulary_candidates(
+               actor_name,source_url,source_title,quote,block_heading,proposed_labels,resolved_labels,
+               fingerprint,review_status,created_at,last_seen_at
+           ) VALUES(?,?,?,?,?,?,?,?,'pending',?,?)""",
+        (
+            candidate["actor"], candidate["url"], candidate["title"], candidate["quote"], candidate["block_heading"],
+            json.dumps(candidate["proposed_labels"], ensure_ascii=False),
+            json.dumps(candidate["resolved_labels"], ensure_ascii=False),
+            candidate["fingerprint"], stamp, stamp,
+        ),
+    )
+    return 1
+
+
+def scrape_market(max_pages: int = 120, actor_names: list[str] | None = None) -> dict:
+    """Run the market extraction pass.
+
+    ``actor_names``, when given, restricts the run to those actors (matched against
+    ``source["name"]``) -- meant for trying a prompt/provider change on 2-3 actors before
+    opening it to the full roster, without touching the selection/coverage logic itself.
+    """
     with connect(MARKET_DB) as db:
         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
     sources = _select_market_sources(max_pages=max_pages)
-    scanned = market_added = offers_added = sources_added = rejected = errors = 0
+    if actor_names:
+        wanted = set(actor_names)
+        sources = [source for source in sources if source["name"] in wanted]
+    scanned = market_added = offers_added = sources_added = vocabulary_queued = rejected = errors = 0
     diagnostics: dict[str, int] = defaultdict(int)
-    ollama = OllamaClient()
+    ollama = get_ai_client()
 
     with httpx.Client(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as client:
         for source in sources:
@@ -1764,13 +1875,19 @@ def scrape_market(max_pages: int = 120) -> dict:
                     )
 
                 # AI remains a conservative secondary route for complete market facts only.
+                vocabulary_candidates: list[dict] = []
                 if source.get("strategy") == "adaptive":
-                    market_candidates.extend(_ai_candidates(source["name"], source_url, source_title, blocks, ollama))
+                    for candidate in _ai_candidates(source["name"], source_url, source_title, blocks, ollama):
+                        if candidate.get("kind") == "vocabulary_candidate":
+                            vocabulary_candidates.append(candidate)
+                        else:
+                            market_candidates.append(candidate)
 
                 market_candidates = _dedupe_candidates(market_candidates)
                 offer_candidates = _dedupe_candidates(offer_candidates)
+                vocabulary_candidates = _dedupe_candidates(vocabulary_candidates)
                 scanned += 1
-                if not market_candidates and not offer_candidates:
+                if not market_candidates and not offer_candidates and not vocabulary_candidates:
                     rejected += 1
                     continue
 
@@ -1783,6 +1900,8 @@ def scrape_market(max_pages: int = 120) -> dict:
                         fact_added, proof_added = _upsert_offer_candidate(db, candidate)
                         offers_added += fact_added
                         sources_added += proof_added
+                    for candidate in vocabulary_candidates:
+                        vocabulary_queued += _upsert_vocabulary_candidate(db, candidate)
             except Exception as exc:
                 errors += 1
                 with connect(ACTORS_DB) as db:
@@ -1791,12 +1910,14 @@ def scrape_market(max_pages: int = 120) -> dict:
     with connect(MARKET_DB) as db:
         db.execute(
             """UPDATE collection_runs SET finished_at=?,status=?,scanned=?,added=?,offers_added=?,sources_added=?,rejected=?,errors=?,
-                      blocks_examined=?,laser_blocks=?,candidate_count=?,diagnostics_json=?,message=? WHERE id=?""",
+                      blocks_examined=?,laser_blocks=?,candidate_count=?,diagnostics_json=?,message=?,
+                      ai_input_tokens=?,ai_output_tokens=? WHERE id=?""",
             (
                 utc_now(), "completed", scanned, market_added, offers_added, sources_added, rejected, errors,
                 int(diagnostics.get("blocks_examined", 0)), int(diagnostics.get("laser_blocks", 0)),
                 int(diagnostics.get("candidate_valid", 0)), json.dumps(dict(sorted(diagnostics.items())), ensure_ascii=False),
                 "Collecte v3.4: relation directe/contextuelle/structurée; validité séparée de la maturité; télémétrie des rejets",
+                ollama.total_input_tokens, ollama.total_output_tokens,
                 run_id,
             ),
         )
@@ -1805,9 +1926,13 @@ def scrape_market(max_pages: int = 120) -> dict:
         "market_added": market_added,
         "offers_added": offers_added,
         "proof_sources_added": sources_added,
+        "vocabulary_queued": vocabulary_queued,
         "rejected": rejected,
         "errors": errors,
         "ollama": ollama.available(),
+        "ai_provider": "anthropic" if isinstance(ollama, AnthropicClient) else "ollama",
+        "ai_input_tokens": ollama.total_input_tokens,
+        "ai_output_tokens": ollama.total_output_tokens,
         "source_selection": "coverage-balanced-v3.4",
         "diagnostics": dict(sorted(diagnostics.items())),
     }

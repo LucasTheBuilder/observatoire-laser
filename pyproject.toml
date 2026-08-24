@@ -1,6 +1,9 @@
 [tool.ruff]
 target-version = "py312"
 line-length = 130
+# Personal scratch scripts at the repo root (untracked, not part of the maintained codebase)
+# used to smoke-test the Anthropic API key/setup by hand -- not linted.
+exclude = ["test_claude.py", "test_claude_debug.py", "test_key.py"]
 
 [tool.ruff.lint]
 # Conservative default set: real bugs and correctness issues (pyflakes), style consistency
@@ -17,6 +20,9 @@ ignore = [
 # tests/*.py insert the project root onto sys.path before importing project modules by name,
 # which E402 (import not at top of file) would otherwise flag on every test file.
 "tests/*.py" = ["E402"]
+# app.py calls load_dotenv() before importing db/hybrid/scrapers, which read several
+# settings from the environment at import time -- python-dotenv's own documented pattern.
+"app.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.12"
