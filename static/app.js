@@ -12,6 +12,7 @@ const state = {
   pipelineFunnel: {discovered: 0, fetched: 0, parsed: 0, evidence: 0, validated: 0},
   query: "",
   offerQuery: "",
+  offerDrill: {family: null, level2: null, level3: null},
   actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
 };
 
@@ -186,6 +187,133 @@ function groupByFamilies(rows, familiesOf) {
   });
 }
 
+// --- Offers drill-down: family -> operation/property -> material, source list at the leaf ----
+// A material has exactly one parent group here (unlike top-level families, which can overlap):
+// grouping by material is meant to narrow down a search, not to re-surface the same duplicate-
+// membership behavior already handled at the family level.
+const MATERIAL_GROUP = {
+  "Métal": "Métaux", "Nitinol": "Métaux", "Magnésium": "Métaux",
+  "Verre": "Matériau transparent", "Saphir": "Matériau transparent",
+  "Polymère": "Polymère", "Silicium": "Silicium", "Céramique": "Céramique", "Composite": "Composite",
+};
+// Only groups with more than one raw material inside them get a further level-3 split; a
+// single-material group (Polymère, Silicium, Céramique, Composite) goes straight to sources.
+const MATERIAL_GROUP_HAS_SUBLEVEL = new Set(["Métaux", "Matériau transparent"]);
+
+// Some rows carry the raw English operation name instead of the canonical French label (older
+// technology/product rows) -- normalized here so "Dicing" and "Microdécoupe" don't split into
+// two separate buckets for what is the same operation.
+const OPERATION_ALIAS = {"Dicing": "Microdécoupe"};
+
+function normalizedOperation(row) {
+  const op = (row.operation || "").trim();
+  return OPERATION_ALIAS[op] || op || null;
+}
+
+// Fonctionnalisation is grouped by the surface property actually achieved, not by the generic
+// operation label -- most source pages only say "texturation"/"fonctionnalisation de surface"
+// without naming the specific property, so most rows land in the catch-all today; the buckets
+// stay meaningful as sources get more precise.
+const FONCTIONNALISATION_SUBFAMILIES = [
+  {label: "Hydrophobie", test: t => /hydrophob|hydrophile|oléophobe|olephobe|wetting|mouillabilit/i.test(t)},
+  {label: "Anti-givre", test: t => /anti-?givre|anti-?bu[ée]e|anti-?frost|icing/i.test(t)},
+  {label: "Frottement", test: t => /frottement|friction|tribolog/i.test(t)},
+];
+
+function fonctionnalisationSubfamily(row) {
+  const text = [row.operation, row.capability].filter(Boolean).join(" ");
+  const hit = FONCTIONNALISATION_SUBFAMILIES.find(f => f.test(text));
+  return hit ? hit.label : "Autre fonctionnalisation";
+}
+
+// Structuration interne (3 items total) and Autres (heterogeneous by nature) don't have a
+// meaningful second level -- clicking them goes straight to the source list.
+const FAMILIES_WITHOUT_LEVEL2 = new Set(["Structuration interne", "Autres"]);
+
+function groupSimple(rows, keyOf) {
+  const map = new Map();
+  for (const row of rows) {
+    const key = keyOf(row);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(row);
+  }
+  return [...map.entries()].sort((a, b) => b[1].length - a[1].length);
+}
+
+function familyLevel2Groups(family, rows) {
+  if (family === "Usinage") return groupSimple(rows, row => normalizedOperation(row) || "Autres opérations d’usinage");
+  if (family === "Fonctionnalisation") return groupSimple(rows, fonctionnalisationSubfamily);
+  if (family === "Matériau") return groupSimple(rows, row => MATERIAL_GROUP[row.material] || "Autres matériaux");
+  return null;
+}
+
+function rowsForDrill(filtered, drill) {
+  let rows = (groupByFamilies(filtered, capabilityFamilies).find(([label]) => label === drill.family) || [null, []])[1];
+  if (!drill.level2) return rows;
+  const level2Groups = familyLevel2Groups(drill.family, rows) || [];
+  rows = (level2Groups.find(([label]) => label === drill.level2) || [null, []])[1];
+  if (!drill.level3) return rows;
+  const level3Groups = groupSimple(rows, row => row.material || "Non précisé");
+  return (level3Groups.find(([label]) => label === drill.level3) || [null, []])[1];
+}
+
+function offerBreadcrumb(drill) {
+  const segments = [{label: "Toutes les familles", drill: {family: null, level2: null, level3: null}}];
+  if (drill.family) segments.push({label: drill.family, drill: {family: drill.family, level2: null, level3: null}});
+  if (drill.level2) segments.push({label: drill.level2, drill: {family: drill.family, level2: drill.level2, level3: null}});
+  if (drill.level3) segments.push({label: drill.level3, drill: {family: drill.family, level2: drill.level2, level3: drill.level3}});
+  return `<nav class="drill-breadcrumb" tabindex="-1">${segments.map((seg, i) => {
+    if (i === segments.length - 1) return `<span class="drill-crumb current">${esc(seg.label)}</span>`;
+    return `<button class="drill-crumb" data-drill='${esc(JSON.stringify(seg.drill))}'>${esc(seg.label)}</button><span class="drill-sep">›</span>`;
+  }).join("")}</nav>`;
+}
+
+function offerCategoryGrid(groups) {
+  return `<div class="fam-grid">${groups.map(([label, rows]) => `
+    <button class="fam-card fam-card-link" data-drill='${esc(JSON.stringify({family: label, level2: null, level3: null}))}'>
+      <header><h3>${esc(label)}</h3><b>${rows.length}</b></header>
+      <p class="fam-card-hint">${rows.length ? "Explorer →" : "Aucune capacité pour le moment"}</p>
+    </button>`).join("")}</div>`;
+}
+
+// Same visual card as offerCategoryGrid, but the click target carries the full resulting drill
+// state (family already fixed) instead of assuming it's always a fresh top-level family.
+function offerSubCategoryGrid(drill, groups) {
+  return `<div class="fam-grid">${groups.map(([label, rows]) => `
+    <button class="fam-card fam-card-link" data-drill='${esc(JSON.stringify({...drill, level2: drill.level2 || label, level3: drill.level2 ? label : null}))}'>
+      <header><h3>${esc(label)}</h3><b>${rows.length}</b></header>
+      <p class="fam-card-hint">${rows.length ? "Explorer →" : "Aucune capacité pour le moment"}</p>
+    </button>`).join("")}</div>`;
+}
+
+function offerEmptyMessage(hasQuery) {
+  return `<div class="empty">${hasQuery
+    ? "Aucun résultat pour cette recherche dans cette catégorie."
+    : "Aucune capacité dans cette catégorie pour le moment."}</div>`;
+}
+
+function renderOfferDrillContent(filtered, hasQuery) {
+  const drill = state.offerDrill;
+  if (!drill.family) {
+    const families = groupByFamilies(filtered, capabilityFamilies);
+    return offerBreadcrumb(drill) + (families.length ? offerCategoryGrid(families) : offerEmptyMessage(hasQuery));
+  }
+  const familyRows = rowsForDrill(filtered, {family: drill.family, level2: null, level3: null});
+  if (!drill.level2 && !FAMILIES_WITHOUT_LEVEL2.has(drill.family)) {
+    const level2Groups = familyLevel2Groups(drill.family, familyRows) || [];
+    return offerBreadcrumb(drill) + (level2Groups.length ? offerSubCategoryGrid(drill, level2Groups) : offerEmptyMessage(hasQuery));
+  }
+  if (drill.level2 && !drill.level3 && MATERIAL_GROUP_HAS_SUBLEVEL.has(drill.level2)) {
+    const level2Rows = rowsForDrill(filtered, {family: drill.family, level2: drill.level2, level3: null});
+    const level3Groups = groupSimple(level2Rows, row => row.material || "Non précisé");
+    return offerBreadcrumb(drill) + (level3Groups.length ? offerSubCategoryGrid(drill, level3Groups) : offerEmptyMessage(hasQuery));
+  }
+  const rows = rowsForDrill(filtered, drill);
+  return offerBreadcrumb(drill) + (rows.length
+    ? `<ul class="fam-list">${rows.map(offerFamilyItem).join("")}</ul>`
+    : offerEmptyMessage(hasQuery));
+}
+
 // Competitive class is an analyst-assigned field (see db.update_actor_classification),
 // not guessed from role text -- classification lives in the data, not in a regex.
 const COMPETITIVE_CLASS_LABELS = {
@@ -314,10 +442,6 @@ function offerTypeLabel(value) {
   return labels[value] || value || "Capacité";
 }
 
-function offersTable(rows) {
-  return `<div class="empty">Aucune offre ou capacité concurrente documentée pour le moment.</div>`;
-}
-
 function familyCardGrid(groups, renderItem) {
   if (!groups.length) return "";
   return `<div class="fam-grid">${groups.map(([label, rows]) => `<article class="fam-card"><header><h3>${esc(label)}</h3><b>${rows.length}</b></header><ul class="fam-list">${rows.map(renderItem).join("")}</ul></article>`).join("")}</div>`;
@@ -355,31 +479,50 @@ function marketSignalGrid(rows) {
 }
 
 function renderOffers() {
+  // Preserve focus/caret only if the search box itself had it -- a drill-down click also calls
+  // this function, and unconditionally refocusing the search input on every render would yank
+  // keyboard focus away from the category the user just clicked into.
+  const hadSearchFocus = document.activeElement && document.activeElement.id === "offer-search";
+  const caret = hadSearchFocus ? document.activeElement.selectionStart : null;
+
   const q = state.offerQuery.trim().toLowerCase();
   const filtered = state.offers.filter(row => {
     const haystack = [row.actor_name, row.offer_type, row.capability, row.operation, row.laser_process, row.material, row.performance, row.industrial_stage, row.page_type].join(" ").toLowerCase();
     return haystack.includes(q);
   });
   const actors = new Set(filtered.map(row => row.actor_name)).size;
-  const families = groupByFamilies(filtered, capabilityFamilies);
   content.innerHTML = header(
     "Veille concurrentielle",
     "Offres & capacités",
-    "Prestations, procédés et savoir-faire détectés chez les acteurs suivis, classés par famille de capacité (usinage, fonctionnalisation, structuration interne, matériau…). Une capacité qui relève de plusieurs familles à la fois (ex. découpe + matériau) apparaît dans chacune d’elles. Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.",
+    "Prestations, procédés et savoir-faire détectés chez les acteurs suivis. Cliquez une famille pour explorer ses sous-catégories (opération ou propriété, puis matériau si besoin) jusqu’à la liste des sources. Une capacité qui relève de plusieurs familles à la fois (ex. découpe + matériau) apparaît dans chacune d’elles. Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.",
     `<div class="header-actions"><button class="export-btn" data-export="offers">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser les preuves</button></div>`
   ) +
   `<div class="actor-toolbar offer-toolbar"><input id="offer-search" value="${esc(state.offerQuery)}" placeholder="Rechercher un acteur, un procédé, une opération, un matériau…"><span>${filtered.length} capacités · ${actors} acteurs</span></div>
-   <section><div class="section-title"><div><span>01</span><div><h2>Cartographie des offres détectées</h2><p>Une famille de capacité par carré ; cliquer une ligne ouvre ses preuves. Le nombre affiché sur chaque carte compte les occurrences, pas des capacités distinctes.</p></div></div><b>${filtered.length} capacités</b></div>${offerFamilyGrid(families) || offersTable(filtered)}</section>`;
+   <section><div class="section-title"><div><span>01</span><div><h2>Cartographie des offres détectées</h2><p>Famille → opération/propriété → matériau si besoin → sources.</p></div></div><b>${filtered.length} capacités</b></div>
+   <div id="offer-drill-root">${renderOfferDrillContent(filtered, q.length > 0)}</div></section>`;
+
   const input = document.querySelector("#offer-search");
   if (input) {
-    input.focus({preventScroll:true});
-    input.setSelectionRange(input.value.length, input.value.length);
+    if (hadSearchFocus) {
+      input.focus({preventScroll: true});
+      input.setSelectionRange(caret, caret);
+    }
     input.addEventListener("input", debounce(e => {
       state.offerQuery = e.target.value;
+      // A fresh search should search everything, not stay pinned inside whatever category was
+      // open -- otherwise a query that doesn't match the current branch silently looks like
+      // "no results" for the whole app instead of "try a different category".
+      state.offerDrill = {family: null, level2: null, level3: null};
       renderOffers();
     }));
   }
   wireActions();
+  document.querySelectorAll("#offer-drill-root [data-drill]").forEach(el => el.addEventListener("click", () => {
+    state.offerDrill = JSON.parse(el.dataset.drill);
+    renderOffers();
+    const root = document.querySelector("#offer-drill-root .drill-breadcrumb");
+    if (root) root.focus({preventScroll: false});
+  }));
   const exportBtn = document.querySelector('[data-export="offers"]');
   if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("offres-capacites.csv", filtered, [
     {key: "actor_name", label: "Acteur"}, {key: "offer_type", label: "Type"},

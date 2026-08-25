@@ -13,12 +13,27 @@
 /* Full text, wrapped -- was truncated with an ellipsis, hiding the capability description
    unless the item was clicked open. */
 .fam-cap{font-size:11.5px;color:var(--muted);white-space:normal;line-height:1.4}
-.fam-also{font-size:10px;color:var(--muted);font-style:italic}
+.fam-also{font-size:10.5px;color:var(--muted);font-weight:600}
 
-.fam-proof-pill{padding:1px 7px;border-radius:10px;background:#e9f5f3;color:#087d75;font-size:9.5px;font-weight:800;flex-shrink:0}
+/* Darkened from #087d75 -- the original paired with this background fell to a 4.48:1 contrast
+   ratio, just under the 4.5:1 WCAG AA floor for normal text, on top of being the smallest text
+   on the page. */
+.fam-proof-pill{padding:1px 7px;border-radius:10px;background:#e9f5f3;color:#066b64;font-size:10px;font-weight:800;flex-shrink:0}
 
 .offer-type-badge{padding:2px 8px;border-radius:10px;font-size:9px;font-weight:850;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap;flex-shrink:0}
 .offer-type-badge.capability{background:#e5f3e9;color:#2f7d52}
 .offer-type-badge.service{background:#e8eef5;color:#35577a}
 .offer-type-badge.technology{background:#f0ecfa;color:#6b4fb3}
 .offer-type-badge.product{background:#fff3d6;color:#a8790b}
+
+/* --- Drill-down navigation (family -> operation/property -> material -> sources) ----------- */
+.drill-breadcrumb{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:16px;outline:none}
+.drill-crumb{border:0;background:none;padding:2px 4px;font-size:12.5px;color:var(--teal);font-weight:700;cursor:pointer;border-radius:6px}
+.drill-crumb:hover{background:#eef7f6;text-decoration:underline}
+.drill-crumb.current{color:var(--ink);font-weight:750;cursor:default}
+.drill-crumb.current:hover{background:none;text-decoration:none}
+.drill-sep{color:var(--muted);font-size:12px}
+
+.fam-card-link{cursor:pointer;text-align:left;font:inherit;transition:box-shadow .15s,border-color .15s}
+.fam-card-link:hover{border-color:var(--teal);box-shadow:0 10px 26px #0e8f8718}
+.fam-card-hint{margin:0;font-size:11.5px;color:var(--teal);font-weight:700}
