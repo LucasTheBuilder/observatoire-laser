@@ -270,11 +270,13 @@ def monthly(days: int = Query(default=30, ge=1, le=365)):
         ]
         new_offers = [
             dict(row) for row in db.execute(
-                """SELECT id,actor_name,offer_type,capability,operation,laser_process,material,
-                          performance,industrial_stage,created_at,last_seen_at
-                   FROM offers
-                   WHERE review_status='accepted' AND created_at>=?
-                   ORDER BY created_at DESC
+                """SELECT o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,
+                          o.performance,o.industrial_stage,o.created_at,o.last_seen_at,
+                          (SELECT COUNT(*) FROM offer_sources os WHERE os.offer_id=o.id) AS proofs,
+                          (SELECT COUNT(DISTINCT COALESCE(os.language,'unknown')) FROM offer_sources os WHERE os.offer_id=o.id) AS languages
+                   FROM offers o
+                   WHERE o.review_status='accepted' AND o.created_at>=?
+                   ORDER BY o.created_at DESC
                    LIMIT 40""",
                 (cutoff,),
             )

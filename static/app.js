@@ -135,21 +135,24 @@ function marketFamilyCards(rows) {
   }).join("")}</div>`;
 }
 
-// Capacity families: an operation/capability is bucketed by keyword family first
-// (usinage vs. fonctionnalisation vs. modification interne); only when no operation
-// keyword matches do we fall back to the material axis, then "Autres".
+// Capacity families: an operation/capability is matched against every keyword family
+// (usinage / fonctionnalisation / structuration interne) independently -- a capability
+// mentioning both an operation and a material (e.g. "découpe du saphir") belongs to every
+// family it matches, not just the first one, so it must appear in each matching card.
 const CAPABILITY_FAMILIES = [
   {label: "Usinage", test: t => /découpe|perçage|gravure|ablation|soudage|scribing|dicing|milling|rainurage|usinage|drilling|cutting|welding|engraving/i.test(t)},
   {label: "Fonctionnalisation", test: t => /fonctionnalisation|texturation|anti-?givre|hydrophob|hydrophile|oléophobe|olephobe|anti-?reflet|anti-?bu[ée]e|wetting|nettoyage|polissage|cleaning|polishing/i.test(t)},
-  {label: "Modification interne", test: t => /modification interne|guide d.onde|waveguide|debonding|volume modification/i.test(t)},
+  {label: "Structuration interne", test: t => /structuration interne|modification interne|guide d.onde|waveguide|debonding|volume modification/i.test(t)},
 ];
+const CAPABILITY_FAMILY_ORDER = ["Usinage", "Fonctionnalisation", "Matériau", "Structuration interne", "Autres"];
 
-function capabilityFamily(row) {
+function capabilityFamilies(row) {
   const text = [row.operation, row.capability].filter(Boolean).join(" ");
-  const hit = CAPABILITY_FAMILIES.find(f => f.test(text));
-  if (hit) return hit.label;
-  if (row.material) return "Matériau";
-  return "Autres";
+  const families = CAPABILITY_FAMILIES.filter(f => f.test(text)).map(f => f.label);
+  // Additive, not a fallback: a material mention earns its own card on top of any operation
+  // family already matched, instead of only appearing when no operation keyword matched.
+  if (row.material) families.push("Matériau");
+  return families.length ? families : ["Autres"];
 }
 
 function groupByFamily(rows, familyOf) {
@@ -159,10 +162,27 @@ function groupByFamily(rows, familyOf) {
     if (!map.has(family)) map.set(family, []);
     map.get(family).push(row);
   }
-  const order = ["Usinage", "Fonctionnalisation", "Matériau", "Modification interne", "Autres"];
   return [...map.entries()].sort((a, b) => {
-    const ia = order.indexOf(a[0]), ib = order.indexOf(b[0]);
-    return (ia === -1 ? order.length : ia) - (ib === -1 ? order.length : ib);
+    const ia = CAPABILITY_FAMILY_ORDER.indexOf(a[0]), ib = CAPABILITY_FAMILY_ORDER.indexOf(b[0]);
+    return (ia === -1 ? CAPABILITY_FAMILY_ORDER.length : ia) - (ib === -1 ? CAPABILITY_FAMILY_ORDER.length : ib);
+  });
+}
+
+// Same idea as groupByFamily, but for a classifier that can return several families for one
+// row: the row is duplicated into every matching bucket, each copy tagged with the sibling
+// families it also belongs to so the card can say so instead of looking like an unrelated dupe.
+function groupByFamilies(rows, familiesOf) {
+  const map = new Map();
+  for (const row of rows) {
+    const families = familiesOf(row);
+    for (const family of families) {
+      if (!map.has(family)) map.set(family, []);
+      map.get(family).push({...row, alsoInFamilies: families.filter(f => f !== family)});
+    }
+  }
+  return [...map.entries()].sort((a, b) => {
+    const ia = CAPABILITY_FAMILY_ORDER.indexOf(a[0]), ib = CAPABILITY_FAMILY_ORDER.indexOf(b[0]);
+    return (ia === -1 ? CAPABILITY_FAMILY_ORDER.length : ia) - (ib === -1 ? CAPABILITY_FAMILY_ORDER.length : ib);
   });
 }
 
@@ -257,7 +277,7 @@ function renderMonthly() {
     ? marketSignalGrid(marketSignals)
     : `<div class="empty">Aucun nouveau fait marché validé sur la période.</div>`;
 
-  const offerFamilies = groupByFamily(monthly.new_offers || [], capabilityFamily);
+  const offerFamilies = groupByFamilies(monthly.new_offers || [], capabilityFamilies);
   const offerList = (monthly.new_offers || []).length
     ? offerFamilyGrid(offerFamilies)
     : `<div class="empty">Aucune nouvelle capacité concurrente détectée sur la période.</div>`;
@@ -304,9 +324,17 @@ function familyCardGrid(groups, renderItem) {
 }
 
 function offerFamilyItem(row) {
+  const also = row.alsoInFamilies && row.alsoInFamilies.length
+    ? `<span class="fam-also">également dans : ${row.alsoInFamilies.map(esc).join(", ")}</span>`
+    : "";
   return `<li><button class="fam-item" data-offer-proof="${Number(row.id)}">
-      <span class="fam-row-top"><span class="fam-actor">${esc(row.actor_name)}</span><span class="offer-type-badge ${esc(row.offer_type)}">${esc(offerTypeLabel(row.offer_type))}</span></span>
+      <span class="fam-row-top">
+        <span class="fam-actor">${esc(row.actor_name)}</span>
+        <span class="offer-type-badge ${esc(row.offer_type)}">${esc(offerTypeLabel(row.offer_type))}</span>
+        <span class="fam-proof-pill" title="Voir les sources">${esc(proofMeta(row))}</span>
+      </span>
       <span class="fam-cap">${esc(row.capability)}${row.material ? ` · ${esc(row.material)}` : ""}</span>
+      ${also}
     </button></li>`;
 }
 
@@ -333,15 +361,15 @@ function renderOffers() {
     return haystack.includes(q);
   });
   const actors = new Set(filtered.map(row => row.actor_name)).size;
-  const families = groupByFamily(filtered, capabilityFamily);
+  const families = groupByFamilies(filtered, capabilityFamilies);
   content.innerHTML = header(
     "Veille concurrentielle",
     "Offres & capacités",
-    "Prestations, procédés et savoir-faire détectés chez les acteurs suivis, classés par famille de capacité (usinage, fonctionnalisation, matériau…). Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.",
+    "Prestations, procédés et savoir-faire détectés chez les acteurs suivis, classés par famille de capacité (usinage, fonctionnalisation, structuration interne, matériau…). Une capacité qui relève de plusieurs familles à la fois (ex. découpe + matériau) apparaît dans chacune d’elles. Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.",
     `<div class="header-actions"><button class="export-btn" data-export="offers">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser les preuves</button></div>`
   ) +
   `<div class="actor-toolbar offer-toolbar"><input id="offer-search" value="${esc(state.offerQuery)}" placeholder="Rechercher un acteur, un procédé, une opération, un matériau…"><span>${filtered.length} capacités · ${actors} acteurs</span></div>
-   <section><div class="section-title"><div><span>01</span><div><h2>Cartographie des offres détectées</h2><p>Une famille de capacité par carré ; cliquer une ligne ouvre ses preuves.</p></div></div><b>${filtered.length} capacités</b></div>${offerFamilyGrid(families) || offersTable(filtered)}</section>`;
+   <section><div class="section-title"><div><span>01</span><div><h2>Cartographie des offres détectées</h2><p>Une famille de capacité par carré ; cliquer une ligne ouvre ses preuves. Le nombre affiché sur chaque carte compte les occurrences, pas des capacités distinctes.</p></div></div><b>${filtered.length} capacités</b></div>${offerFamilyGrid(families) || offersTable(filtered)}</section>`;
   const input = document.querySelector("#offer-search");
   if (input) {
     input.focus({preventScroll:true});

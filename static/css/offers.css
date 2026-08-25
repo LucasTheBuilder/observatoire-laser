@@ -1,17 +1,21 @@
-.fam-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.fam-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;align-items:start}
 .fam-card{display:flex;flex-direction:column;padding:18px 20px;border:1px solid var(--line);border-radius:13px;background:#fff;box-shadow:0 8px 24px #17313c08}
 .fam-card header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}
 .fam-card h3{margin:0;font:500 16px Georgia,serif}
 .fam-card header b{padding:3px 9px;border-radius:20px;background:#eef2f1;color:var(--muted);font-size:11px;font-weight:800}
-.fam-list{list-style:none;margin:0;padding:0 6px 0 0;max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:5px;scrollbar-width:thin;scrollbar-color:#c7d0d3 transparent}
-.fam-list::-webkit-scrollbar{width:6px}
-.fam-list::-webkit-scrollbar-thumb{background:#c7d0d3;border-radius:6px}
-.fam-list::-webkit-scrollbar-track{background:transparent}
-.fam-item{display:flex;flex-direction:column;gap:2px;width:100%;padding:8px 10px;border:0;border-radius:8px;background:#f8faf9;text-align:left;cursor:pointer;min-width:0}
+/* No fixed height / internal scroll on purpose: a scrollbar nested inside a card reads as a
+   dropdown and hides how many items it holds. The card grows with its content; the page scrolls. */
+.fam-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.fam-item{display:flex;flex-direction:column;gap:3px;width:100%;padding:9px 11px;border:0;border-radius:8px;background:#f8faf9;text-align:left;cursor:pointer;min-width:0}
 .fam-item:hover{background:#eef2f1}
-.fam-row-top{display:flex;justify-content:space-between;align-items:center;gap:8px;min-width:0}
-.fam-actor{flex:1;min-width:0;font-size:12px;font-weight:750;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.fam-cap{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fam-row-top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;min-width:0}
+.fam-actor{flex:1 1 auto;min-width:0;font-size:12px;font-weight:750;color:var(--ink)}
+/* Full text, wrapped -- was truncated with an ellipsis, hiding the capability description
+   unless the item was clicked open. */
+.fam-cap{font-size:11.5px;color:var(--muted);white-space:normal;line-height:1.4}
+.fam-also{font-size:10px;color:var(--muted);font-style:italic}
+
+.fam-proof-pill{padding:1px 7px;border-radius:10px;background:#e9f5f3;color:#087d75;font-size:9.5px;font-weight:800;flex-shrink:0}
 
 .offer-type-badge{padding:2px 8px;border-radius:10px;font-size:9px;font-weight:850;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap;flex-shrink:0}
 .offer-type-badge.capability{background:#e5f3e9;color:#2f7d52}
