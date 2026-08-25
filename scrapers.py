@@ -193,6 +193,7 @@ COMPONENTS: Lexicon = {
     "Injecteurs": {"any_of": ("injector", "injecteur")},
     "Aubes / composants turbine": {"any_of": ("turbine blade", "turbine component", "aube")},
     "Capteurs": {"any_of": ("sensor", "capteur")},
+    "Pièges à ions": {"any_of": ("ion trap", "ion traps", "piège à ions", "pièges à ions")},
 }
 
 OPERATIONS: Lexicon = {

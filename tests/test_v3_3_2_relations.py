@@ -88,7 +88,7 @@ class LocalRelationTests(unittest.TestCase):
         # publishes (e.g. FEMTOprint's applications/quantum.asp, /photonics.asp, /life-sciences.asp)
         # -- previously unrecognized, so pages about them never produced a market fact.
         cases = [
-            ("Femtosecond laser micromachining of glass wafer components for quantum ion trap systems.", "Quantum"),
+            ("Femtosecond laser micromachining of glass ion trap components for quantum computing systems.", "Quantum"),
             ("Femtosecond laser engraving of glass waveguide components for photonics interconnects.", "Photonique"),
             ("Femtosecond laser micromachining of microfluidic device components for life sciences applications.", "Sciences de la vie"),
         ]
