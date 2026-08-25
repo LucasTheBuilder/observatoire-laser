@@ -73,6 +73,14 @@ def utc_now() -> str:
 
 @contextmanager
 def connect(path: Path):
+    """Open one transaction per ``with`` block: commit only if the block exits normally.
+
+    Any exception raised inside the block skips ``connection.commit()`` entirely, so every
+    write made earlier in that same block is rolled back too -- not just the statement that
+    raised. This is intentional (each block is atomic), but a loop that writes many independent
+    rows inside a single ``with connect(...)`` must catch per-item errors itself if one bad item
+    should not discard everything written before it (see scrape_technology in scrapers.py).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=30)
     connection.row_factory = sqlite3.Row
@@ -119,7 +127,10 @@ def _normalize_existing_page_types(db: sqlite3.Connection) -> None:
         db.execute("UPDATE actor_sources SET page_type=? WHERE LOWER(COALESCE(page_type,''))=?", (canonical, legacy))
 
 
-def _language_from_url(url: str | None) -> str | None:
+# Public (no leading underscore): scrapers.py imports this rather than keeping its own copy,
+# so language tagging stays identical between actor_sources/evidence_sources (written here) and
+# evidence/offers (written by the crawler) instead of silently drifting apart.
+def language_from_url(url: str | None) -> str | None:
     path = urlparse(url or "").path.casefold()
     parts = [part for part in path.split("/") if part]
     if not parts:
@@ -191,7 +202,7 @@ def _migrate_evidence_fact_model(db: sqlite3.Connection) -> None:
         rep_id = int(representative["id"])
         db.execute(
             "UPDATE evidence SET fact_key=?,evidence_kind='market_application',language=? WHERE id=?",
-            (key, _language_from_url(representative["source_url"]), rep_id),
+            (key, language_from_url(representative["source_url"]), rep_id),
         )
         for row in members:
             source_fingerprint = str(row["fingerprint"] or hashlib.sha256(f"{row['source_url']}|{row['quote']}".encode()).hexdigest())
@@ -202,7 +213,7 @@ def _migrate_evidence_fact_model(db: sqlite3.Connection) -> None:
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     rep_id, row["source_url"], row["source_title"], row["source_date"], row["quote"],
-                    _language_from_url(row["source_url"]),
+                    language_from_url(row["source_url"]),
                     row["block_heading"] if "block_heading" in row.keys() else None,
                     row["block_path"] if "block_path" in row.keys() else None,
                     row["extraction_mode"] if "extraction_mode" in row.keys() else None,
@@ -275,7 +286,7 @@ def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: s
             (
                 item["actor"], item["bucket"], item["market"], item["component"], item["operation"], item["stage"],
                 item["url"], item["title"], item["date"], item["quote"], key, fact_fingerprint, key,
-                _language_from_url(item["url"]), stamp, stamp,
+                language_from_url(item["url"]), stamp, stamp,
             ),
         ).lastrowid
         assert new_id is not None  # guaranteed by sqlite3 right after a successful AUTOINCREMENT insert
@@ -284,7 +295,7 @@ def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: s
         """INSERT OR IGNORE INTO evidence_sources(
                evidence_id,source_url,source_title,source_date,quote,language,fingerprint,created_at
            ) VALUES(?,?,?,?,?,?,?,?)""",
-        (evidence_id, item["url"], item["title"], item["date"], item["quote"], _language_from_url(item["url"]), source_fingerprint, stamp),
+        (evidence_id, item["url"], item["title"], item["date"], item["quote"], language_from_url(item["url"]), source_fingerprint, stamp),
     )
 
 
@@ -643,6 +654,10 @@ def init_databases() -> None:
         db.execute("UPDATE evidence SET fact_status=CASE WHEN review_status='accepted' THEN 'validated' WHEN review_status='rejected' THEN 'rejected' ELSE 'review' END WHERE fact_status IS NULL OR fact_status='' OR fact_status='review'")
         db.execute("UPDATE evidence SET last_seen_at=COALESCE(last_seen_at,updated_at,created_at)")
         db.execute("UPDATE offers SET last_seen_at=COALESCE(last_seen_at,updated_at,created_at)")
+        # Both migrations run on every startup, not just once: they are idempotent (a row that
+        # already carries its canonical key is only re-derived, never duplicated) and this keeps
+        # the evidence table self-healing if a row is ever inserted or edited outside the normal
+        # upsert path (manual fix, restored backup) without a fact_key/application_key.
         _migrate_evidence_fact_model(db)
         _migrate_application_keys(db)
         db.executescript(

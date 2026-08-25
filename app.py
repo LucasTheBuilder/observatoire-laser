@@ -341,13 +341,20 @@ def list_actors():
     # Evidence gate (P0): a C1/C2 label is only an analyst's classification until our own
     # crawl has actually produced a capability/service claim for that actor -- otherwise it
     # is indistinguishable from a guess. This never downgrades the class, it just flags it.
-    confirmed_actors = {row["actor_name"] for row in rows(MARKET_DB, "SELECT DISTINCT actor_name FROM offers")}
+    # Same acceptance gate the rest of this file uses per table (offers.review_status,
+    # evidence.fact_status -- see /api/offers and /api/market): an actor/stage/source count that
+    # skips it would count facts still pending review, in practice always true today since
+    # nothing currently leaves offers unaccepted, but worth keeping explicit and consistent.
+    confirmed_actors = {
+        row["actor_name"]
+        for row in rows(MARKET_DB, "SELECT DISTINCT actor_name FROM offers WHERE review_status='accepted'")
+    }
     # Value-chain stages (P1): derived live from offers.industrial_stage/evidence.industrial_stage
     # instead of a separately-maintained field, so it can never drift from the actual facts.
     stages_by_actor: dict[str, set[str]] = {}
     for row in (
-        rows(MARKET_DB, "SELECT actor_name,industrial_stage FROM offers")
-        + rows(MARKET_DB, "SELECT actor_name,industrial_stage FROM evidence")
+        rows(MARKET_DB, "SELECT actor_name,industrial_stage FROM offers WHERE review_status='accepted'")
+        + rows(MARKET_DB, "SELECT actor_name,industrial_stage FROM evidence WHERE fact_status='validated'")
     ):
         stage = _leading_value_chain_stage(row["industrial_stage"])
         if stage:
@@ -356,8 +363,8 @@ def list_actors():
     # pipeline funnel uses, never hand-set, so a fiche can't claim more than market.db proves.
     sources_by_actor: dict[str, set[str]] = {}
     for row in (
-        rows(MARKET_DB, "SELECT o.actor_name,os.source_url FROM offer_sources os JOIN offers o ON o.id=os.offer_id")
-        + rows(MARKET_DB, "SELECT e.actor_name,es.source_url FROM evidence_sources es JOIN evidence e ON e.id=es.evidence_id")
+        rows(MARKET_DB, "SELECT o.actor_name,os.source_url FROM offer_sources os JOIN offers o ON o.id=os.offer_id WHERE o.review_status='accepted'")
+        + rows(MARKET_DB, "SELECT e.actor_name,es.source_url FROM evidence_sources es JOIN evidence e ON e.id=es.evidence_id WHERE e.fact_status='validated'")
     ):
         sources_by_actor.setdefault(row["actor_name"], set()).add(row["source_url"])
     facts_by_actor: dict[int, list[dict[str, Any]]] = {}

@@ -16,7 +16,18 @@ from urllib.parse import urlparse
 
 import httpx
 
-from db import ACTORS_DB, BUCKET_RANK, MARKET_DB, TECH_DB, application_key, connect, market_fact_key, offer_fact_key, utc_now
+from db import (
+    ACTORS_DB,
+    BUCKET_RANK,
+    MARKET_DB,
+    TECH_DB,
+    application_key,
+    connect,
+    language_from_url,
+    market_fact_key,
+    offer_fact_key,
+    utc_now,
+)
 from hybrid import (
     AnthropicClient,
     ContentBlock,
@@ -306,6 +317,16 @@ MARKET_INFERENCE = {
     "Semi-conducteurs": {"components": {"Wafers", "Interposeurs en verre", "Packaging avancé", "MEMS", "MicroLED", "PCB"}, "architectures": {"TGV"}},
 }
 
+# Market labels that overlap so heavily in ordinary industry prose (e.g. "optical fiber" and
+# "photonics" describing the very same application) that co-occurrence is not a signal of two
+# independent applications. Without this, _relation_window_is_ambiguous rejects a large share of
+# genuinely direct photonics-market sentences purely because they also contain an "optical" word.
+# Kept deliberately small and manually curated -- unlike MARKET_INFERENCE this has no component
+# anchor to verify against, so a cluster is only safe when its members are near-synonyms.
+MARKET_SYNONYM_CLUSTERS = (
+    frozenset({"Optique", "Photonique"}),
+)
+
 MATURITY_RULES = (
     ("Production", "existing", ("mass production", "volume production", "series production", "serial production", "production industrielle", "production en série", "production line", "manufacturing line", "high-volume manufacturing", "commercial production", "customer production", "contract manufacturing", "job shop", "manufacturing services", "small series", "small batch", "lohnfertigung", "auftragsfertigung", "lavorazione conto terzi", "conto terzi", "fabricación por contrato", "fabricacion por contrato", "subcontratación", "subcontratacion")),
     ("Industrialisation", "radar", ("industrialization", "industrialisation", "industrial implementation", "industrialiser", "to industrialize", "scale-up", "scaling-up", "production-ready", "manufacturing integration")),
@@ -515,18 +536,6 @@ def _quote(text: str, terms: tuple[str, ...] | list[str]) -> str:
     return (ranked[0] if ranked else text)[:700]
 
 
-def _path_parts(path: str | None) -> tuple[str, ...]:
-    if not path:
-        return ()
-    return tuple(part.strip() for part in re.split(r"\s*>\s*|/|\\", path) if part.strip())
-
-
-def _is_ancestor_path(candidate: str | None, current: str | None) -> bool:
-    cand = _path_parts(candidate)
-    cur = _path_parts(current)
-    return bool(cand and cur and len(cand) < len(cur) and cur[:len(cand)] == cand)
-
-
 def _context_for_block(title: str, blocks: list[ContentBlock], index: int) -> tuple[str, str]:
     """Return direct block text and strict local section context.
 
@@ -649,6 +658,10 @@ def _relation_window_is_ambiguous(text: str) -> bool:
         inferred_markets.discard(None)
         if len(inferred_markets) == 1 and next(iter(inferred_markets)) in markets:
             return False
+    # No component to anchor on: tolerate markets that are near-synonyms in this industry's
+    # vocabulary (see MARKET_SYNONYM_CLUSTERS) instead of flagging them as two applications.
+    if any(markets <= cluster for cluster in MARKET_SYNONYM_CLUSTERS):
+        return False
     return True
 
 
@@ -768,21 +781,6 @@ def _relation_evidence(
 def _laser_context(title: str, block: ContentBlock, section_context: str | None = None) -> str:
     section = section_context or " ".join(filter(None, (block.section_context, block.text, block.media_context)))
     return " ".join(dict.fromkeys(filter(None, (title, section))))
-
-
-def _independent_core_count(details: dict[str, tuple[str | None, list[str]]]) -> int:
-    used: set[str] = set()
-    count = 0
-    for key in ("operation", "process", "component", "architecture", "market"):
-        label, hits = details[key]
-        if not label:
-            continue
-        normalized = {_normalize_text(hit) for hit in hits if hit}
-        if normalized and normalized.issubset(used):
-            continue
-        used.update(normalized)
-        count += 1
-    return count
 
 
 def _infer_market(component: str | None, architecture: str | None) -> str | None:
@@ -1701,19 +1699,6 @@ def _stored_blocks(source: dict, *, max_age_hours: int = 24) -> list[ContentBloc
     return blocks or None
 
 
-def _language_from_url(url: str) -> str | None:
-    parts = [part.casefold() for part in urlparse(url).path.split("/") if part]
-    if not parts:
-        return None
-    if parts[0] in {"fr", "fr-fr"}:
-        return "fr"
-    if parts[0] in {"en", "en-gb", "en-us"}:
-        return "en"
-    if parts[0] in {"de", "de-de"}:
-        return "de"
-    return None
-
-
 def _ensure_market_fact_status_column(db) -> None:
     """Keep direct unit-test/maintenance connections compatible with additive schema changes."""
     columns = {row[1] for row in db.execute("PRAGMA table_info(evidence)").fetchall()}
@@ -1798,7 +1783,7 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
             (
                 candidate["actor"], candidate["bucket"], candidate["market"], candidate["component"], candidate["operation"],
                 candidate["stage"], candidate["url"], candidate["title"], candidate["quote"], fact_key,
-                candidate["fingerprint"], fact_key, app_key, _language_from_url(candidate["url"]), review_status, stamp, stamp,
+                candidate["fingerprint"], fact_key, app_key, language_from_url(candidate["url"]), review_status, stamp, stamp,
                 candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
                 candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("maturity"),
                 candidate.get("relation_strength"), candidate.get("relation_evidence"), candidate.get("source_role"), fact_status,
@@ -1821,7 +1806,7 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
                fingerprint,created_at
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            evidence_id, candidate["url"], candidate["title"], candidate["quote"], _language_from_url(candidate["url"]),
+            evidence_id, candidate["url"], candidate["title"], candidate["quote"], language_from_url(candidate["url"]),
             candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
             candidate.get("relation_strength"), candidate.get("relation_evidence"), candidate.get("source_role"),
             candidate["source_fingerprint"], stamp,
@@ -1868,7 +1853,7 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
                offer_id,source_url,source_title,quote,language,block_heading,block_path,extraction_mode,field_confidence,fingerprint,created_at
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            offer_id, candidate["url"], candidate["title"], candidate["quote"], _language_from_url(candidate["url"]),
+            offer_id, candidate["url"], candidate["title"], candidate["quote"], language_from_url(candidate["url"]),
             candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"], candidate["source_fingerprint"], stamp,
         ),
     )
@@ -2091,27 +2076,35 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
                     messages.append(f"{query}: {str(exc)[:140]}")
 
         relevant = len(pooled)
+        # connect() commits only once, at the end of this `with` block; any exception raised
+        # inside it rolls back every insert made so far in the loop, not just the offending item.
+        # One malformed Crossref record must not discard an otherwise-good batch, so each item is
+        # isolated here instead of letting it escape to the `with` block.
         with connect(TECH_DB) as db:
             for item in list(pooled.values())[: max(1, limit)]:
-                fingerprint = hashlib.sha256((item["doi"] or item["url"]).casefold().encode()).hexdigest()
-                stamp = utc_now()
-                before = db.total_changes
-                db.execute(
-                    """INSERT OR IGNORE INTO documents(
-                           document_type,title,source_url,published_at,doi,abstract,fingerprint,created_at,last_seen_at
-                       ) VALUES('publication',?,?,?,?,?,?,?,?)""",
-                    (
-                        item["title"], item["url"], item["published"], item["doi"],
-                        item["abstract"], fingerprint, stamp, stamp,
-                    ),
-                )
-                inserted = int(db.total_changes > before)
-                added += inserted
-                if not inserted:
+                try:
+                    fingerprint = hashlib.sha256((item["doi"] or item["url"]).casefold().encode()).hexdigest()
+                    stamp = utc_now()
+                    before = db.total_changes
                     db.execute(
-                        "UPDATE documents SET last_seen_at=? WHERE fingerprint=?",
-                        (stamp, fingerprint),
+                        """INSERT OR IGNORE INTO documents(
+                               document_type,title,source_url,published_at,doi,abstract,fingerprint,created_at,last_seen_at
+                           ) VALUES('publication',?,?,?,?,?,?,?,?)""",
+                        (
+                            item["title"], item["url"], item["published"], item["doi"],
+                            item["abstract"], fingerprint, stamp, stamp,
+                        ),
                     )
+                    inserted = int(db.total_changes > before)
+                    added += inserted
+                    if not inserted:
+                        db.execute(
+                            "UPDATE documents SET last_seen_at=? WHERE fingerprint=?",
+                            (stamp, fingerprint),
+                        )
+                except Exception as exc:
+                    errors += 1
+                    messages.append(f"{item.get('title', '?')[:60]}: {str(exc)[:140]}")
 
         status = "completed" if not errors or relevant else "failed"
         message = (

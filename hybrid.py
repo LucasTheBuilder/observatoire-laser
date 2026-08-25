@@ -904,6 +904,8 @@ def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = No
     profile = profile or DEFAULT_SITE_PROFILE
     soup = BeautifulSoup(html, "html.parser")
     title = _clean(soup.title.get_text(" ", strip=True)) if soup.title else ""
+    # Order matters: links must be classified while <nav>/<header> are still in the tree, since
+    # _meaningful_links tells navigation from content links by walking up to those very tags.
     links = _meaningful_links(soup, base_url, profile=profile)
 
     _remove_noise_zones(soup)
@@ -1047,6 +1049,10 @@ def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = No
 
 
 class OllamaClient:
+    # Class-level, not per-instance: /api/overview calls get_ai_client() on every request and
+    # gets a brand-new OllamaClient() each time. Caching on the class lets all of those instances
+    # share one 15s-TTL liveness probe instead of hitting the daemon (or timing out after 2.5s
+    # against an unreachable one) on every dashboard poll.
     _availability: bool | None = None
     _checked_at: float = 0
 

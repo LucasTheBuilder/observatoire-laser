@@ -102,6 +102,21 @@ class LocalRelationTests(unittest.TestCase):
                 self.assertIsNotNone(fact)
                 self.assertEqual(fact["market"], expected_market)
 
+    def test_optical_and_photonics_wording_is_not_flagged_ambiguous(self):
+        # "optical fiber" and "photonics" are near-synonymous phrasing for the same application
+        # in this industry's prose; before MARKET_SYNONYM_CLUSTERS this tripped the multi-market
+        # ambiguity guard (no component canonically resolves Optique vs Photonique) and silently
+        # dropped an otherwise valid direct fact.
+        block = ContentBlock(
+            heading="Applications", h1="Applications", h2="Photonics", h3="",
+            path="main > section.applications",
+            text="Femtosecond laser welding of optical fiber components for photonics interconnects.",
+        )
+        fact = _candidate("Example", "https://example.test/applications/photonics", "Applications", block)
+        self.assertIsNotNone(fact)
+        self.assertEqual(fact["market"], "Photonique")
+        self.assertEqual(fact["component"], "Fibres optiques")
+
     def test_page_title_cannot_supply_market(self):
         block = ContentBlock(
             heading="Process",
