@@ -205,7 +205,13 @@ def _migrate_evidence_fact_model(db: sqlite3.Connection) -> None:
             (key, language_from_url(representative["source_url"]), rep_id),
         )
         for row in members:
-            source_fingerprint = str(row["fingerprint"] or hashlib.sha256(f"{row['source_url']}|{row['quote']}".encode()).hexdigest())
+            # Must depend on source_url/quote, not just reuse row["fingerprint"] (the evidence
+            # row's own fact-identity hash, constant across every source of that fact): reusing
+            # it made every citation of the same fact collide on one fingerprint value, which is
+            # exactly what let INSERT OR IGNORE silently duplicate rows once evidence_sources
+            # gets a real uniqueness constraint (see evidence_sources_fingerprint_uq below) --
+            # matches the fingerprint convention scrapers.py's _upsert_market_candidate uses.
+            source_fingerprint = hashlib.sha256(f"{key}|{row['source_url']}|{row['quote']}".encode()).hexdigest()
             db.execute(
                 """INSERT OR IGNORE INTO evidence_sources(
                        evidence_id,source_url,source_title,source_date,quote,language,block_heading,block_path,
@@ -268,6 +274,29 @@ def _migrate_application_keys(db: sqlite3.Connection) -> None:
                     (rep_id, row["bucket"], representative["bucket"], stamp),
                 )
             db.execute("DELETE FROM evidence WHERE id=?", (old_id,))
+
+
+def _dedupe_source_rows(db: sqlite3.Connection, table: str, fact_id_col: str) -> None:
+    """Collapse source-citation rows that cite the exact same (fact, url, quote) more than once.
+
+    A test bug (fixed alongside this) let init_databases() run its evidence migrations against
+    the real production market.db on every pytest run; those migrations computed the source
+    fingerprint inconsistently, so INSERT OR IGNORE never caught the resulting re-inserts and
+    real duplicate rows accumulated. Kept as a standing, idempotent cleanup (not a one-off
+    script) so any future fingerprint mismatch self-heals on the next startup instead of quietly
+    inflating "proofs" counts across the app.
+    """
+    rows = db.execute(f"SELECT id,{fact_id_col},source_url,quote FROM {table} ORDER BY id").fetchall()
+    seen: dict[tuple, int] = {}
+    duplicate_ids: list[int] = []
+    for row in rows:
+        content_key = (row[fact_id_col], row["source_url"], row["quote"])
+        if content_key in seen:
+            duplicate_ids.append(int(row["id"]))
+        else:
+            seen[content_key] = int(row["id"])
+    for dup_id in duplicate_ids:
+        db.execute(f"DELETE FROM {table} WHERE id=?", (dup_id,))
 
 
 def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: str) -> None:
@@ -660,11 +689,19 @@ def init_databases() -> None:
         # upsert path (manual fix, restored backup) without a fact_key/application_key.
         _migrate_evidence_fact_model(db)
         _migrate_application_keys(db)
+        # Cleanup before the uniqueness constraint below, not after: on an existing database
+        # where the constraint was never actually enforced (CREATE TABLE IF NOT EXISTS does not
+        # retrofit constraints onto an already-created table), duplicate content rows can already
+        # exist and would make CREATE UNIQUE INDEX fail outright at every future startup.
+        _dedupe_source_rows(db, "evidence_sources", "evidence_id")
+        _dedupe_source_rows(db, "offer_sources", "offer_id")
         db.executescript(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS evidence_fact_key_uq ON evidence(fact_key) WHERE fact_key IS NOT NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS evidence_application_key_uq
                 ON evidence(application_key) WHERE application_key IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS evidence_sources_fingerprint_uq ON evidence_sources(fingerprint);
+            CREATE UNIQUE INDEX IF NOT EXISTS offer_sources_fingerprint_uq ON offer_sources(fingerprint);
             CREATE INDEX IF NOT EXISTS evidence_status_bucket_idx
                 ON evidence(fact_status,evidence_kind,bucket,created_at);
             CREATE INDEX IF NOT EXISTS evidence_last_seen_idx

@@ -272,7 +272,13 @@ class MarketSourceSelectionTests(unittest.TestCase):
         # capacity" can't silently paper over a broken Pass 2.
         with tempfile.TemporaryDirectory() as tmp:
             actors_db = Path(tmp) / "actors.db"
-            with patch.object(dbmod, "ACTORS_DB", actors_db):
+            # init_databases() touches all three databases (it also runs the evidence/offer
+            # migrations against whatever MARKET_DB/TECH_DB currently point to) -- patching only
+            # ACTORS_DB here let it run those migrations against the real production market.db
+            # on every test run, corrupting it (duplicate evidence_sources/offer_sources rows).
+            with patch.object(dbmod, "ACTORS_DB", actors_db), \
+                 patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"), \
+                 patch.object(dbmod, "TECH_DB", Path(tmp) / "technology.db"):
                 dbmod.init_databases()
                 # init_databases() also seeds the ~20 real actors from db.ACTORS (with their
                 # own SEED_SOURCES rows); drop them so Pass 1's per-actor budget isn't spent
