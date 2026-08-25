@@ -94,8 +94,6 @@
 .business-tag.research{background:#f0ecfa;color:#6b4fb3}
 .business-tag.internal{background:#eef2f1;color:#8a959c}
 .evidence-warning{margin:0 0 6px;color:#a8790b;font-size:10.5px;font-weight:750}
-.value-chain-row{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 8px}
-.chain-step{padding:2px 7px;border-radius:9px;background:#e7f3f2;color:#087d75;font-size:9px;font-weight:800}
 
 .actor-summary-counts{margin:-30px 0 26px;color:var(--muted);font-size:12.5px;font-weight:700}
 .actor-name-link{cursor:pointer}
@@ -167,3 +165,34 @@
 .dup-row span{display:block;margin-top:4px;color:var(--muted);font-size:11px}
 
 @media(max-width:760px){.nav-section{display:none}}
+
+.actor-card-actions{display:flex;align-items:center;gap:8px;margin-top:10px}
+.actor-detail-link{flex:1;margin-top:0}
+.actor-menu{position:relative}
+.actor-menu summary{list-style:none;display:grid;place-items:center;width:34px;height:34px;border:1px solid var(--line);border-radius:8px;background:#f8faf9;color:var(--muted);font-weight:900;cursor:pointer}
+.actor-menu summary::-webkit-details-marker{display:none}
+.actor-menu[open] summary{border-color:var(--teal);color:var(--teal)}
+.actor-menu-list{position:absolute;right:0;bottom:calc(100% + 6px);z-index:5;display:flex;flex-direction:column;min-width:190px;padding:6px;border:1px solid var(--line);border-radius:10px;background:#fff;box-shadow:0 14px 34px #17313c1f}
+.actor-menu-list button{padding:9px 11px;border:0;border-radius:7px;background:transparent;color:var(--ink);font-size:12px;font-weight:700;text-align:left;cursor:pointer}
+.actor-menu-list button:hover{background:#eef2f1}
+.actor-menu-list button.menu-danger{color:#c14a2f}
+.actor-menu-list button.menu-danger:hover{background:#fdeeec}
+
+.value-chain-track.compact{gap:2px}
+.value-chain-track.compact .dot{width:9px;height:9px}
+.value-chain-track.compact small{font-size:9px}
+.value-chain-track.compact .value-chain-node:not(:last-child)::after{top:4px}
+
+.detail-form{display:flex;flex-direction:column;gap:14px}
+.detail-form label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:750;color:var(--ink)}
+.detail-form label.checkbox-row{flex-direction:row;align-items:center;gap:8px;font-weight:700}
+.detail-form input[type=text],.detail-form input[type=url],.detail-form select{padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:#fbfcfc;font-size:13px;font-family:inherit}
+.detail-form fieldset{margin:0;padding:12px;border:1px solid var(--line);border-radius:9px;display:flex;flex-direction:column;gap:8px}
+.detail-form legend{padding:0 6px;font-size:11px;font-weight:850;text-transform:uppercase;letter-spacing:.05em;color:#5c7986}
+.detail-form-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
+.detail-form-actions button[type=button]{padding:11px 16px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--muted);font-weight:800;font-size:13px;cursor:pointer}
+
+/* Accessibility: visible keyboard focus on every interactive element, and a readable floor
+   for text that still carries real meaning (badges/labels), not just decorative captions. */
+:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
+.class-badge,.business-tag,.filter-chip,.profile-badge,.actor-type-label{font-size:11px}

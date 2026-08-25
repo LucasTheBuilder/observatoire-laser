@@ -173,6 +173,7 @@ const COMPETITIVE_CLASS_LABELS = {
   C2: "Concurrence partielle",
   T1: "Centres technologiques / recherche",
 };
+const COMPETITIVE_CLASS_SHORT = {C1: "Direct", C2: "Partiel", T1: "Centre techno"};
 
 function competitiveClassLabel(actor) {
   return COMPETITIVE_CLASS_LABELS[actor.competitive_class] || "Non classé";
@@ -271,7 +272,7 @@ function renderMonthly() {
     : `<div class="empty">Aucun nouveau document technologique collecté sur la période.</div>`;
 
   content.innerHTML = header(
-    "Revue mensuelle",
+    "Synthèse",
     `Ce qui a changé sur les ${monthly.days || 30} derniers jours`,
     "Nouveaux faits marché, mouvements concurrents, reconfirmations et signaux technologiques depuis la dernière période.",
     `<button class="primary" data-run="monthly">↻ Actualiser toute la veille</button>`
@@ -395,7 +396,9 @@ const BUSINESS_MODEL_LABELS = {equipment: "Équipement", service: "Service", pro
 
 function actorCard(a) {
   const paused = !a.active;
-  const classBadge = a.competitive_class ? `<span class="class-badge ${esc(a.competitive_class)}">${esc(a.competitive_class)}</span>` : "";
+  const classBadge = a.competitive_class
+    ? `<span class="class-badge ${esc(a.competitive_class)}">${esc(a.competitive_class)}${COMPETITIVE_CLASS_SHORT[a.competitive_class] ? ` · ${esc(COMPETITIVE_CLASS_SHORT[a.competitive_class])}` : ""}</span>`
+    : "";
   const entityNote = a.parent_actor
     ? `<p class="actor-entity-note">Racheté par <b>${esc(a.parent_actor)}</b>${a.entity_note ? ` — ${esc(a.entity_note)}` : ""}</p>`
     : "";
@@ -407,27 +410,39 @@ function actorCard(a) {
     ? `<p class="evidence-warning" title="Aucune capacité/service extrait par nos propres collectes pour cet acteur : classification issue de l'audit externe, pas encore confirmée en interne.">⚠ Non confirmé par nos preuves</p>`
     : "";
   const valueChain = (a.value_chain_stages || []).length
-    ? `<div class="value-chain-row" title="Étapes de la chaîne de valeur démontrées par nos preuves, de la moins à la plus mature">${a.value_chain_stages.map(s => `<span class="chain-step">${esc(s)}</span>`).join("")}</div>`
+    ? valueChainTrack(a.value_chain_stages, true)
     : "";
   return `<article class="actor-card ${a.priority?'priority':''}" ${paused?'style="opacity:.55"':''}>
-    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>Prioritaire</span>':''}</div></div>
+    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>★ Prioritaire</span>':''}</div></div>
     <h3 class="actor-name-link" data-actor-detail="${a.id}">${esc(a.name)}</h3>${typeLabel}<p>${esc(a.role)}</p>
     ${businessTags}
     ${valueChain}
     ${entityNote}
     ${unconfirmed}
     <footer><span>${esc(a.country)}</span><a href="${esc(a.official_url)}" target="_blank" rel="noopener">Site officiel ↗</a></footer>
-    <button class="actor-detail-link" data-actor-detail="${a.id}">Voir la fiche →</button>
-    <button class="actor-pause" data-toggle-actor="${a.id}" data-next-active="${paused?'1':'0'}">${paused?'↻ Réactiver':'⏸ Mettre en pause'}</button>
+    <div class="actor-card-actions">
+      <button class="actor-detail-link" data-actor-detail="${a.id}">Voir la fiche →</button>
+      <details class="actor-menu">
+        <summary>⋯</summary>
+        <div class="actor-menu-list">
+          <button data-actor-edit="${a.id}">Modifier</button>
+          <button data-actor-toggle-priority="${a.id}" data-next-priority="${a.priority?'0':'1'}">${a.priority?'Retirer la priorité':'Marquer prioritaire'}</button>
+          <button data-toggle-actor="${a.id}" data-next-active="${paused?'1':'0'}">${paused?'Réactiver':'Mettre en pause'}</button>
+          <button class="menu-danger" data-actor-delete="${a.id}" data-actor-name="${esc(a.name)}">Supprimer</button>
+        </div>
+      </details>
+    </div>
   </article>`;
 }
 
 const VALUE_CHAIN_ALL_STAGES = ["R&D", "Prototype", "Pré-industrialisation", "Industrialisation", "Production"];
 
-function valueChainTrack(stages) {
+const VALUE_CHAIN_SHORT_LABELS = {"R&D": "Dev", "Prototype": "Proto", "Pré-industrialisation": "Pré-indus", "Industrialisation": "Indus", "Production": "Prod"};
+
+function valueChainTrack(stages, compact = false) {
   const demonstrated = new Set(stages || []);
-  return `<div class="value-chain-track">${VALUE_CHAIN_ALL_STAGES.map(stage =>
-    `<div class="value-chain-node ${demonstrated.has(stage) ? "done" : ""}"><span class="dot"></span><small>${esc(stage)}</small></div>`
+  return `<div class="value-chain-track ${compact ? "compact" : ""}">${VALUE_CHAIN_ALL_STAGES.map(stage =>
+    `<div class="value-chain-node ${demonstrated.has(stage) ? "done" : ""}"><span class="dot"></span><small>${esc(compact ? VALUE_CHAIN_SHORT_LABELS[stage] : stage)}</small></div>`
   ).join("")}</div>`;
 }
 
@@ -474,6 +489,79 @@ function showActorDetail(actorId) {
   if (!actor) return;
   document.querySelector("#proof-content").innerHTML = actorDetailContent(actor);
   dialog.showModal();
+}
+
+function actorFormFields(a) {
+  const classOptions = ["", "C1", "C2", "T1"]
+    .map(v => `<option value="${v}" ${(a.competitive_class || "") === v ? "selected" : ""}>${v ? `${v} · ${esc(COMPETITIVE_CLASS_SHORT[v])}` : "Non classé"}</option>`)
+    .join("");
+  const typeOptions = Object.entries(ACTOR_TYPE_LABELS)
+    .map(([v, label]) => `<option value="${v}" ${a.actor_type === v ? "selected" : ""}>${esc(label)}</option>`)
+    .join("");
+  const modelCheckboxes = Object.entries(BUSINESS_MODEL_LABELS)
+    .map(([v, label]) => `<label class="checkbox-row"><input type="checkbox" name="business_models" value="${v}" ${(a.business_models || []).includes(v) ? "checked" : ""}> ${esc(label)}</label>`)
+    .join("");
+  return `<label>Nom<input type="text" name="name" value="${esc(a.name || "")}" required></label>
+    <label>Pays<input type="text" name="country" value="${esc(a.country || "")}" required></label>
+    <label>Rôle<input type="text" name="role" value="${esc(a.role || "")}" required></label>
+    <label>Site officiel<input type="url" name="official_url" value="${esc(a.official_url || "")}" required></label>
+    <label class="checkbox-row"><input type="checkbox" name="priority" ${a.priority ? "checked" : ""}> Prioritaire</label>
+    <label>Classe concurrentielle<select name="competitive_class">${classOptions}</select></label>
+    <label>Type d'acteur<select name="actor_type"><option value="">Non classé</option>${typeOptions}</select></label>
+    <fieldset><legend>Business models</legend>${modelCheckboxes}</fieldset>`;
+}
+
+function showActorEdit(actorId) {
+  const actor = state.actors.find(a => a.id === actorId);
+  if (!actor) return;
+  document.querySelector("#proof-content").innerHTML = `<p class="eyebrow">Modifier l'acteur</p>
+    <h2>${esc(actor.name)}</h2>
+    <form id="actor-edit-form" class="detail-form">
+      ${actorFormFields(actor)}
+      <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Enregistrer</button></div>
+    </form>`;
+  dialog.showModal();
+  document.querySelector("#actor-edit-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const data = new FormData(e.target);
+    try {
+      await api(`/api/actors/${actorId}`, {
+        method: "PATCH",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          name: data.get("name"), country: data.get("country"), role: data.get("role"),
+          official_url: data.get("official_url"), priority: data.get("priority") === "on",
+          competitive_class: data.get("competitive_class") || null,
+          actor_type: data.get("actor_type") || null,
+          business_models: data.getAll("business_models"),
+        }),
+      });
+      toast("Acteur mis à jour.");
+      dialog.close();
+      state.actors = await api("/api/actors");
+      renderActors();
+    } catch (error) { toast(error.message); }
+  });
+  document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
+}
+
+async function toggleActorPriority(actorId, nextPriority) {
+  try {
+    await api(`/api/actors/${actorId}`, {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({priority: nextPriority})});
+    toast(nextPriority ? "Acteur marqué prioritaire." : "Priorité retirée.");
+    state.actors = await api("/api/actors");
+    renderActors();
+  } catch (error) { toast(error.message); }
+}
+
+async function deleteActorWithConfirm(actorId, actorName) {
+  if (!confirm(`Supprimer définitivement « ${actorName} » ? Cette action supprime aussi tout son historique de collecte et ne peut pas être annulée.`)) return;
+  try {
+    await api(`/api/actors/${actorId}`, {method: "DELETE"});
+    toast("Acteur supprimé.");
+    state.actors = await api("/api/actors");
+    renderActors();
+  } catch (error) { toast(error.message); }
 }
 
 function acquisitionsSection(actors) {
@@ -600,7 +688,8 @@ function renderActors() {
   const nonReference = state.actors.filter(a => !a.is_reference);
   const countFor = cls => nonReference.filter(a => a.competitive_class === cls && a.review_status === "verified").length;
   const toVerifyCount = nonReference.filter(a => a.review_status === "candidate" || a.review_status === "monitor").length;
-  const summaryLine = `${countFor("C1")} C1 directs · ${countFor("C2")} C2 significatifs · ${countFor("T1")} T1 centres / recherche · ${toVerifyCount} à vérifier`;
+  const priorityCount = nonReference.filter(a => a.priority).length;
+  const summaryLine = `${countFor("C1")} C1 directs · ${countFor("C2")} C2 significatifs · ${countFor("T1")} T1 centres / recherche · ${toVerifyCount} à vérifier · ${priorityCount} prioritaires`;
   const references = filtered.filter(a => a.is_reference);
   const pendingReview = filtered.filter(a => a.review_status === "candidate" || a.review_status === "monitor");
   const categories = groupActorsByCategory(filtered);
@@ -613,16 +702,8 @@ function renderActors() {
   const pendingSection = pendingReview.length
     ? `<section><div class="section-title"><div><span>—</span><div><h2>En attente de validation</h2><p>Signaux émergents dont la preuve est encore insuffisante pour compter comme concurrent.</p></div></div><b>${pendingReview.length}</b></div><div class="review-grid">${pendingReview.map(reviewActorCard).join("")}</div></section>`
     : "";
-  content.innerHTML = header("Écosystème suivi",`${nonReference.length} acteurs suivis`,"HEF et IREIS restent hors benchmark comme références internes.",`<button class="primary" data-run="actors">↻ Mettre à jour</button>`)+
+  content.innerHTML = header("Écosystème suivi",`${nonReference.length} acteurs suivis`,"HEF et IREIS restent hors benchmark comme références internes.",`<div class="header-actions"><button class="export-btn" data-open-actor-add>+ Ajouter un acteur</button><button class="primary" data-run="actors">↻ Mettre à jour</button></div>`)+
   `<p class="actor-summary-counts">${esc(summaryLine)}</p>
-   <form class="actor-add" id="actor-add-form">
-     <input type="text" name="name" placeholder="Nom de l'acteur" required>
-     <input type="text" name="country" placeholder="Pays" required>
-     <input type="text" name="role" placeholder="Rôle" required>
-     <input type="url" name="official_url" placeholder="https://site-officiel.example" required>
-     <label><input type="checkbox" name="priority"> Prioritaire</label>
-     <button type="submit">+ Ajouter</button>
-   </form>
    ${pendingSection}
    ${acquisitionsSection(filtered)}
    <div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div>
@@ -648,10 +729,25 @@ function renderActors() {
   if (countrySelect) countrySelect.addEventListener("change", e => { state.actorFilters.country = e.target.value; renderActors(); });
   const priorityCheckbox = document.querySelector("#filter-priority-only");
   if (priorityCheckbox) priorityCheckbox.addEventListener("change", e => { state.actorFilters.priorityOnly = e.target.checked; renderActors(); });
-  const form = document.querySelector("#actor-add-form");
-  if (form) form.addEventListener("submit", async e => {
+  document.querySelector("[data-open-actor-add]")?.addEventListener("click", showActorAdd);
+  wireActions();
+}
+
+function showActorAdd() {
+  document.querySelector("#proof-content").innerHTML = `<p class="eyebrow">Nouvel acteur</p>
+    <h2>Ajouter un acteur</h2>
+    <form id="actor-add-form" class="detail-form">
+      <label>Nom<input type="text" name="name" placeholder="Nom de l'acteur" required></label>
+      <label>Pays<input type="text" name="country" placeholder="Pays" required></label>
+      <label>Rôle<input type="text" name="role" placeholder="Rôle" required></label>
+      <label>Site officiel<input type="url" name="official_url" placeholder="https://site-officiel.example" required></label>
+      <label class="checkbox-row"><input type="checkbox" name="priority"> Prioritaire</label>
+      <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Ajouter</button></div>
+    </form>`;
+  dialog.showModal();
+  document.querySelector("#actor-add-form").addEventListener("submit", async e => {
     e.preventDefault();
-    const data = new FormData(form);
+    const data = new FormData(e.target);
     try {
       await api("/api/actors", {
         method: "POST",
@@ -662,11 +758,12 @@ function renderActors() {
         }),
       });
       toast("Acteur ajouté.");
+      dialog.close();
       state.actors = await api("/api/actors");
       renderActors();
     } catch (error) { toast(error.message); }
   });
-  wireActions();
+  document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
 }
 
 function dimensionLabel(dimension) {
@@ -690,8 +787,8 @@ function vocabCard(item) {
 function renderVocabulary() {
   const items = state.vocabulary || [];
   content.innerHTML = header(
-    "Enrichissement du lexique",
-    "Vocabulaire proposé par l'IA",
+    "Validation",
+    "Détections IA à valider",
     "Libellés marché/composant/opération proposés par le modèle mais absents du lexique connu. Accepter un libellé l’ajoute au lexique vivant, utilisable dès la prochaine collecte marché — sans déploiement de code."
   ) +
   (items.length
@@ -890,6 +987,9 @@ function wireActions(){
   document.querySelectorAll("[data-reject-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.rejectVocab),"reject")));
   document.querySelectorAll("[data-review-actor]").forEach(button=>button.addEventListener("click",()=>decideActorReview(Number(button.dataset.reviewActor), button.dataset.reviewStatus)));
   document.querySelectorAll("[data-actor-detail]").forEach(el=>el.addEventListener("click",()=>showActorDetail(Number(el.dataset.actorDetail))));
+  document.querySelectorAll("[data-actor-edit]").forEach(el=>el.addEventListener("click",()=>showActorEdit(Number(el.dataset.actorEdit))));
+  document.querySelectorAll("[data-actor-toggle-priority]").forEach(el=>el.addEventListener("click",()=>toggleActorPriority(Number(el.dataset.actorTogglePriority), el.dataset.nextPriority==="1")));
+  document.querySelectorAll("[data-actor-delete]").forEach(el=>el.addEventListener("click",()=>deleteActorWithConfirm(Number(el.dataset.actorDelete), el.dataset.actorName)));
 }
 
 document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click",()=>{

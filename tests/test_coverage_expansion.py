@@ -133,6 +133,50 @@ class ActorManagementTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     dbmod.update_actor_classification(actor_id, business_models=["equipment", "not-a-real-model"])
 
+    def test_update_actor_classification_edits_descriptive_fields_and_rejects_name_clash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                first_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example")
+                second_id = dbmod.create_actor("Other Laser Co", "Allemagne", "Job-shop", "https://other.example")
+
+                dbmod.update_actor_classification(
+                    first_id, name="Renamed Laser Co", country="Belgique", role="Job-shop laser",
+                    official_url="https://renamed.example", priority=True,
+                )
+                with dbmod.connect(actors_db) as db:
+                    row = db.execute(
+                        "SELECT name,country,role,official_url,priority FROM actors WHERE id=?", (first_id,)
+                    ).fetchone()
+                self.assertEqual(("Renamed Laser Co", "Belgique", "Job-shop laser", "https://renamed.example", 1), tuple(row))
+
+                # Renaming to another actor's existing name must be rejected, not silently
+                # accepted (actors.name is UNIQUE) or crash with a raw sqlite3.IntegrityError.
+                with self.assertRaises(ValueError):
+                    dbmod.update_actor_classification(second_id, name="Renamed Laser Co")
+                # Renaming an actor to its own current name is not a clash.
+                dbmod.update_actor_classification(first_id, name="Renamed Laser Co")
+
+                with self.assertRaises(ValueError):
+                    dbmod.update_actor_classification(first_id, official_url="not-a-url")
+                with self.assertRaises(ValueError):
+                    dbmod.update_actor_classification(first_id, name="   ")
+
+    def test_delete_actor_removes_it_and_cascades_its_site_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example")
+                dbmod.delete_actor(actor_id)
+                with dbmod.connect(actors_db) as db:
+                    actor_row = db.execute("SELECT 1 FROM actors WHERE id=?", (actor_id,)).fetchone()
+                    profile_row = db.execute("SELECT 1 FROM site_profiles WHERE actor_id=?", (actor_id,)).fetchone()
+                self.assertIsNone(actor_row)
+                self.assertIsNone(profile_row)
+
+                with self.assertRaises(ValueError):
+                    dbmod.delete_actor(999999)
+
     def test_add_actor_relation_and_rejects_bad_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             actors_db = self._fresh_actors_db(tmp)

@@ -812,6 +812,11 @@ BUSINESS_MODELS = {"equipment", "service", "process", "research", "internal"}
 def update_actor_classification(
     actor_id: int,
     *,
+    name: str | None = None,
+    country: str | None = None,
+    role: str | None = None,
+    official_url: str | None = None,
+    priority: bool | None = None,
     competitive_class: str | None = None,
     is_reference: bool | None = None,
     parent_actor: str | None = None,
@@ -820,12 +825,33 @@ def update_actor_classification(
     actor_type: str | None = None,
     business_models: list[str] | None = None,
 ) -> None:
-    """Patch the analytical fields (competitive class, actor type, business model(s),
-    internal-reference flag, M&A parent/note, human-review status) added on top of the
-    free-text ``role``. Only fields explicitly passed (not None) are updated, so a caller
-    can set a single field without clobbering the others.
+    """Patch an actor's editable fields: the plain descriptive ones (name, country, role,
+    official_url, priority) plus the analytical fields (competitive class, actor type,
+    business model(s), internal-reference flag, M&A parent/note, human-review status) added
+    on top of them. Only fields explicitly passed (not None) are updated, so a caller can set
+    a single field without clobbering the others.
     """
     updates: dict[str, object] = {}
+    if name is not None:
+        name = name.strip()
+        if not name:
+            raise ValueError("Actor name is required")
+        updates["name"] = name
+        with connect(ACTORS_DB) as db:
+            clash = db.execute("SELECT id FROM actors WHERE name=? AND id<>?", (name, actor_id)).fetchone()
+        if clash:
+            raise ValueError(f"An actor named '{name}' already exists")
+    if country is not None:
+        updates["country"] = country
+    if role is not None:
+        updates["role"] = role
+    if official_url is not None:
+        official_url = official_url.strip()
+        if not official_url.startswith(("http://", "https://")):
+            raise ValueError("official_url must be an absolute http(s) URL")
+        updates["official_url"] = official_url
+    if priority is not None:
+        updates["priority"] = int(bool(priority))
     if competitive_class is not None:
         updates["competitive_class"] = competitive_class
     if is_reference is not None:
@@ -850,12 +876,23 @@ def update_actor_classification(
     if not updates:
         return
     updates["updated_at"] = utc_now()
-    assignments = ",".join(f"{name}=?" for name in updates)
+    assignments = ",".join(f"{field}=?" for field in updates)
     with connect(ACTORS_DB) as db:
         updated = db.execute(
             f"UPDATE actors SET {assignments} WHERE id=?", (*updates.values(), actor_id)
         ).rowcount
     if not updated:
+        raise ValueError(f"Actor {actor_id} not found")
+
+
+def delete_actor(actor_id: int) -> None:
+    """Permanently remove an actor and everything scraped for it (sources, site profile,
+    relations cascade via ON DELETE CASCADE). Irreversible -- the caller is responsible for
+    confirming this with a human first. Raises ValueError if the actor doesn't exist.
+    """
+    with connect(ACTORS_DB) as db:
+        deleted = db.execute("DELETE FROM actors WHERE id=?", (actor_id,)).rowcount
+    if not deleted:
         raise ValueError(f"Actor {actor_id} not found")
 
 

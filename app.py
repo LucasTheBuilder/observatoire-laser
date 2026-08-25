@@ -33,6 +33,7 @@ from db import (
     backup_all_databases,
     connect,
     create_actor,
+    delete_actor,
     find_actor_duplicate_candidates,
     init_databases,
     reject_vocabulary_candidate,
@@ -402,6 +403,11 @@ def add_actor(payload: ActorCreateRequest):
 
 
 class ActorUpdateRequest(BaseModel):
+    name: str | None = None
+    country: str | None = None
+    role: str | None = None
+    official_url: str | None = None
+    priority: bool | None = None
     active: bool | None = None
     competitive_class: str | None = None
     is_reference: bool | None = None
@@ -414,16 +420,21 @@ class ActorUpdateRequest(BaseModel):
 
 @app.patch("/api/actors/{actor_id}")
 def update_actor(actor_id: int, payload: ActorUpdateRequest):
-    """Partial update: pause/resume, and/or set the analytical classification fields
-    (competitive class, actor type, business model(s), internal-reference flag, M&A
-    parent/note, review status). History (sources, evidence) is always kept -- only these
-    columns change.
+    """Partial update: edit the descriptive fields (name, country, role, official_url,
+    priority), pause/resume, and/or set the analytical classification fields (competitive
+    class, actor type, business model(s), internal-reference flag, M&A parent/note, review
+    status). History (sources, evidence) is always kept -- only these columns change.
     """
     try:
         if payload.active is not None:
             set_actor_active(actor_id, payload.active)
         update_actor_classification(
             actor_id,
+            name=payload.name,
+            country=payload.country,
+            role=payload.role,
+            official_url=payload.official_url,
+            priority=payload.priority,
             competitive_class=payload.competitive_class,
             is_reference=payload.is_reference,
             parent_actor=payload.parent_actor,
@@ -435,6 +446,18 @@ def update_actor(actor_id: int, payload: ActorUpdateRequest):
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"id": actor_id, **payload.model_dump(exclude_none=True)}
+
+
+@app.delete("/api/actors/{actor_id}")
+def remove_actor(actor_id: int):
+    """Permanently delete an actor and everything scraped for it. Irreversible -- the UI
+    must confirm with the user before calling this.
+    """
+    try:
+        delete_actor(actor_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"id": actor_id, "deleted": True}
 
 
 class ActorRelationRequest(BaseModel):
