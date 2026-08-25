@@ -86,4 +86,29 @@
 .class-badge.A1{background:#eef2f1;color:#5c7986}
 .actor-entity-note{margin:6px 0 0;padding:8px 10px;border-radius:8px;background:#fdf3ee;color:#8a5a3f;font-size:11px;line-height:1.5}
 
+.chart-legend{display:flex;gap:16px;margin-bottom:14px;font-size:11px;color:var(--muted)}
+.chart-legend span{display:inline-flex;align-items:center;gap:6px}
+.chart-legend i{width:9px;height:9px;border-radius:3px;display:inline-block}
+
+.network-graph{overflow:visible}
+.network-edge{stroke:var(--chart-grid);stroke-width:1}
+.network-label{font-size:9.5px;font-family:Inter,system-ui,sans-serif;fill:var(--muted)}
+.network-label.actor{fill:var(--ink);font-weight:700}
+
+.review-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;margin-bottom:34px}
+.review-card{padding:16px 18px;border:1px solid #e7d7ae;border-radius:13px;background:#fffaf0}
+.review-card header{display:flex;flex-direction:column;gap:2px;margin-bottom:8px}
+.review-card header small{color:#a8790b;font-size:9.5px;font-weight:850;letter-spacing:.06em;text-transform:uppercase}
+.review-card header strong{font-family:Georgia,serif;font-size:16px}
+.review-card header span{color:var(--muted);font-size:12px}
+.review-card blockquote{margin:0 0 12px;color:#6b5638;font:italic 12px/1.5 Georgia,serif}
+.review-actions{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.review-monitor{padding:7px 11px;border:0;border-radius:20px;background:#eef2f1;color:#5c7986;font-weight:800;font-size:11px;cursor:pointer}
+.review-monitor:hover{background:#e2e7e6}
+
+.dup-list{overflow:hidden;border:1px solid var(--line);border-radius:14px;background:#fff}
+.dup-row{padding:14px 18px;border-top:1px solid #edf0f1;font-size:13px}
+.dup-row:first-child{border-top:0}
+.dup-row span{display:block;margin-top:4px;color:var(--muted);font-size:11px}
+
 @media(max-width:760px){.nav-section{display:none}}

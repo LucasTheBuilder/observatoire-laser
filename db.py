@@ -305,6 +305,17 @@ def init_databases() -> None:
                 last_status TEXT NOT NULL DEFAULT 'never',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS actor_relations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
+                related_actor_id INTEGER REFERENCES actors(id) ON DELETE SET NULL,
+                related_name TEXT NOT NULL,
+                relation_type TEXT NOT NULL CHECK(relation_type IN ('partner','supplier','client')),
+                note TEXT,
+                source_url TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS actor_relations_actor_idx ON actor_relations(actor_id);
             CREATE TABLE IF NOT EXISTS actor_sources (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
@@ -361,6 +372,11 @@ def init_databases() -> None:
             "is_reference": "INTEGER NOT NULL DEFAULT 0 CHECK(is_reference IN (0,1))",
             "parent_actor": "TEXT",
             "entity_note": "TEXT",
+            # Human-validation queue for actors whose evidence is too thin to trust yet
+            # (e.g. a newly-launched site found by the audit's counter-investigation).
+            # 'verified' is the default so every actor added the normal way (or already
+            # in the base before this column existed) counts as a real actor immediately.
+            "review_status": "TEXT NOT NULL DEFAULT 'verified' CHECK(review_status IN ('candidate','verified','rejected','monitor'))",
         })
         _add_columns(db, "actor_sources", {
             "page_type": "TEXT",
@@ -779,10 +795,12 @@ def update_actor_classification(
     is_reference: bool | None = None,
     parent_actor: str | None = None,
     entity_note: str | None = None,
+    review_status: str | None = None,
 ) -> None:
     """Patch the analytical fields (competitive class, internal-reference flag, M&A parent/
-    note) added on top of the free-text ``role``. Only fields explicitly passed (not None)
-    are updated, so a caller can set a single field without clobbering the others.
+    note, human-review status) added on top of the free-text ``role``. Only fields
+    explicitly passed (not None) are updated, so a caller can set a single field without
+    clobbering the others.
     """
     updates: dict[str, object] = {}
     if competitive_class is not None:
@@ -793,6 +811,10 @@ def update_actor_classification(
         updates["parent_actor"] = parent_actor
     if entity_note is not None:
         updates["entity_note"] = entity_note
+    if review_status is not None:
+        if review_status not in {"candidate", "verified", "rejected", "monitor"}:
+            raise ValueError(f"Invalid review_status: {review_status!r}")
+        updates["review_status"] = review_status
     if not updates:
         return
     updates["updated_at"] = utc_now()
@@ -803,6 +825,81 @@ def update_actor_classification(
         ).rowcount
     if not updated:
         raise ValueError(f"Actor {actor_id} not found")
+
+
+def add_actor_relation(
+    actor_id: int,
+    relation_type: str,
+    related_name: str,
+    *,
+    related_actor_id: int | None = None,
+    note: str | None = None,
+    source_url: str | None = None,
+) -> int:
+    """Record a partner/supplier/client relation for the network map. ``related_name`` is
+    always stored (even when ``related_actor_id`` points at a tracked actor) so the edge
+    still renders a label if that actor is later renamed or removed.
+    """
+    if relation_type not in {"partner", "supplier", "client"}:
+        raise ValueError(f"Invalid relation_type: {relation_type!r}")
+    related_name = related_name.strip()
+    if not related_name:
+        raise ValueError("related_name is required")
+    with connect(ACTORS_DB) as db:
+        exists = db.execute("SELECT 1 FROM actors WHERE id=?", (actor_id,)).fetchone()
+        if not exists:
+            raise ValueError(f"Actor {actor_id} not found")
+        return db.execute(
+            """INSERT INTO actor_relations(actor_id,related_actor_id,related_name,relation_type,note,source_url,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (actor_id, related_actor_id, related_name, relation_type, note, source_url, utc_now()),
+        ).lastrowid
+
+
+def _normalize_domain(url: str) -> str:
+    host = urlparse(url).netloc.casefold()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _name_tokens(name: str) -> set[str]:
+    stop = {"gmbh", "ag", "srl", "ltd", "sa", "sas", "sarl", "inc", "co", "laser", "lasers", "photonics", "technology", "technologies"}
+    slug = _slug(name).replace("-", " ")
+    return {token for token in slug.split() if token and token not in stop}
+
+
+def find_actor_duplicate_candidates() -> list[dict[str, object]]:
+    """Flag actor pairs that may be the same organization: exact domain match, a shared
+    parent company, or near-identical names once legal suffixes (GmbH, Ltd...) are
+    stripped. Read-only -- this only reports candidates, it never merges or deletes
+    anything; a human decides. No address/registry data is collected today, so that
+    signal from the audit isn't checked here.
+    """
+    with connect(ACTORS_DB) as db:
+        actors = [dict(row) for row in db.execute("SELECT id,name,official_url,parent_actor FROM actors WHERE active=1")]
+    candidates: list[dict[str, object]] = []
+    for i, left in enumerate(actors):
+        left_domain = _normalize_domain(left["official_url"])
+        left_tokens = _name_tokens(left["name"])
+        for right in actors[i + 1 :]:
+            reasons = []
+            if left_domain and left_domain == _normalize_domain(right["official_url"]):
+                reasons.append("meme domaine officiel")
+            if left["parent_actor"] and left["parent_actor"] == right["name"]:
+                reasons.append(f"{left['name']} rattache a {right['name']}")
+            elif right["parent_actor"] and right["parent_actor"] == left["name"]:
+                reasons.append(f"{right['name']} rattache a {left['name']}")
+            elif left["parent_actor"] and left["parent_actor"] == right["parent_actor"]:
+                reasons.append(f"meme maison mere ({left['parent_actor']})")
+            right_tokens = _name_tokens(right["name"])
+            if left_tokens and right_tokens and left_tokens == right_tokens:
+                reasons.append("noms identiques hors forme juridique")
+            if reasons:
+                candidates.append({
+                    "actor_a": left["name"], "actor_a_id": left["id"],
+                    "actor_b": right["name"], "actor_b_id": right["id"],
+                    "reasons": reasons,
+                })
+    return candidates
 
 
 def accept_vocabulary_candidate(candidate_id: int, dimension: str) -> dict[str, str]:

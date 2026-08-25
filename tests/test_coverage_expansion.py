@@ -103,6 +103,57 @@ class ActorManagementTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     dbmod.update_actor_classification(999999, competitive_class="C1")
 
+    def test_update_actor_classification_rejects_invalid_review_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example")
+                with self.assertRaises(ValueError):
+                    dbmod.update_actor_classification(actor_id, review_status="not-a-status")
+                dbmod.update_actor_classification(actor_id, review_status="candidate")
+                with dbmod.connect(actors_db) as db:
+                    status = db.execute("SELECT review_status FROM actors WHERE id=?", (actor_id,)).fetchone()[0]
+                self.assertEqual("candidate", status)
+
+    def test_add_actor_relation_and_rejects_bad_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example")
+                relation_id = dbmod.add_actor_relation(actor_id, "partner", "Big University Lab", note="Co-published a paper")
+                with dbmod.connect(actors_db) as db:
+                    row = db.execute(
+                        "SELECT actor_id,related_name,relation_type,note FROM actor_relations WHERE id=?", (relation_id,)
+                    ).fetchone()
+                self.assertEqual((actor_id, "Big University Lab", "partner", "Co-published a paper"), tuple(row))
+
+                with self.assertRaises(ValueError):
+                    dbmod.add_actor_relation(actor_id, "rival", "Someone")  # invalid relation_type
+                with self.assertRaises(ValueError):
+                    dbmod.add_actor_relation(999999, "partner", "Someone")  # unknown actor
+                with self.assertRaises(ValueError):
+                    dbmod.add_actor_relation(actor_id, "partner", "  ")  # blank name
+
+    def test_find_actor_duplicate_candidates_flags_domain_parent_and_name_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                a = dbmod.create_actor("Acme Laser", "France", "Fabricant", "https://acme-laser.example/en")
+                b = dbmod.create_actor("Acme Laser GmbH", "Allemagne", "Fabricant", "https://acme-laser.example/de")
+                dbmod.create_actor("Unrelated Co", "France", "Fabricant", "https://unrelated.example")
+                acquired = dbmod.create_actor("Acquired Sub", "Irlande", "Fabricant", "https://acquired.example")
+                dbmod.update_actor_classification(acquired, parent_actor="Acme Laser")
+
+                candidates = dbmod.find_actor_duplicate_candidates()
+                pairs = {frozenset((c["actor_a_id"], c["actor_b_id"])) for c in candidates}
+                self.assertIn(frozenset((a, b)), pairs)  # same domain + same name once "GmbH" is stripped
+                self.assertIn(frozenset((a, acquired)), pairs)  # parent/subsidiary link
+                flagged_ids = {actor_id for pair in pairs for actor_id in pair}
+                unrelated_id = next(
+                    row["id"] for row in dbmod.rows(actors_db, "SELECT id FROM actors WHERE name='Unrelated Co'")
+                )
+                self.assertNotIn(unrelated_id, flagged_ids)
+
 
 class VocabularyPromotionTests(unittest.TestCase):
     def _fresh_market_db(self, tmp: str) -> Path:

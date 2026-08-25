@@ -7,6 +7,8 @@ const state = {
   actors: [],
   profiles: [],
   vocabulary: [],
+  network: {nodes: [], edges: []},
+  duplicates: [],
   query: "",
   offerQuery: "",
 };
@@ -178,7 +180,7 @@ function groupActorsByCategory(actors) {
   const order = ["C1", "C2", "T1", "Non classé"];
   const map = new Map();
   for (const actor of actors) {
-    if (actor.is_reference) continue;
+    if (actor.is_reference || actor.review_status !== "verified") continue;
     const key = COMPETITIVE_CLASS_LABELS[actor.competitive_class] ? actor.competitive_class : "Non classé";
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(actor);
@@ -393,11 +395,91 @@ function actorCard(a) {
   </article>`;
 }
 
+function reviewActorCard(a) {
+  const label = a.review_status === "monitor" ? "SOUS SURVEILLANCE" : "À VALIDER";
+  return `<article class="review-card">
+    <header><small>${esc(label)} · ${esc(a.country)}</small><strong>${esc(a.name)}</strong><span>${esc(a.role)}</span></header>
+    ${a.entity_note ? `<blockquote>${esc(a.entity_note)}</blockquote>` : ""}
+    <div class="review-actions">
+      <button class="vocab-accept" data-review-actor="${a.id}" data-review-status="verified">✓ Valider</button>
+      ${a.review_status !== "monitor" ? `<button class="review-monitor" data-review-actor="${a.id}" data-review-status="monitor">◷ Surveiller</button>` : ""}
+      <button class="vocab-reject" data-review-actor="${a.id}" data-review-status="rejected">✕ Rejeter</button>
+    </div>
+    <a class="signal-link" href="${esc(a.official_url)}" target="_blank" rel="noopener">Voir le site ↗</a>
+  </article>`;
+}
+
+async function decideActorReview(actorId, reviewStatus) {
+  try {
+    await api(`/api/actors/${actorId}`, {
+      method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({review_status: reviewStatus}),
+    });
+    toast(reviewStatus === "verified" ? "Acteur validé." : reviewStatus === "monitor" ? "Acteur mis sous surveillance." : "Acteur rejeté.");
+    [state.actors, state.network] = await Promise.all([api("/api/actors"), api("/api/network")]);
+    renderActors();
+  } catch (error) { toast(error.message); }
+}
+
+const NETWORK_NODE_COLOR = {market: "var(--chart-coral)", technology: "#b9aee0"};
+const NETWORK_CLASS_COLOR = {C1: "#c14a2f", C2: "#a8790b", T1: "#6b4fb3"};
+
+function networkGraphSvg(nodes, edges) {
+  if (!nodes.length) return `<div class="empty">Pas encore assez de preuves marché/technologie pour construire la cartographie.</div>`;
+  const width = 780, height = 780, cx = width / 2, cy = height / 2;
+  const radiusByType = {market: 90, technology: 190, actor: 320};
+  const byType = {market: [], technology: [], actor: []};
+  for (const node of nodes) (byType[node.type] || byType.actor).push(node);
+  const positioned = new Map();
+  for (const type of ["market", "technology", "actor"]) {
+    const list = byType[type];
+    list.forEach((node, i) => {
+      const angle = (i / Math.max(list.length, 1)) * 2 * Math.PI - Math.PI / 2;
+      positioned.set(node.id, {...node, x: cx + radiusByType[type] * Math.cos(angle), y: cy + radiusByType[type] * Math.sin(angle), angle});
+    });
+  }
+  const colorFor = node => node.type === "actor" ? (NETWORK_CLASS_COLOR[node.class] || "var(--teal)") : NETWORK_NODE_COLOR[node.type];
+  const edgeLines = edges.map(edge => {
+    const source = positioned.get(edge.source), target = positioned.get(edge.target);
+    if (!source || !target) return "";
+    return `<line x1="${source.x.toFixed(1)}" y1="${source.y.toFixed(1)}" x2="${target.x.toFixed(1)}" y2="${target.y.toFixed(1)}" class="network-edge"><title>${esc(source.label)} → ${esc(target.label)}${edge.relation ? ` (${esc(edge.relation)})` : ""}</title></line>`;
+  }).join("");
+  const nodeMarks = [...positioned.values()].map(node => {
+    const r = node.type === "actor" ? 7 : 5;
+    const cos = Math.cos(node.angle);
+    const anchor = cos > 0.15 ? "start" : cos < -0.15 ? "end" : "middle";
+    const dx = anchor === "start" ? 10 : anchor === "end" ? -10 : 0;
+    const sin = Math.sin(node.angle);
+    const dy = sin > 0.85 ? 15 : sin < -0.85 ? -10 : 4;
+    return `<g>
+      <circle cx="${node.x.toFixed(1)}" cy="${node.y.toFixed(1)}" r="${r}" fill="${colorFor(node)}"><title>${esc(node.label)}</title></circle>
+      <text x="${(node.x + dx).toFixed(1)}" y="${(node.y + dy).toFixed(1)}" text-anchor="${anchor}" class="network-label ${node.type}">${esc(node.label)}</text>
+    </g>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" class="network-graph" role="img" aria-label="Cartographie réseau">${edgeLines}${nodeMarks}</svg>`;
+}
+
+function networkSection() {
+  const legend = [
+    {label: "Marché", color: NETWORK_NODE_COLOR.market},
+    {label: "Technologie", color: NETWORK_NODE_COLOR.technology},
+    {label: "Acteur C1", color: NETWORK_CLASS_COLOR.C1},
+    {label: "Acteur C2", color: NETWORK_CLASS_COLOR.C2},
+    {label: "Acteur T1", color: NETWORK_CLASS_COLOR.T1},
+  ];
+  return `<section><div class="section-title"><div><span>02</span><div><h2>Cartographie réseau</h2><p>Acteur ↔ marché ↔ technologie, reconstruite à partir des preuves déjà collectées. Un acteur sans preuve n'apparaît pas encore.</p></div></div></div>
+    <div class="chart-legend">${legend.map(item => `<span><i style="background:${item.color}"></i>${item.label}</span>`).join("")}</div>
+    ${networkGraphSvg(state.network.nodes, state.network.edges)}
+  </section>`;
+}
+
 function renderActors() {
   const q = state.query.toLowerCase();
   const filtered = state.actors.filter(a => `${a.name} ${a.country} ${a.role}`.toLowerCase().includes(q));
-  const activeCount = state.actors.filter(a => a.active && !a.is_reference).length;
+  const activeCount = state.actors.filter(a => a.active && !a.is_reference && a.review_status === "verified").length;
   const references = filtered.filter(a => a.is_reference);
+  const pendingReview = filtered.filter(a => a.review_status === "candidate" || a.review_status === "monitor");
   const categories = groupActorsByCategory(filtered);
   const referenceSection = references.length
     ? `<div class="actor-category reference"><p>Références internes<small>${references.length}</small></p><div class="actor-grid">${references.map(actorCard).join("")}</div></div>`
@@ -405,6 +487,9 @@ function renderActors() {
   const categorySections = categories.map(([category, list]) =>
     `<div class="actor-category"><p>${esc(category)}<small>${list.length}</small></p><div class="actor-grid">${list.map(actorCard).join("")}</div></div>`
   ).join("");
+  const pendingSection = pendingReview.length
+    ? `<section><div class="section-title"><div><span>—</span><div><h2>En attente de validation</h2><p>Signaux émergents dont la preuve est encore insuffisante pour compter comme concurrent.</p></div></div><b>${pendingReview.length}</b></div><div class="review-grid">${pendingReview.map(reviewActorCard).join("")}</div></section>`
+    : "";
   content.innerHTML = header("Écosystème suivi",`${activeCount} acteurs concurrents actifs`,"Classés par classe concurrentielle (C1 direct, C2 partiel, T1 centre technologique) ; HEF et IREIS restent hors benchmark comme références internes.",`<button class="primary" data-run="actors">↻ Mettre à jour</button>`)+
   `<form class="actor-add" id="actor-add-form">
      <input type="text" name="name" placeholder="Nom de l'acteur" required>
@@ -414,7 +499,10 @@ function renderActors() {
      <label><input type="checkbox" name="priority"> Prioritaire</label>
      <button type="submit">+ Ajouter</button>
    </form>
-   <div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div>${categorySections || '<div class="empty">Aucun acteur ne correspond à cette recherche.</div>'}${referenceSection}`;
+   ${pendingSection}
+   <div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div>
+   <section><div class="section-title"><div><span>01</span><div><h2>Répartition par classe concurrentielle</h2></div></div></div>${categorySections || '<div class="empty">Aucun acteur ne correspond à cette recherche.</div>'}${referenceSection}</section>
+   ${networkSection()}`;
   const input = document.querySelector("#actor-search");
   if (input) {
     input.focus({preventScroll:true});
@@ -493,8 +581,17 @@ function renderCollections() {
   content.innerHTML = header("Pilotage des données","Bases & collectes","Le crawler couvre d’abord les familles stratégiques du site, puis approfondit les meilleures sources.")+
   `<div class="db-grid">${dbCard("actors","Acteurs","actors.db",`${o.actors.count} acteurs`,`${o.actors.priority} prioritaires · ${o.actors.count-o.actors.priority} suivis`)}${dbCard("market","Marché & offres","market.db",`${o.market.existing+o.market.radar} applications`,`${o.market.offers||0} offres/capacités · ${o.market.proof_sources||0} sources de preuve`)}${dbCard("technology","Technologie","technology.db",`${o.technology.documents} documents`,`Planification en pause`,true)}</div>
    <section class="adaptive-panel"><div class="adaptive-heading"><div><p class="eyebrow">Couverture déterministe</p><h2>Profils des acteurs prioritaires</h2></div><span class="ollama ${o.adaptive.ollama_available?'online':'offline'}">${o.adaptive.ollama_available?`${aiProviderName(o.adaptive)} · ${esc(o.adaptive.model)}${aiCostSuffix(o.adaptive)}`:`${aiProviderName(o.adaptive)} indisponible · crawler autonome`}</span></div><div class="profile-grid">${priorityProfiles.map(p=>`<article><div><strong>${esc(p.name)}</strong><span class="profile-badge ${p.needs_reprofile?'warning':p.strategy}">${p.needs_reprofile?'À recalibrer':p.strategy==='adaptive'?'Adaptatif':'Générique'}</span></div><p>${p.status==='ready'?'Rubriques stratégiques exploitables':p.status==='partial'?'Couverture partielle':p.status==='degraded'?'Aucune rubrique stratégique exploitable':'Cartographie au prochain lancement'}</p>${sectionStates(p)}<small>${p.last_profiled_at?`Dernière analyse : ${dateLabel(p.last_profiled_at)}`:'Pas encore analysé'}</small></article>`).join("")}</div></section>
-   <div class="rule-note"><strong>Règle de séparation</strong><p>Le crawler collecte les pages et reconstruit leurs blocs. La vue Marché exige marché + composant + opération explicitement reliés. Les pages de service, technologie ou savoir-faire qui ne portent pas de marché explicite sont conservées séparément dans « Offres & capacités ».</p></div>`;
+   <div class="rule-note"><strong>Règle de séparation</strong><p>Le crawler collecte les pages et reconstruit leurs blocs. La vue Marché exige marché + composant + opération explicitement reliés. Les pages de service, technologie ou savoir-faire qui ne portent pas de marché explicite sont conservées séparément dans « Offres & capacités ».</p></div>
+   ${duplicatesPanel()}`;
   wireActions();
+}
+
+function duplicatesPanel() {
+  const pairs = state.duplicates || [];
+  if (!pairs.length) return "";
+  return `<section><div class="section-title"><div><span>!</span><div><h2>Doublons potentiels</h2><p>Même domaine officiel, même maison mère ou noms identiques une fois la forme juridique retirée. Aucune fusion automatique — à vérifier manuellement.</p></div></div><b>${pairs.length}</b></div>
+    <div class="dup-list">${pairs.map(pair => `<article class="dup-row"><div><strong>${esc(pair.actor_a)}</strong> ↔ <strong>${esc(pair.actor_b)}</strong></div><span>${pair.reasons.map(esc).join(" · ")}</span></article>`).join("")}</div>
+  </section>`;
 }
 
 function renderSettings() {
@@ -635,6 +732,7 @@ function wireActions(){
   document.querySelectorAll("[data-toggle-actor]").forEach(button=>button.addEventListener("click",()=>toggleActorActive(Number(button.dataset.toggleActor), button.dataset.nextActive==="1")));
   document.querySelectorAll("[data-accept-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.acceptVocab),"accept",button.dataset.dimension)));
   document.querySelectorAll("[data-reject-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.rejectVocab),"reject")));
+  document.querySelectorAll("[data-review-actor]").forEach(button=>button.addEventListener("click",()=>decideActorReview(Number(button.dataset.reviewActor), button.dataset.reviewStatus)));
 }
 
 document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click",()=>{
@@ -648,7 +746,7 @@ document.querySelector(".dialog-close").addEventListener("click",()=>dialog.clos
 dialog.addEventListener("click",e=>{if(e.target===dialog)dialog.close()});
 
 async function refresh(){
-  [state.overview,state.monthly,state.market,state.offers,state.actors,state.profiles,state.vocabulary]=await Promise.all([
+  [state.overview,state.monthly,state.market,state.offers,state.actors,state.profiles,state.vocabulary,state.network,state.duplicates]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
     api("/api/market"),
@@ -656,6 +754,8 @@ async function refresh(){
     api("/api/actors"),
     api("/api/profiles"),
     api("/api/vocabulary-candidates"),
+    api("/api/network"),
+    api("/api/actors/duplicates"),
   ]);
   render();
 }

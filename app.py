@@ -29,9 +29,11 @@ from db import (
     MARKET_DB,
     TECH_DB,
     accept_vocabulary_candidate,
+    add_actor_relation,
     backup_all_databases,
     connect,
     create_actor,
+    find_actor_duplicate_candidates,
     init_databases,
     reject_vocabulary_candidate,
     rows,
@@ -302,11 +304,19 @@ def list_actors():
     # Includes paused (active=0) actors too, with the flag exposed, so the UI can offer a
     # "reactivate" action -- filtering them out here would make pausing one-way.
     return rows(ACTORS_DB, """SELECT a.id,a.name,a.country,a.role,a.priority,a.official_url,a.active,a.last_scraped_at,a.last_status,
-                               a.competitive_class,a.is_reference,a.parent_actor,a.entity_note,
+                               a.competitive_class,a.is_reference,a.parent_actor,a.entity_note,a.review_status,
                                p.strategy,p.status AS profile_status,p.confidence,p.generated_by,p.needs_reprofile,p.health_score,
                                p.coverage_ready,p.coverage_discovered
                                FROM actors a LEFT JOIN site_profiles p ON p.actor_id=a.id
                                ORDER BY a.active DESC,a.priority DESC,a.name""")
+
+
+@app.get("/api/actors/duplicates")
+def actor_duplicates():
+    """Name/domain/parent-company similarity report for human review -- never merges or
+    deletes anything by itself.
+    """
+    return find_actor_duplicate_candidates()
 
 
 class ActorCreateRequest(BaseModel):
@@ -333,13 +343,14 @@ class ActorUpdateRequest(BaseModel):
     is_reference: bool | None = None
     parent_actor: str | None = None
     entity_note: str | None = None
+    review_status: str | None = None
 
 
 @app.patch("/api/actors/{actor_id}")
 def update_actor(actor_id: int, payload: ActorUpdateRequest):
     """Partial update: pause/resume, and/or set the analytical classification fields
-    (competitive class, internal-reference flag, M&A parent/note). History (sources,
-    evidence) is always kept -- only these columns change.
+    (competitive class, internal-reference flag, M&A parent/note, review status). History
+    (sources, evidence) is always kept -- only these columns change.
     """
     try:
         if payload.active is not None:
@@ -350,10 +361,97 @@ def update_actor(actor_id: int, payload: ActorUpdateRequest):
             is_reference=payload.is_reference,
             parent_actor=payload.parent_actor,
             entity_note=payload.entity_note,
+            review_status=payload.review_status,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"id": actor_id, **payload.model_dump(exclude_none=True)}
+
+
+class ActorRelationRequest(BaseModel):
+    relation_type: str
+    related_name: str
+    related_actor_id: int | None = None
+    note: str | None = None
+    source_url: str | None = None
+
+
+@app.post("/api/actors/{actor_id}/relations")
+def add_relation(actor_id: int, payload: ActorRelationRequest):
+    """Record a partner/supplier/client edge for the network map (see /api/network)."""
+    try:
+        relation_id = add_actor_relation(
+            actor_id, payload.relation_type, payload.related_name,
+            related_actor_id=payload.related_actor_id, note=payload.note, source_url=payload.source_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": relation_id}
+
+
+@app.get("/api/network")
+def network():
+    """Actor <-> market <-> technology <-> partner graph for the network map. Built from
+    already-collected evidence/offers (no new scraping): an actor only appears once it has
+    at least one demonstrated market, technology, or recorded relation, so an actor with no
+    data yet doesn't clutter the map as an isolated dot.
+    """
+    actors = {
+        row["name"]: row
+        for row in rows(ACTORS_DB, "SELECT id,name,competitive_class FROM actors WHERE active=1 AND review_status='verified' AND is_reference=0")
+    }
+    relations = rows(
+        ACTORS_DB,
+        """SELECT a.name AS actor_name,r.related_name,r.relation_type
+           FROM actor_relations r JOIN actors a ON a.id=r.actor_id""",
+    )
+    parents = rows(ACTORS_DB, "SELECT name,parent_actor FROM actors WHERE parent_actor IS NOT NULL AND parent_actor<>''")
+    market_links = rows(
+        MARKET_DB,
+        """SELECT DISTINCT actor_name,market FROM evidence
+           WHERE market IS NOT NULL AND market<>'' AND review_status='accepted' AND bucket IN ('existing','radar')""",
+    )
+    tech_links = rows(MARKET_DB, "SELECT DISTINCT actor_name,operation FROM offers WHERE operation IS NOT NULL AND operation<>''")
+
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, str]] = []
+
+    def actor_node(name: str) -> str:
+        node_id = f"actor:{name}"
+        if node_id not in nodes:
+            info = actors.get(name)
+            nodes[node_id] = {"id": node_id, "type": "actor", "label": name, "class": info["competitive_class"] if info else None}
+        return node_id
+
+    for link in market_links:
+        if link["actor_name"] not in actors:
+            continue
+        market_id = f"market:{link['market']}"
+        nodes.setdefault(market_id, {"id": market_id, "type": "market", "label": link["market"]})
+        edges.append({"source": actor_node(link["actor_name"]), "target": market_id})
+
+    for link in tech_links:
+        if link["actor_name"] not in actors:
+            continue
+        tech_id = f"tech:{link['operation']}"
+        nodes.setdefault(tech_id, {"id": tech_id, "type": "technology", "label": link["operation"]})
+        edges.append({"source": actor_node(link["actor_name"]), "target": tech_id})
+
+    for row in parents:
+        if row["name"] not in actors:
+            continue
+        parent_id = f"actor:{row['parent_actor']}"
+        nodes.setdefault(parent_id, {"id": parent_id, "type": "actor", "label": row["parent_actor"], "class": None})
+        edges.append({"source": actor_node(row["name"]), "target": parent_id, "relation": "parent"})
+
+    for row in relations:
+        if row["actor_name"] not in actors:
+            continue
+        related_id = f"actor:{row['related_name']}"
+        nodes.setdefault(related_id, {"id": related_id, "type": "actor", "label": row["related_name"], "class": None})
+        edges.append({"source": actor_node(row["actor_name"]), "target": related_id, "relation": row["relation_type"]})
+
+    return {"nodes": list(nodes.values()), "edges": edges}
 
 
 @app.get("/api/profiles")
