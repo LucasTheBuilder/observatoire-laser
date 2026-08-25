@@ -170,15 +170,14 @@ function groupByFamily(rows, familyOf) {
 }
 
 // Same idea as groupByFamily, but for a classifier that can return several families for one
-// row: the row is duplicated into every matching bucket, each copy tagged with the sibling
-// families it also belongs to so the card can say so instead of looking like an unrelated dupe.
+// row: the row is duplicated into every matching bucket instead of only the first one matched.
 function groupByFamilies(rows, familiesOf) {
   const map = new Map();
   for (const row of rows) {
     const families = familiesOf(row);
     for (const family of families) {
       if (!map.has(family)) map.set(family, []);
-      map.get(family).push({...row, alsoInFamilies: families.filter(f => f !== family)});
+      map.get(family).push(row);
     }
   }
   return [...map.entries()].sort((a, b) => {
@@ -309,8 +308,9 @@ function renderOfferDrillContent(filtered, hasQuery) {
     return offerBreadcrumb(drill) + (level3Groups.length ? offerSubCategoryGrid(drill, level3Groups) : offerEmptyMessage(hasQuery));
   }
   const rows = rowsForDrill(filtered, drill);
+  const hideMaterialSuffix = drill.family === "Matériau";
   return offerBreadcrumb(drill) + (rows.length
-    ? `<ul class="fam-list">${rows.map(offerFamilyItem).join("")}</ul>`
+    ? `<ul class="fam-list">${rows.map(row => offerFamilyItem(row, {hideMaterialSuffix})).join("")}</ul>`
     : offerEmptyMessage(hasQuery));
 }
 
@@ -444,21 +444,23 @@ function offerTypeLabel(value) {
 
 function familyCardGrid(groups, renderItem) {
   if (!groups.length) return "";
-  return `<div class="fam-grid">${groups.map(([label, rows]) => `<article class="fam-card"><header><h3>${esc(label)}</h3><b>${rows.length}</b></header><ul class="fam-list">${rows.map(renderItem).join("")}</ul></article>`).join("")}</div>`;
+  return `<div class="fam-grid">${groups.map(([label, rows]) => `<article class="fam-card"><header><h3>${esc(label)}</h3><b>${rows.length}</b></header><ul class="fam-list">${rows.map(row => renderItem(row)).join("")}</ul></article>`).join("")}</div>`;
 }
 
-function offerFamilyItem(row) {
-  const also = row.alsoInFamilies && row.alsoInFamilies.length
-    ? `<span class="fam-also">également dans : ${row.alsoInFamilies.map(esc).join(", ")}</span>`
-    : "";
+// The offer_type badge (Service/Capacité/Technologie) and cross-family "également dans" note
+// were classification bookkeeping, not something that helps identify who does what on which
+// piece -- dropped so the two lines that remain (actor, then the actual capability text) carry
+// all the weight. hideMaterialSuffix lets a caller already inside the Matériau branch of the
+// drill-down skip repeating the material that's already implied by where the list is nested;
+// everywhere else (Usinage, Fonctionnalisation...) the material is still new information.
+function offerFamilyItem(row, {hideMaterialSuffix = false} = {}) {
+  const materialSuffix = !hideMaterialSuffix && row.material ? ` · ${esc(row.material)}` : "";
   return `<li><button class="fam-item" data-offer-proof="${Number(row.id)}">
       <span class="fam-row-top">
         <span class="fam-actor">${esc(row.actor_name)}</span>
-        <span class="offer-type-badge ${esc(row.offer_type)}">${esc(offerTypeLabel(row.offer_type))}</span>
         <span class="fam-proof-pill" title="Voir les sources">${esc(proofMeta(row))}</span>
       </span>
-      <span class="fam-cap">${esc(row.capability)}${row.material ? ` · ${esc(row.material)}` : ""}</span>
-      ${also}
+      <span class="fam-cap">${esc(row.capability)}${materialSuffix}</span>
     </button></li>`;
 }
 
