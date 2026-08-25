@@ -244,7 +244,7 @@ def classify_source(
         ("application", r"\b(applications?|use cases?|applications? industrielles?)\b"),
         ("project", r"\b(projects?|projets?|collaborations?|collaborative projects?)\b"),
         ("news", r"\b(news|blogs?|actualites?|nouveautes?|press|presse|insights?)\b"),
-        ("service", r"\b(services?|prestations?|sous[- ]?traitance|job shop|contract manufacturing|contract machining|manufacturing services?)\b"),
+        ("service", r"\b(services?|prestations?|sous[- ]?traitance|job shop|contract manufacturing|contract machining|manufacturing services?|lohnfertigung|auftragsfertigung|conto terzi|subcontratacion|fabricacion por contrato)\b"),
         ("capability", r"\b(capabilities|capability|capacities|capacity|competences?|savoir faire|expertises?)\b"),
         ("technology", r"\b(technology|technologies|processes?|procedes?|laser processing|micromachining)\b"),
         ("market", r"\b(markets?|industries|sectors?|secteurs?|marches?)\b"),

@@ -94,6 +94,8 @@
 .business-tag.research{background:#f0ecfa;color:#6b4fb3}
 .business-tag.internal{background:#eef2f1;color:#8a959c}
 .evidence-warning{margin:0 0 6px;color:#a8790b;font-size:10.5px;font-weight:750}
+.value-chain-row{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 8px}
+.chain-step{padding:2px 7px;border-radius:9px;background:#e7f3f2;color:#087d75;font-size:9px;font-weight:800}
 
 .chart-legend{display:flex;gap:16px;margin-bottom:14px;font-size:11px;color:var(--muted)}
 .chart-legend span{display:inline-flex;align-items:center;gap:6px}

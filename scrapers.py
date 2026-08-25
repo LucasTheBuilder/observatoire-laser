@@ -298,12 +298,17 @@ MARKET_INFERENCE = {
 }
 
 MATURITY_RULES = (
-    ("Production", "existing", ("mass production", "volume production", "series production", "serial production", "production industrielle", "production en série", "production line", "manufacturing line", "high-volume manufacturing", "commercial production", "customer production", "contract manufacturing", "job shop", "manufacturing services", "small series", "small batch")),
+    ("Production", "existing", ("mass production", "volume production", "series production", "serial production", "production industrielle", "production en série", "production line", "manufacturing line", "high-volume manufacturing", "commercial production", "customer production", "contract manufacturing", "job shop", "manufacturing services", "small series", "small batch", "lohnfertigung", "auftragsfertigung", "lavorazione conto terzi", "conto terzi", "fabricación por contrato", "fabricacion por contrato", "subcontratación", "subcontratacion")),
     ("Industrialisation", "radar", ("industrialization", "industrialisation", "industrial implementation", "industrialiser", "to industrialize", "scale-up", "scaling-up", "production-ready", "manufacturing integration")),
     ("Pré-industrialisation", "radar", ("pilot line", "ligne pilote", "pilot production", "pre-series", "présérie", "pre-production", "qualification", "process qualification", "production trial")),
     ("Prototype", "radar", ("prototype", "prototyping", "demonstrator", "technology demonstrator")),
     ("R&D", "radar", ("proof of concept", "feasibility study", "process development", "research project", "development program", "project aims", "projet vise", "collaborative project")),
 )
+
+# Adaptive depth (P1 audit item): a page that already reads as service/capability/application/
+# technology is exactly where a deeper job-shop/contract-manufacturing/Lohnfertigung page is
+# likely to sit one click further in -- static max_depth would stop just short of it.
+HIGH_VALUE_PAGE_TYPES = frozenset({"service", "capability", "application", "technology"})
 
 # Compatibilité avec d'éventuels imports externes : inclut aussi les règles regex.
 def _compat_terms(rules: Lexicon) -> tuple[str, ...]:
@@ -1453,7 +1458,8 @@ def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
                             ),
                         )
 
-                        if depth < max_depth:
+                        depth_limit = max_depth + 1 if fetched_type in HIGH_VALUE_PAGE_TYPES else max_depth
+                        if depth < depth_limit:
                             for link in document.links:
                                 link_depth = depth + 1
                                 existed = db.execute("SELECT id FROM actor_sources WHERE url=?", (link["url"],)).fetchone()

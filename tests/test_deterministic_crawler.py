@@ -167,6 +167,72 @@ class DynamicCrawlIntegrationTests(unittest.TestCase):
             self.assertIsNotNone(rows["https://example.test/news/"])
             self.assertIsNone(rows["https://example.test/products/"])
 
+    class DeepServiceChainClient(FakeClient):
+        # /service/ and /service/deep/ both classify as page_type="service" from their URL
+        # path alone (hybrid.classify_source folds the path into its word-match text).
+        pages = {
+            "https://example.test/": """<html><head><title>Example</title></head><body><main><h1>Example</h1>
+                <p>This industrial laser company develops precision manufacturing technologies for customers.</p>
+                <a href='/service/'>Our services</a></main></body></html>""",
+            "https://example.test/service/": """<html><head><title>Service</title></head><body><main><h1>Job shop</h1>
+                <p>Contract manufacturing and job shop capacity for industrial laser processing customers.</p>
+                <a href='/service/deep/'>Capabilities</a></main></body></html>""",
+            "https://example.test/service/deep/": """<html><head><title>Service capabilities</title></head><body><main><h1>Capabilities</h1>
+                <p>Detailed laser processing capability breakdown for industrial manufacturing customers.</p>
+                <a href='/service/deep/deeper/'>Further detail</a></main></body></html>""",
+        }
+
+    def test_a_service_page_at_max_depth_still_discovers_one_more_level(self):
+        # DEFAULT_SITE_PROFILE's max_depth is 2 (site_profiles.DEFAULT_SITE_PROFILE), so the
+        # depth-2 page ("/service/deep/") would normally be the crawl's last stop. Because it
+        # classifies as a "service" page, HIGH_VALUE_PAGE_TYPES lets the crawler take one more
+        # hop and register "/service/deep/deeper/" -- a static max_depth would have missed it.
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "actors.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript("""
+                CREATE TABLE actors (
+                    id INTEGER PRIMARY KEY, name TEXT, country TEXT, role TEXT, priority INTEGER,
+                    official_url TEXT, active INTEGER, last_scraped_at TEXT, last_status TEXT, updated_at TEXT
+                );
+                CREATE TABLE actor_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id INTEGER, url TEXT UNIQUE, source_kind TEXT,
+                    active INTEGER DEFAULT 1, content_hash TEXT, last_http_status INTEGER, last_checked_at TEXT,
+                    last_changed_at TEXT, page_type TEXT, source_score INTEGER DEFAULT 0, discovery_depth INTEGER DEFAULT 0,
+                    discovery_context TEXT, discovery_reason TEXT, parent_url TEXT, extraction_mode TEXT,
+                    structure_hash TEXT, last_title TEXT, last_error TEXT, ambiguous INTEGER DEFAULT 0, blocks_json TEXT
+                );
+                CREATE TABLE collection_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, finished_at TEXT, status TEXT,
+                    scanned INTEGER DEFAULT 0, changed INTEGER DEFAULT 0, errors INTEGER DEFAULT 0, message TEXT
+                );
+                CREATE TABLE site_profiles (
+                    actor_id INTEGER PRIMARY KEY, strategy TEXT, status TEXT, profile_json TEXT, profile_hash TEXT,
+                    confidence REAL DEFAULT 0, generated_by TEXT, version INTEGER DEFAULT 1, last_profiled_at TEXT,
+                    needs_reprofile INTEGER DEFAULT 0, failure_count INTEGER DEFAULT 0, health_score REAL DEFAULT 1,
+                    last_error TEXT, coverage_json TEXT DEFAULT '{}', coverage_ready INTEGER DEFAULT 0,
+                    coverage_discovered INTEGER DEFAULT 0
+                );
+            """)
+            conn.execute(
+                "INSERT INTO actors VALUES(1,'Test Actor','France','Test',0,'https://example.test/',1,NULL,'never','now')"
+            )
+            conn.execute(
+                "INSERT INTO site_profiles(actor_id,strategy,status,generated_by) VALUES(1,'generic','pending','bootstrap')"
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(scrapers, "ACTORS_DB", db_path), \
+                 patch.object(scrapers.httpx, "Client", self.DeepServiceChainClient), \
+                 patch.object(scrapers.OllamaClient, "available", return_value=False):
+                scrapers.scrape_actors(max_pages_per_actor=3)
+
+            conn = sqlite3.connect(db_path)
+            urls = {row[0] for row in conn.execute("SELECT url FROM actor_sources")}
+            conn.close()
+            self.assertIn("https://example.test/service/deep/deeper/", urls)
+
 
 class ProfileTests(unittest.TestCase):
     def test_generic_plus_override(self):

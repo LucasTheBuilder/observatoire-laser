@@ -405,10 +405,14 @@ function actorCard(a) {
   const unconfirmed = a.evidence_confirmed === false
     ? `<p class="evidence-warning" title="Aucune capacité/service extrait par nos propres collectes pour cet acteur : classification issue de l'audit externe, pas encore confirmée en interne.">⚠ Non confirmé par nos preuves</p>`
     : "";
+  const valueChain = (a.value_chain_stages || []).length
+    ? `<div class="value-chain-row" title="Étapes de la chaîne de valeur démontrées par nos preuves, de la moins à la plus mature">${a.value_chain_stages.map(s => `<span class="chain-step">${esc(s)}</span>`).join("")}</div>`
+    : "";
   return `<article class="actor-card ${a.priority?'priority':''}" ${paused?'style="opacity:.55"':''}>
     <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>Prioritaire</span>':''}</div></div>
     <h3>${esc(a.name)}</h3>${typeLabel}<p>${esc(a.role)}</p>
     ${businessTags}
+    ${valueChain}
     ${entityNote}
     ${unconfirmed}
     <div class="profile-line"><span class="profile-badge ${a.needs_reprofile?'warning':a.strategy}">${a.needs_reprofile?'À recalibrer':a.strategy==='adaptive'?'Adaptatif':'Générique'}</span><small>${a.profile_status==='ready'?'Profil prêt':a.profile_status==='partial'?'Profil partiel':a.profile_status==='degraded'?'Mode dégradé':'À cartographier'}</small></div>

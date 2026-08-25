@@ -86,6 +86,16 @@ class HybridExtractionTests(unittest.TestCase):
         self.assertGreater(application_score, project_score)
         self.assertGreater(project_score, news_score)
 
+    def test_local_contract_manufacturing_synonyms_classify_as_service(self):
+        # A German/Italian/Spanish site describing contract manufacturing under its own
+        # local term must be recognized just like the English "contract manufacturing" --
+        # searching only in English/French missed MeKo, HAILTEC and KMLT (audit finding).
+        german, _ = classify_source("https://example.de/lohnfertigung/")
+        german_alt, _ = classify_source("https://example.de/auftragsfertigung/")
+        italian, _ = classify_source("https://example.it/lavorazione-conto-terzi/")
+        spanish, _ = classify_source("https://example.es/fabricacion-por-contrato/")
+        self.assertEqual(("service", "service", "service", "service"), (german, german_alt, italian, spanish))
+
     def test_incomplete_market_evidence_remains_in_review(self):
         block = ContentBlock(
             heading="Titanium implants",

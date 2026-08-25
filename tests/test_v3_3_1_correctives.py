@@ -8,6 +8,7 @@ from collections import defaultdict
 from hybrid import ContentBlock
 from scrapers import (
     _candidate,
+    _detect_maturity,
     _offer_candidates,
     _pop_crawl_item,
     _push_crawl_item,
@@ -102,6 +103,41 @@ class StrictMarketVsOfferTests(unittest.TestCase):
         self.assertIn("Microperçage", capabilities)
         self.assertIn("Texturation", capabilities)
         self.assertIn("Ablation", capabilities)
+
+
+class MarketInferenceGuardTests(unittest.TestCase):
+    def test_component_alone_never_infers_a_market_without_explicit_text(self):
+        # MARKET_INFERENCE (component -> market) only disambiguates when an explicit market
+        # term is ALSO present in the text (see _candidate's "inferred_market in
+        # explicit_markets" check); it must never manufacture a market fact from a component
+        # alone, or "stent" would silently prove a Medical-market claim with no textual
+        # evidence of "medical" anywhere on the page (audit P1: no market inference).
+        block = ContentBlock(
+            heading="Precision components",
+            h1="Precision components",
+            h2="",
+            h3="",
+            path="main > section",
+            text="Our femtosecond laser drilling process produces precision stents for demanding manufacturing programs.",
+        )
+        fact = _candidate("ACME", "https://example.test/components", "Precision components", block)
+        self.assertIsNone(fact)
+
+
+class LocalSynonymMaturityTests(unittest.TestCase):
+    def test_german_italian_spanish_contract_manufacturing_terms_read_as_production(self):
+        # MeKo, HAILTEC and Kirana describe contract manufacturing in their own language
+        # (Lohnfertigung, Auftragsfertigung, lavorazione conto terzi) rather than English --
+        # a maturity detector that only knows "contract manufacturing" misses them entirely.
+        for text in (
+            "Wir bieten Lohnfertigung fuer medizinische Bauteile.",
+            "Spezialisiert auf Auftragsfertigung von Praezisionsteilen.",
+            "Offriamo lavorazione conto terzi per componenti ottici.",
+            "Ofrecemos fabricación por contrato de piezas de precisión.",
+        ):
+            bucket, stage = _detect_maturity(text)
+            self.assertEqual("existing", bucket, msg=text)
+            self.assertEqual("Production", stage, msg=text)
 
 
 class DuplicateProofDedupTests(unittest.TestCase):

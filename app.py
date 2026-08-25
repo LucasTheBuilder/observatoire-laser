@@ -41,10 +41,24 @@ from db import (
     update_actor_classification,
 )
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
-from scrapers import scrape_actors, scrape_market, scrape_technology
+from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+
+# Low-to-high maturity order for display, derived from the same rules the crawler uses to
+# detect a fact's stage (MATURITY_RULES is declared highest-first, for match priority).
+VALUE_CHAIN_STAGES = [name for name, _bucket, _terms in reversed(MATURITY_RULES)]
+
+
+def _leading_value_chain_stage(raw: str | None) -> str | None:
+    """offers/evidence.industrial_stage can be a composite like "Prototype | Matériau: Verre"
+    (see scrapers._candidate's stage_parts) -- only the leading maturity name is a stage.
+    """
+    if not raw:
+        return None
+    name = raw.split("|", 1)[0].strip()
+    return name if name in VALUE_CHAIN_STAGES else None
 
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="observatoire")
 job_lock = threading.Lock()
@@ -314,11 +328,23 @@ def list_actors():
     # crawl has actually produced a capability/service claim for that actor -- otherwise it
     # is indistinguishable from a guess. This never downgrades the class, it just flags it.
     confirmed_actors = {row["actor_name"] for row in rows(MARKET_DB, "SELECT DISTINCT actor_name FROM offers")}
+    # Value-chain stages (P1): derived live from offers.industrial_stage/evidence.industrial_stage
+    # instead of a separately-maintained field, so it can never drift from the actual facts.
+    stages_by_actor: dict[str, set[str]] = {}
+    for row in (
+        rows(MARKET_DB, "SELECT actor_name,industrial_stage FROM offers")
+        + rows(MARKET_DB, "SELECT actor_name,industrial_stage FROM evidence")
+    ):
+        stage = _leading_value_chain_stage(row["industrial_stage"])
+        if stage:
+            stages_by_actor.setdefault(row["actor_name"], set()).add(stage)
     for actor in actors:
         actor["business_models"] = json.loads(actor["business_models"]) if actor["business_models"] else []
         actor["evidence_confirmed"] = (
             actor["competitive_class"] not in ("C1", "C2") or actor["name"] in confirmed_actors
         )
+        demonstrated = stages_by_actor.get(actor["name"], set())
+        actor["value_chain_stages"] = [stage for stage in VALUE_CHAIN_STAGES if stage in demonstrated]
     return actors
 
 
