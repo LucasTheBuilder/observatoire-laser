@@ -294,30 +294,8 @@ function offerTypeLabel(value) {
   return labels[value] || value || "Capacité";
 }
 
-function offerDetails(row) {
-  return [
-    row.operation && `Opération : ${row.operation}`,
-    row.laser_process && `Procédé : ${row.laser_process}`,
-    row.material && `Matériau : ${row.material}`,
-    row.performance && `Performance : ${row.performance}`,
-  ].filter(Boolean);
-}
-
 function offersTable(rows) {
-  if (!rows.length) return `<div class="empty">Aucune offre ou capacité concurrente documentée pour le moment.</div>`;
-  return `<div class="offer-table">
-    <div class="offer-head"><span>Acteur</span><span>Type</span><span>Capacité / savoir-faire</span><span>Contexte technique</span><span>Preuves</span></div>
-    ${rows.map(row => {
-      const details = offerDetails(row);
-      return `<div class="offer-row">
-        <div class="offer-actor">${esc(row.actor_name)}</div>
-        <div><span class="offer-type ${esc(row.offer_type)}">${esc(offerTypeLabel(row.offer_type))}</span></div>
-        <div><strong>${esc(row.capability)}</strong>${row.industrial_stage?`<small>${esc(row.industrial_stage)}</small>`:""}</div>
-        <div class="offer-context">${details.length ? details.map(item=>`<span>${esc(item)}</span>`).join("") : '<span class="muted">Contexte non précisé</span>'}</div>
-        <button class="proof-pill ${Number(row.languages||0)>1?'multi-source':''}" data-offer-proof="${Number(row.id)}" title="Voir les sources">${esc(proofMeta(row))}</button>
-      </div>`;
-    }).join("")}
-  </div>`;
+  return `<div class="empty">Aucune offre ou capacité concurrente documentée pour le moment.</div>`;
 }
 
 function familyCardGrid(groups, renderItem) {
