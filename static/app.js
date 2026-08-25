@@ -417,6 +417,18 @@ function actorCard(a) {
   </article>`;
 }
 
+function acquisitionsSection(actors) {
+  const acquired = actors.filter(a => a.parent_actor);
+  if (!acquired.length) return "";
+  return `<section><div class="section-title"><div><span>⇄</span><div><h2>Mouvements capitalistiques</h2><p>Acquisitions et changements de maison mère détectés sur les acteurs suivis.</p></div></div><b>${acquired.length}</b></div>
+    <div class="acquisition-list">${acquired.map(a => `<article class="acquisition-row">
+      <div class="acquisition-names"><strong>${esc(a.name)}</strong><span class="acquisition-arrow">racheté par</span><strong>${esc(a.parent_actor)}</strong></div>
+      ${a.entity_note ? `<p>${esc(a.entity_note)}</p>` : ""}
+      <a class="signal-link" href="${esc(a.official_url)}" target="_blank" rel="noopener">Voir la source ↗</a>
+    </article>`).join("")}</div>
+  </section>`;
+}
+
 function reviewActorCard(a) {
   const label = a.review_status === "monitor" ? "SOUS SURVEILLANCE" : "À VALIDER";
   return `<article class="review-card">
@@ -522,6 +534,7 @@ function renderActors() {
      <button type="submit">+ Ajouter</button>
    </form>
    ${pendingSection}
+   ${acquisitionsSection(filtered)}
    <div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div>
    <section><div class="section-title"><div><span>01</span><div><h2>Répartition par classe concurrentielle</h2></div></div></div>${categorySections || '<div class="empty">Aucun acteur ne correspond à cette recherche.</div>'}${referenceSection}</section>
    ${networkSection()}`;
