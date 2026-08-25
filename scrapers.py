@@ -177,6 +177,9 @@ MARKETS: Lexicon = {
     "Photonique": {"any_of": ("photonic", "photonics", "photonique")},
     "Sciences de la vie": {"any_of": ("life sciences", "drug discovery", "cell therapy", "cell therapies", "antibody isolation", "single-cell analysis", "single cell analysis", "biophotonics")},
     "Photovoltaïque": {"any_of": ("photovoltaic", "photovoltaics", "solar cell", "solar cells", "pv cell", "photovoltaïque")},
+    # Kept separate from Batteries/Photovoltaïque (same granularity as those two) rather than
+    # merged into a broader "Énergie" label, to avoid touching the fact_key of existing rows.
+    "Hydrogène": {"any_of": ("hydrogen", "hydrogène", "electrolyzer", "electrolyser", "électrolyseur", "fuel cell", "pile à combustible", "power-to-gas")},
 }
 
 COMPONENTS: Lexicon = {
@@ -206,6 +209,15 @@ COMPONENTS: Lexicon = {
     "Aubes / composants turbine": {"any_of": ("turbine blade", "turbine component", "aube")},
     "Capteurs": {"any_of": ("sensor", "capteur")},
     "Pièges à ions": {"any_of": ("ion trap", "ion traps", "piège à ions", "pièges à ions")},
+    "Connectique": {"any_of": ("connector", "electrical connector", "connectique", "interconnect")},
+    # Bare "resistor"/"capacitor"/"inductor" would over-match unrelated electronics prose;
+    # kept to compound phrases that are specific to this discrete-component category.
+    "Composants passifs": {"any_of": ("passive component", "composant passif", "surface mount component", "smd component")},
+    "Optique intégrée": {"any_of": ("integrated optics", "integrated photonics", "optique intégrée", "photonic integrated circuit")},
+    # "display"/"écran" alone are too generic (matches "displays excellent properties" etc.) --
+    # compound phrases only.
+    "Composants d'affichage": {"any_of": ("display panel", "microdisplay", "micro-display", "display glass", "cover glass display")},
+    "Moules et outillage de précision": {"any_of": ("mold", "molds", "moule", "moules", "injection mold", "tooling insert", "outillage de précision")},
 }
 
 OPERATIONS: Lexicon = {
@@ -228,6 +240,7 @@ OPERATIONS: Lexicon = {
     "Milling": {"any_of": ("laser milling", "micromilling", "micro-milling")},
     "Fabrication additive": {"any_of": ("additive manufacturing", "laser additive manufacturing", "directed energy deposition", "fabrication additive", "metal 3d printing")},
     "Tournage laser": {"any_of": ("laser turning", "tournage laser")},
+    "Micro-assemblage": {"any_of": ("micro-assembly", "micro assembly", "micro-assemblage", "die attach", "wire bonding", "flip-chip")},
 }
 
 PROCESS_TECHNOLOGIES: Lexicon = {
@@ -263,7 +276,7 @@ PERFORMANCE_TERMS: Lexicon = {
     "Maîtrise thermique": {"any_of": ("heat affected zone", "heat-affected zone", "haz", "minimal thermal damage", "athermal processing", "cold ablation", "zone thermiquement affectée", "zone affectée thermiquement", "sans dommage thermique")},
     "Propreté du procédé": {"any_of": ("debris-free", "burr-free", "redeposition-free", "clean cut", "sans bavure", "sans débris", "propreté du perçage", "propreté de la découpe")},
     "Rugosité maîtrisée": {"any_of": ("low surface roughness", "surface roughness reduction", "faible rugosité", "état de surface", "smooth surface finish", "surface finish quality")},
-    "Frottement maîtrisé": {"any_of": ("coefficient of friction", "friction reduction", "tribological", "tribologie", "frottement", "coefficient de frottement")},
+    "Frottement maîtrisé": {"any_of": ("coefficient of friction", "friction reduction", "tribological", "tribologie", "frottement", "coefficient de frottement", "lubrication", "lubrification", "oil retention", "lubricant retention")},
     "Mouillabilité": {"any_of": ("wettability", "hydrophobic surface", "hydrophilic surface", "hydrophobe", "hydrophile", "contact angle", "wetting behavior")},
     # Bare "yield"/"intégration" would over-match (financial yield, software CI, vertical
     # integration...) -- kept to compound phrases specific to a production-line context.

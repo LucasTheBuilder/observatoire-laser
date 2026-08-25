@@ -6,7 +6,16 @@ from pathlib import Path
 
 import db as dbmod
 from hybrid import ContentBlock
-from scrapers import PERFORMANCE_TERMS, _candidate, _match_all_labels, _relation_evidence, _section_role
+from scrapers import (
+    COMPONENTS,
+    MARKETS,
+    OPERATIONS,
+    PERFORMANCE_TERMS,
+    _candidate,
+    _match_all_labels,
+    _relation_evidence,
+    _section_role,
+)
 
 
 class LocalRelationTests(unittest.TestCase):
@@ -134,6 +143,26 @@ class LocalRelationTests(unittest.TestCase):
         for text, expected in cases:
             with self.subTest(expected=expected):
                 labels = {label for label, _ in _match_all_labels(text, PERFORMANCE_TERMS)}
+                self.assertIn(expected, labels)
+
+    def test_reinforced_market_terms_are_recognized(self):
+        # An external audit flagged four under-covered verticals, verified against the live
+        # lexicon before adding anything (electronics/packaging, glass-as-multi-market,
+        # tooling/molds, energy beyond batteries+PV): Capteurs/Packaging avancé/TGV/microfluidic
+        # components already existed, but these did not.
+        cases = [
+            ("Laser-based hydrogen electrolyzer components for fuel cell stacks.", MARKETS, "Hydrogène"),
+            ("Precision electrical connector manufacturing.", COMPONENTS, "Connectique"),
+            ("A passive component supplier for surface mount component packaging.", COMPONENTS, "Composants passifs"),
+            ("Integrated photonics and photonic integrated circuit fabrication.", COMPONENTS, "Optique intégrée"),
+            ("Microdisplay and display panel glass processing for AR headsets.", COMPONENTS, "Composants d'affichage"),
+            ("Injection mold texturing for functional surfaces.", COMPONENTS, "Moules et outillage de précision"),
+            ("Wire bonding and die attach for chip-scale micro-assembly.", OPERATIONS, "Micro-assemblage"),
+            ("Improved lubrication and friction reduction on the textured mold surface.", PERFORMANCE_TERMS, "Frottement maîtrisé"),
+        ]
+        for text, lexicon, expected in cases:
+            with self.subTest(expected=expected):
+                labels = {label for label, _ in _match_all_labels(text, lexicon)}
                 self.assertIn(expected, labels)
 
     def test_page_title_cannot_supply_market(self):
