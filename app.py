@@ -550,7 +550,7 @@ def profile_sources(actor_id: int):
 def market():
     grouped = rows(
         MARKET_DB,
-        """SELECT e.id,e.bucket,e.market,e.component,e.operation,
+        """SELECT e.id,e.bucket,e.market,e.component,e.operation,e.actor_name,
                   COUNT(es.id) AS proofs,
                   COUNT(DISTINCT COALESCE(es.language,'unknown')) AS languages
            FROM evidence e
@@ -560,7 +560,7 @@ def market():
              AND e.market IS NOT NULL AND e.component IS NOT NULL AND e.operation IS NOT NULL
              AND TRIM(e.market)!='' AND e.market!='Non identifié'
              AND TRIM(e.component)!='' AND TRIM(e.operation)!=''
-           GROUP BY e.id,e.bucket,e.market,e.component,e.operation
+           GROUP BY e.id,e.bucket,e.market,e.component,e.operation,e.actor_name
            ORDER BY e.market,e.component,e.operation""",
     )
     return {

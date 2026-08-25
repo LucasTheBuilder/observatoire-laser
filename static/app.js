@@ -12,6 +12,7 @@ const state = {
   pipelineFunnel: {discovered: 0, fetched: 0, parsed: 0, evidence: 0, validated: 0},
   query: "",
   offerQuery: "",
+  actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
 };
 
 const content = document.querySelector("#content");
@@ -410,15 +411,69 @@ function actorCard(a) {
     : "";
   return `<article class="actor-card ${a.priority?'priority':''}" ${paused?'style="opacity:.55"':''}>
     <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>Prioritaire</span>':''}</div></div>
-    <h3>${esc(a.name)}</h3>${typeLabel}<p>${esc(a.role)}</p>
+    <h3 class="actor-name-link" data-actor-detail="${a.id}">${esc(a.name)}</h3>${typeLabel}<p>${esc(a.role)}</p>
     ${businessTags}
     ${valueChain}
     ${entityNote}
     ${unconfirmed}
-    <div class="profile-line"><span class="profile-badge ${a.needs_reprofile?'warning':a.strategy}">${a.needs_reprofile?'À recalibrer':a.strategy==='adaptive'?'Adaptatif':'Générique'}</span><small>${a.profile_status==='ready'?'Profil prêt':a.profile_status==='partial'?'Profil partiel':a.profile_status==='degraded'?'Mode dégradé':'À cartographier'}</small></div>
     <footer><span>${esc(a.country)}</span><a href="${esc(a.official_url)}" target="_blank" rel="noopener">Site officiel ↗</a></footer>
+    <button class="actor-detail-link" data-actor-detail="${a.id}">Voir la fiche →</button>
     <button class="actor-pause" data-toggle-actor="${a.id}" data-next-active="${paused?'1':'0'}">${paused?'↻ Réactiver':'⏸ Mettre en pause'}</button>
   </article>`;
+}
+
+const VALUE_CHAIN_ALL_STAGES = ["R&D", "Prototype", "Pré-industrialisation", "Industrialisation", "Production"];
+
+function valueChainTrack(stages) {
+  const demonstrated = new Set(stages || []);
+  return `<div class="value-chain-track">${VALUE_CHAIN_ALL_STAGES.map(stage =>
+    `<div class="value-chain-node ${demonstrated.has(stage) ? "done" : ""}"><span class="dot"></span><small>${esc(stage)}</small></div>`
+  ).join("")}</div>`;
+}
+
+function actorDetailContent(a) {
+  const offers = state.offers.filter(o => o.actor_name === a.name);
+  const marketRows = [...(state.market?.existing || []), ...(state.market?.radar || [])].filter(r => r.actor_name === a.name);
+  const capabilities = [...new Set(offers.map(o => o.operation).filter(Boolean))];
+  const markets = [...new Set(marketRows.map(r => r.market).filter(Boolean))];
+  const proofsTotal = offers.length + marketRows.length;
+  const classLabel = COMPETITIVE_CLASS_LABELS[a.competitive_class] || "Non classé";
+
+  return `<p class="eyebrow">${esc(a.country)}</p>
+    <h2>${esc(a.name)}</h2>
+    <p class="dialog-operation">${a.competitive_class ? `${esc(a.competitive_class)} · ${esc(classLabel)}` : classLabel}${a.priority ? " · ★ Prioritaire" : ""}</p>
+
+    <div class="detail-block">
+      <h4>Positionnement</h4>
+      <p>${esc(ACTOR_TYPE_LABELS[a.actor_type] || a.role)}</p>
+      ${(a.business_models || []).length ? `<div class="business-model-tags">${a.business_models.map(m => `<span class="business-tag ${esc(m)}">${esc(BUSINESS_MODEL_LABELS[m] || m)}</span>`).join("")}</div>` : ""}
+    </div>
+
+    ${(a.value_chain_stages || []).length ? `<div class="detail-block"><h4>Chaîne de valeur</h4>${valueChainTrack(a.value_chain_stages)}</div>` : ""}
+
+    ${capabilities.length ? `<div class="detail-block"><h4>Capacités démontrées</h4><div class="subtheme-chips">${capabilities.map(c => `<span class="subtheme-chip">${esc(c)}</span>`).join("")}</div></div>` : ""}
+
+    ${markets.length ? `<div class="detail-block"><h4>Marchés</h4><div class="subtheme-chips">${markets.map(m => `<span class="subtheme-chip">${esc(m)}</span>`).join("")}</div></div>` : ""}
+
+    ${a.parent_actor ? `<div class="detail-block"><h4>Mouvement capitalistique</h4><p class="actor-entity-note">Racheté par <b>${esc(a.parent_actor)}</b>${a.entity_note ? ` — ${esc(a.entity_note)}` : ""}</p></div>` : ""}
+
+    <div class="detail-block">
+      <h4>Preuves</h4>
+      <p>${proofsTotal} preuve(s) issues de nos collectes${a.evidence_confirmed === false ? ' — <span class="evidence-warning">⚠ non confirmé par nos preuves</span>' : ""}</p>
+    </div>
+
+    <div class="detail-block admin-block">
+      <h4>Administration technique</h4>
+      <div class="profile-line"><span class="profile-badge ${a.needs_reprofile ? "warning" : a.strategy}">${a.needs_reprofile ? "À recalibrer" : a.strategy === "adaptive" ? "Adaptatif" : "Générique"}</span><small>${a.profile_status === "ready" ? "Profil prêt" : a.profile_status === "partial" ? "Profil partiel" : a.profile_status === "degraded" ? "Mode dégradé" : "À cartographier"}</small></div>
+      <a href="${esc(a.official_url)}" target="_blank" rel="noopener" class="signal-link">Site officiel ↗</a>
+    </div>`;
+}
+
+function showActorDetail(actorId) {
+  const actor = state.actors.find(a => a.id === actorId);
+  if (!actor) return;
+  document.querySelector("#proof-content").innerHTML = actorDetailContent(actor);
+  dialog.showModal();
 }
 
 function acquisitionsSection(actors) {
@@ -512,10 +567,40 @@ function networkSection() {
   </section>`;
 }
 
+function actorFilterBar() {
+  const f = state.actorFilters;
+  const countries = [...new Set(state.actors.map(a => a.country))].sort();
+  const types = [...new Set(state.actors.map(a => a.actor_type).filter(Boolean))];
+  const classChip = (value, label) => `<button type="button" class="filter-chip ${f.competitiveClass===value?'active':''}" data-filter="competitiveClass" data-value="${value}">${esc(label)}</button>`;
+  const modelChip = (value, label) => `<button type="button" class="filter-chip ${f.businessModel===value?'active':''}" data-filter="businessModel" data-value="${value}">${esc(label)}</button>`;
+  return `<div class="actor-filters">
+    <div class="filter-group"><label>Classe</label><div class="filter-chips">${classChip("","Tous")}${classChip("C1","C1")}${classChip("C2","C2")}${classChip("T1","T1")}</div></div>
+    <div class="filter-group"><label>Type</label><select id="filter-actor-type"><option value="">Tous</option>${types.map(t => `<option value="${esc(t)}" ${f.actorType===t?'selected':''}>${esc(ACTOR_TYPE_LABELS[t]||t)}</option>`).join("")}</select></div>
+    <div class="filter-group"><label>Pays</label><select id="filter-country"><option value="">Tous</option>${countries.map(c => `<option value="${esc(c)}" ${f.country===c?'selected':''}>${esc(c)}</option>`).join("")}</select></div>
+    <div class="filter-group"><label>Modèle</label><div class="filter-chips">${modelChip("","Tous")}${modelChip("service","Service")}${modelChip("equipment","Équipement")}${modelChip("research","Recherche")}</div></div>
+    <label class="filter-priority"><input type="checkbox" id="filter-priority-only" ${f.priorityOnly?'checked':''}> ★ Prioritaires uniquement</label>
+  </div>`;
+}
+
+function actorMatchesFilters(a) {
+  const f = state.actorFilters;
+  if (f.competitiveClass && a.competitive_class !== f.competitiveClass) return false;
+  if (f.actorType && a.actor_type !== f.actorType) return false;
+  if (f.country && a.country !== f.country) return false;
+  if (f.businessModel && !(a.business_models || []).includes(f.businessModel)) return false;
+  if (f.priorityOnly && !a.priority) return false;
+  return true;
+}
+
 function renderActors() {
   const q = state.query.toLowerCase();
-  const filtered = state.actors.filter(a => `${a.name} ${a.country} ${a.role}`.toLowerCase().includes(q));
-  const activeCount = state.actors.filter(a => a.active && !a.is_reference && a.review_status === "verified").length;
+  const filtered = state.actors
+    .filter(a => `${a.name} ${a.country} ${a.role}`.toLowerCase().includes(q))
+    .filter(actorMatchesFilters);
+  const nonReference = state.actors.filter(a => !a.is_reference);
+  const countFor = cls => nonReference.filter(a => a.competitive_class === cls && a.review_status === "verified").length;
+  const toVerifyCount = nonReference.filter(a => a.review_status === "candidate" || a.review_status === "monitor").length;
+  const summaryLine = `${countFor("C1")} C1 directs · ${countFor("C2")} C2 significatifs · ${countFor("T1")} T1 centres / recherche · ${toVerifyCount} à vérifier`;
   const references = filtered.filter(a => a.is_reference);
   const pendingReview = filtered.filter(a => a.review_status === "candidate" || a.review_status === "monitor");
   const categories = groupActorsByCategory(filtered);
@@ -528,8 +613,9 @@ function renderActors() {
   const pendingSection = pendingReview.length
     ? `<section><div class="section-title"><div><span>—</span><div><h2>En attente de validation</h2><p>Signaux émergents dont la preuve est encore insuffisante pour compter comme concurrent.</p></div></div><b>${pendingReview.length}</b></div><div class="review-grid">${pendingReview.map(reviewActorCard).join("")}</div></section>`
     : "";
-  content.innerHTML = header("Écosystème suivi",`${activeCount} acteurs concurrents actifs`,"Classés par classe concurrentielle (C1 direct, C2 partiel, T1 centre technologique) ; HEF et IREIS restent hors benchmark comme références internes.",`<button class="primary" data-run="actors">↻ Mettre à jour</button>`)+
-  `<form class="actor-add" id="actor-add-form">
+  content.innerHTML = header("Écosystème suivi",`${nonReference.length} acteurs suivis`,"HEF et IREIS restent hors benchmark comme références internes.",`<button class="primary" data-run="actors">↻ Mettre à jour</button>`)+
+  `<p class="actor-summary-counts">${esc(summaryLine)}</p>
+   <form class="actor-add" id="actor-add-form">
      <input type="text" name="name" placeholder="Nom de l'acteur" required>
      <input type="text" name="country" placeholder="Pays" required>
      <input type="text" name="role" placeholder="Rôle" required>
@@ -540,6 +626,7 @@ function renderActors() {
    ${pendingSection}
    ${acquisitionsSection(filtered)}
    <div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div>
+   ${actorFilterBar()}
    <section><div class="section-title"><div><span>01</span><div><h2>Répartition par classe concurrentielle</h2></div></div></div>${categorySections || '<div class="empty">Aucun acteur ne correspond à cette recherche.</div>'}${referenceSection}</section>
    ${networkSection()}`;
   const input = document.querySelector("#actor-search");
@@ -551,6 +638,16 @@ function renderActors() {
       renderActors();
     }));
   }
+  document.querySelectorAll(".actor-filters [data-filter]").forEach(btn => btn.addEventListener("click", () => {
+    state.actorFilters[btn.dataset.filter] = btn.dataset.value;
+    renderActors();
+  }));
+  const typeSelect = document.querySelector("#filter-actor-type");
+  if (typeSelect) typeSelect.addEventListener("change", e => { state.actorFilters.actorType = e.target.value; renderActors(); });
+  const countrySelect = document.querySelector("#filter-country");
+  if (countrySelect) countrySelect.addEventListener("change", e => { state.actorFilters.country = e.target.value; renderActors(); });
+  const priorityCheckbox = document.querySelector("#filter-priority-only");
+  if (priorityCheckbox) priorityCheckbox.addEventListener("change", e => { state.actorFilters.priorityOnly = e.target.checked; renderActors(); });
   const form = document.querySelector("#actor-add-form");
   if (form) form.addEventListener("submit", async e => {
     e.preventDefault();
@@ -792,6 +889,7 @@ function wireActions(){
   document.querySelectorAll("[data-accept-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.acceptVocab),"accept",button.dataset.dimension)));
   document.querySelectorAll("[data-reject-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.rejectVocab),"reject")));
   document.querySelectorAll("[data-review-actor]").forEach(button=>button.addEventListener("click",()=>decideActorReview(Number(button.dataset.reviewActor), button.dataset.reviewStatus)));
+  document.querySelectorAll("[data-actor-detail]").forEach(el=>el.addEventListener("click",()=>showActorDetail(Number(el.dataset.actorDetail))));
 }
 
 document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click",()=>{
