@@ -215,6 +215,7 @@ OPERATIONS: Lexicon = {
     "Debonding": {"any_of": ("laser debonding", "debonding")},
     "Rainurage": {"any_of": ("grooving", "laser grooving")},
     "Milling": {"any_of": ("laser milling", "micromilling", "micro-milling")},
+    "Fabrication additive": {"any_of": ("additive manufacturing", "laser additive manufacturing", "directed energy deposition", "fabrication additive", "metal 3d printing")},
 }
 
 PROCESS_TECHNOLOGIES: Lexicon = {
