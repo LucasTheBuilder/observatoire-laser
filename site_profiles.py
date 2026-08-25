@@ -7,7 +7,7 @@ from urllib.parse import urljoin, urlparse
 DEFAULT_SITE_PROFILE: dict[str, Any] = {
     "profile_version": 2,
     "ollama_profile_assist": False,
-    "languages": ["en", "fr", "de"],
+    "languages": ["en", "fr", "de", "es", "it"],
     "crawl": {
         "priority_budget": 12,
         "standard_budget": 6,

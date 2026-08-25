@@ -80,6 +80,29 @@ class ActorManagementTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     dbmod.set_actor_active(999999, True)
 
+    def test_update_actor_classification_sets_only_the_given_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example")
+                dbmod.update_actor_classification(actor_id, competitive_class="C1", is_reference=False)
+                with dbmod.connect(actors_db) as db:
+                    row = db.execute(
+                        "SELECT competitive_class,is_reference,parent_actor,entity_note FROM actors WHERE id=?", (actor_id,)
+                    ).fetchone()
+                self.assertEqual(("C1", 0, None, None), tuple(row))
+
+                # A second call touching only parent_actor must not clobber competitive_class.
+                dbmod.update_actor_classification(actor_id, parent_actor="Bigger Group")
+                with dbmod.connect(actors_db) as db:
+                    row = db.execute(
+                        "SELECT competitive_class,parent_actor FROM actors WHERE id=?", (actor_id,)
+                    ).fetchone()
+                self.assertEqual(("C1", "Bigger Group"), tuple(row))
+
+                with self.assertRaises(ValueError):
+                    dbmod.update_actor_classification(999999, competitive_class="C1")
+
 
 class VocabularyPromotionTests(unittest.TestCase):
     def _fresh_market_db(self, tmp: str) -> Path:

@@ -162,24 +162,28 @@ function groupByFamily(rows, familyOf) {
   });
 }
 
-const ACTOR_CATEGORIES = [
-  {label: "Centre R&D / Recherche", test: t => /recherche|r\s?&\s?d|laboratoire|institut|universit|research (center|centre|institute)|fraunhofer|cnrs/i.test(t)},
-  {label: "Centre technologique / Plateforme", test: t => /centre technologique|plateforme|technology (center|centre|platform)/i.test(t)},
-  {label: "Industriel / Fabricant", test: t => /fabricant|manufactur|industriel|producteur|\boem\b|production|microfabrication|fabrication|usinage/i.test(t)},
-  {label: "Intégrateur / Équipementier", test: t => /intégrateur|integrator|équipementier|machine|système|equipment|system|ingénierie|engineering/i.test(t)},
-];
+// Competitive class is an analyst-assigned field (see db.update_actor_classification),
+// not guessed from role text -- classification lives in the data, not in a regex.
+const COMPETITIVE_CLASS_LABELS = {
+  C1: "Concurrence directe",
+  C2: "Concurrence partielle",
+  T1: "Centres technologiques / recherche",
+};
 
-function actorCategory(actor) {
-  const text = actor.role || "";
-  const hit = ACTOR_CATEGORIES.find(c => c.test(text));
-  return hit ? hit.label : "Distributeur / Autre";
+function competitiveClassLabel(actor) {
+  return COMPETITIVE_CLASS_LABELS[actor.competitive_class] || "Non classé";
 }
 
 function groupActorsByCategory(actors) {
-  const order = ACTOR_CATEGORIES.map(c => c.label).concat("Distributeur / Autre");
-  const map = new Map(order.map(label => [label, []]));
-  for (const actor of actors) map.get(actorCategory(actor)).push(actor);
-  return [...map.entries()].filter(([, list]) => list.length);
+  const order = ["C1", "C2", "T1", "Non classé"];
+  const map = new Map();
+  for (const actor of actors) {
+    if (actor.is_reference) continue;
+    const key = COMPETITIVE_CLASS_LABELS[actor.competitive_class] ? actor.competitive_class : "Non classé";
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(actor);
+  }
+  return order.filter(key => map.has(key)).map(key => [COMPETITIVE_CLASS_LABELS[key] || key, map.get(key)]);
 }
 
 function aiProviderName(adaptive) {
@@ -375,9 +379,14 @@ function renderOffers() {
 
 function actorCard(a) {
   const paused = !a.active;
+  const classBadge = a.competitive_class ? `<span class="class-badge ${esc(a.competitive_class)}">${esc(a.competitive_class)}</span>` : "";
+  const entityNote = a.parent_actor
+    ? `<p class="actor-entity-note">Racheté par <b>${esc(a.parent_actor)}</b>${a.entity_note ? ` — ${esc(a.entity_note)}` : ""}</p>`
+    : "";
   return `<article class="actor-card ${a.priority?'priority':''}" ${paused?'style="opacity:.55"':''}>
-    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div>${a.priority?'<span>Prioritaire</span>':''}</div>
+    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>Prioritaire</span>':''}</div></div>
     <h3>${esc(a.name)}</h3><p>${esc(a.role)}</p>
+    ${entityNote}
     <div class="profile-line"><span class="profile-badge ${a.needs_reprofile?'warning':a.strategy}">${a.needs_reprofile?'À recalibrer':a.strategy==='adaptive'?'Adaptatif':'Générique'}</span><small>${a.profile_status==='ready'?'Profil prêt':a.profile_status==='partial'?'Profil partiel':a.profile_status==='degraded'?'Mode dégradé':'À cartographier'}</small></div>
     <footer><span>${esc(a.country)}</span><a href="${esc(a.official_url)}" target="_blank" rel="noopener">Site officiel ↗</a></footer>
     <button class="actor-pause" data-toggle-actor="${a.id}" data-next-active="${paused?'1':'0'}">${paused?'↻ Réactiver':'⏸ Mettre en pause'}</button>
@@ -387,12 +396,16 @@ function actorCard(a) {
 function renderActors() {
   const q = state.query.toLowerCase();
   const filtered = state.actors.filter(a => `${a.name} ${a.country} ${a.role}`.toLowerCase().includes(q));
-  const activeCount = state.actors.filter(a => a.active).length;
+  const activeCount = state.actors.filter(a => a.active && !a.is_reference).length;
+  const references = filtered.filter(a => a.is_reference);
   const categories = groupActorsByCategory(filtered);
+  const referenceSection = references.length
+    ? `<div class="actor-category reference"><p>Références internes<small>${references.length}</small></p><div class="actor-grid">${references.map(actorCard).join("")}</div></div>`
+    : "";
   const categorySections = categories.map(([category, list]) =>
     `<div class="actor-category"><p>${esc(category)}<small>${list.length}</small></p><div class="actor-grid">${list.map(actorCard).join("")}</div></div>`
   ).join("");
-  content.innerHTML = header("Écosystème suivi",`${activeCount} acteurs actifs`,"Rôles, sources officielles et pertinence des contenus suivis, classés par catégorie d'acteur.",`<button class="primary" data-run="actors">↻ Mettre à jour</button>`)+
+  content.innerHTML = header("Écosystème suivi",`${activeCount} acteurs concurrents actifs`,"Classés par classe concurrentielle (C1 direct, C2 partiel, T1 centre technologique) ; HEF et IREIS restent hors benchmark comme références internes.",`<button class="primary" data-run="actors">↻ Mettre à jour</button>`)+
   `<form class="actor-add" id="actor-add-form">
      <input type="text" name="name" placeholder="Nom de l'acteur" required>
      <input type="text" name="country" placeholder="Pays" required>
@@ -401,7 +414,7 @@ function renderActors() {
      <label><input type="checkbox" name="priority"> Prioritaire</label>
      <button type="submit">+ Ajouter</button>
    </form>
-   <div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div>${categorySections || '<div class="empty">Aucun acteur ne correspond à cette recherche.</div>'}`;
+   <div class="actor-toolbar"><input id="actor-search" value="${esc(state.query)}" placeholder="Rechercher un acteur, un pays ou un rôle…"><span>${filtered.length} résultats</span></div>${categorySections || '<div class="empty">Aucun acteur ne correspond à cette recherche.</div>'}${referenceSection}`;
   const input = document.querySelector("#actor-search");
   if (input) {
     input.focus({preventScroll:true});

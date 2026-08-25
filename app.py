@@ -36,6 +36,7 @@ from db import (
     reject_vocabulary_candidate,
     rows,
     set_actor_active,
+    update_actor_classification,
 )
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from scrapers import scrape_actors, scrape_market, scrape_technology
@@ -301,6 +302,7 @@ def list_actors():
     # Includes paused (active=0) actors too, with the flag exposed, so the UI can offer a
     # "reactivate" action -- filtering them out here would make pausing one-way.
     return rows(ACTORS_DB, """SELECT a.id,a.name,a.country,a.role,a.priority,a.official_url,a.active,a.last_scraped_at,a.last_status,
+                               a.competitive_class,a.is_reference,a.parent_actor,a.entity_note,
                                p.strategy,p.status AS profile_status,p.confidence,p.generated_by,p.needs_reprofile,p.health_score,
                                p.coverage_ready,p.coverage_discovered
                                FROM actors a LEFT JOIN site_profiles p ON p.actor_id=a.id
@@ -326,17 +328,32 @@ def add_actor(payload: ActorCreateRequest):
 
 
 class ActorUpdateRequest(BaseModel):
-    active: bool
+    active: bool | None = None
+    competitive_class: str | None = None
+    is_reference: bool | None = None
+    parent_actor: str | None = None
+    entity_note: str | None = None
 
 
 @app.patch("/api/actors/{actor_id}")
 def update_actor(actor_id: int, payload: ActorUpdateRequest):
-    """Pause/resume an actor. History (sources, evidence) is kept; only active is toggled."""
+    """Partial update: pause/resume, and/or set the analytical classification fields
+    (competitive class, internal-reference flag, M&A parent/note). History (sources,
+    evidence) is always kept -- only these columns change.
+    """
     try:
-        set_actor_active(actor_id, payload.active)
+        if payload.active is not None:
+            set_actor_active(actor_id, payload.active)
+        update_actor_classification(
+            actor_id,
+            competitive_class=payload.competitive_class,
+            is_reference=payload.is_reference,
+            parent_actor=payload.parent_actor,
+            entity_note=payload.entity_note,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"id": actor_id, "active": payload.active}
+    return {"id": actor_id, **payload.model_dump(exclude_none=True)}
 
 
 @app.get("/api/profiles")

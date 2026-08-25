@@ -353,6 +353,15 @@ def init_databases() -> None:
             );
             """
         )
+        _add_columns(db, "actors", {
+            # competitive_class: C1/C2 (direct/partial competitor), T1 (technology centre),
+            # A1 (internal reference, e.g. HEF/IREIS), etc. -- orthogonal to "role", which
+            # stays free text. is_reference actors are excluded from competitive counts/views.
+            "competitive_class": "TEXT",
+            "is_reference": "INTEGER NOT NULL DEFAULT 0 CHECK(is_reference IN (0,1))",
+            "parent_actor": "TEXT",
+            "entity_note": "TEXT",
+        })
         _add_columns(db, "actor_sources", {
             "page_type": "TEXT",
             "source_score": "INTEGER NOT NULL DEFAULT 0",
@@ -758,6 +767,39 @@ def set_actor_active(actor_id: int, active: bool) -> None:
     with connect(ACTORS_DB) as db:
         updated = db.execute(
             "UPDATE actors SET active=?,updated_at=? WHERE id=?", (int(bool(active)), utc_now(), actor_id)
+        ).rowcount
+    if not updated:
+        raise ValueError(f"Actor {actor_id} not found")
+
+
+def update_actor_classification(
+    actor_id: int,
+    *,
+    competitive_class: str | None = None,
+    is_reference: bool | None = None,
+    parent_actor: str | None = None,
+    entity_note: str | None = None,
+) -> None:
+    """Patch the analytical fields (competitive class, internal-reference flag, M&A parent/
+    note) added on top of the free-text ``role``. Only fields explicitly passed (not None)
+    are updated, so a caller can set a single field without clobbering the others.
+    """
+    updates: dict[str, object] = {}
+    if competitive_class is not None:
+        updates["competitive_class"] = competitive_class
+    if is_reference is not None:
+        updates["is_reference"] = int(bool(is_reference))
+    if parent_actor is not None:
+        updates["parent_actor"] = parent_actor
+    if entity_note is not None:
+        updates["entity_note"] = entity_note
+    if not updates:
+        return
+    updates["updated_at"] = utc_now()
+    assignments = ",".join(f"{name}=?" for name in updates)
+    with connect(ACTORS_DB) as db:
+        updated = db.execute(
+            f"UPDATE actors SET {assignments} WHERE id=?", (*updates.values(), actor_id)
         ).rowcount
     if not updated:
         raise ValueError(f"Actor {actor_id} not found")
