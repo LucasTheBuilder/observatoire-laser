@@ -6,7 +6,7 @@ from pathlib import Path
 
 import db as dbmod
 from hybrid import ContentBlock
-from scrapers import _candidate, _relation_evidence, _section_role
+from scrapers import PERFORMANCE_TERMS, _candidate, _match_all_labels, _relation_evidence, _section_role
 
 
 class LocalRelationTests(unittest.TestCase):
@@ -116,6 +116,25 @@ class LocalRelationTests(unittest.TestCase):
         self.assertIsNotNone(fact)
         self.assertEqual(fact["market"], "Photonique")
         self.assertEqual(fact["component"], "Fibres optiques")
+
+    def test_industrial_need_performance_terms_are_recognized(self):
+        # These capture the customer's underlying industrial need (why the process is wanted),
+        # not the laser's own spec -- an external audit found the whole dimension absent from
+        # the lexicon (not just unmatched in current data). "yield"/"intégration" are kept to
+        # compound phrases only, since the bare words over-match unrelated contexts.
+        cases = [
+            ("The process minimizes the heat affected zone (HAZ) for sensitive parts.", "Maîtrise thermique"),
+            ("A debris-free, burr-free cut is achieved without post-processing.", "Propreté du procédé"),
+            ("Low surface roughness is obtained thanks to optimized scanning.", "Rugosité maîtrisée"),
+            ("Friction reduction and tribological performance were measured.", "Frottement maîtrisé"),
+            ("The hydrophobic surface improves wettability for coating applications.", "Mouillabilité"),
+            ("Production yield increased after process integration on the line.", "Rendement de production"),
+            ("Cette découpe garantit un débit élevé et une cadence de production stable.", "Productivité"),
+        ]
+        for text, expected in cases:
+            with self.subTest(expected=expected):
+                labels = {label for label, _ in _match_all_labels(text, PERFORMANCE_TERMS)}
+                self.assertIn(expected, labels)
 
     def test_page_title_cannot_supply_market(self):
         block = ContentBlock(

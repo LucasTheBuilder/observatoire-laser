@@ -254,9 +254,21 @@ MATERIALS: Lexicon = {
 }
 
 PERFORMANCE_TERMS: Lexicon = {
-    "Productivité": {"any_of": ("high throughput", "throughput", "high-speed processing", "high speed processing", "large-area processing", "large area processing")},
+    "Productivité": {"any_of": ("high throughput", "throughput", "high-speed processing", "high speed processing", "large-area processing", "large area processing", "débit", "cadence de production", "cadence élevée")},
     "Parallélisation": {"any_of": ("parallel processing", "multibeam", "multi-beam", "beam splitting", "diffractive optical element", "polygon scanner")},
     "Haute puissance": {"any_of": ("high average power", "high-power ultrafast", "high power ultrafast", "high repetition rate", "mhz processing")},
+    # The four below capture the customer's underlying industrial need/pain point (why the
+    # process is wanted), not the laser's own spec -- a gap flagged by an external audit and
+    # confirmed absent from this lexicon entirely (not just unmatched in current data).
+    "Maîtrise thermique": {"any_of": ("heat affected zone", "heat-affected zone", "haz", "minimal thermal damage", "athermal processing", "cold ablation", "zone thermiquement affectée", "zone affectée thermiquement", "sans dommage thermique")},
+    "Propreté du procédé": {"any_of": ("debris-free", "burr-free", "redeposition-free", "clean cut", "sans bavure", "sans débris", "propreté du perçage", "propreté de la découpe")},
+    "Rugosité maîtrisée": {"any_of": ("low surface roughness", "surface roughness reduction", "faible rugosité", "état de surface", "smooth surface finish", "surface finish quality")},
+    "Frottement maîtrisé": {"any_of": ("coefficient of friction", "friction reduction", "tribological", "tribologie", "frottement", "coefficient de frottement")},
+    "Mouillabilité": {"any_of": ("wettability", "hydrophobic surface", "hydrophilic surface", "hydrophobe", "hydrophile", "contact angle", "wetting behavior")},
+    # Bare "yield"/"intégration" would over-match (financial yield, software CI, vertical
+    # integration...) -- kept to compound phrases specific to a production-line context.
+    "Rendement de production": {"any_of": ("production yield", "process yield", "yield improvement", "rendement de production", "taux de rendement")},
+    "Intégration procédé": {"any_of": ("process integration", "line integration", "system integration", "intégration en ligne", "intégration procédé", "intégration process")},
 }
 
 
