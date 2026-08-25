@@ -165,6 +165,7 @@ MARKETS: Lexicon = {
     "Quantum": {"any_of": ("quantum", "ion trap", "ion traps", "quantum computing", "quantum sensing", "quantum cryptography")},
     "Photonique": {"any_of": ("photonic", "photonics", "photonique")},
     "Sciences de la vie": {"any_of": ("life sciences", "drug discovery", "cell therapy", "cell therapies", "antibody isolation", "single-cell analysis", "single cell analysis", "biophotonics")},
+    "Photovoltaïque": {"any_of": ("photovoltaic", "photovoltaics", "solar cell", "solar cells", "pv cell", "photovoltaïque")},
 }
 
 COMPONENTS: Lexicon = {
@@ -236,6 +237,7 @@ MATERIALS: Lexicon = {
     "Polymère": {"any_of": ("polymer", "polymeric", "peek", "polyimide", "polymère", "polymères")},
     "Métal": {"any_of": ("stainless steel", "titanium", "aluminium", "aluminum", "copper", "nickel", "titane", "acier inoxydable", "cuivre", "métaux")},
     "Composite": {"any_of": ("composite", "cfrp", "carbon fiber reinforced polymer", "cmc", "ceramic matrix composite")},
+    "Magnésium": {"any_of": ("magnesium", "magnésium")},
 }
 
 PERFORMANCE_TERMS: Lexicon = {
