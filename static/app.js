@@ -421,6 +421,83 @@ function renderMarket() {
 }
 
 
+// --- Synthèse decision-support helpers (UX audit item 11) -----------------------------------
+// Each of these answers one of the audit's "10-minute questions" using data already in the
+// system -- no invented score, no fabricated recommendation. Two of the audit's questions
+// ("quel marché monte" needs real history, not one snapshot; "qui prospecter" turned out to mean
+// end-customer companies, an entity type that doesn't exist yet) are intentionally left out of
+// this pass rather than faked.
+
+function nextBestActions() {
+  const actions = [];
+  const weakPriority = (state.actors || [])
+    .filter(a => a.priority && !a.is_reference && a.review_status === "verified" && a.coverage_level !== "good")
+    .sort((a, b) => (a.coverage_level === "weak" ? 0 : 1) - (b.coverage_level === "weak" ? 0 : 1))
+    .slice(0, 3);
+  for (const actor of weakPriority) {
+    actions.push({
+      label: `Enrichir la fiche de ${actor.name}`,
+      detail: `Acteur prioritaire, couverture ${actor.coverage_level === "weak" ? "faible" : "partielle"}.`,
+      view: "actors",
+    });
+  }
+  const pendingVocab = (state.vocabulary || []).filter(v => v.review_status === "pending").length;
+  if (pendingVocab > 0) {
+    actions.push({
+      label: `Valider ${pendingVocab} terme${pendingVocab > 1 ? "s" : ""} en attente`,
+      detail: "File de validation du vocabulaire.",
+      view: "vocabulary",
+    });
+  }
+  const marketRun = state.overview?.market?.last_run;
+  if (marketRun?.finished_at) {
+    const days = Math.floor((Date.now() - new Date(marketRun.finished_at).getTime()) / 86400000);
+    if (days >= 30) {
+      actions.push({
+        label: "Relancer la collecte marché",
+        detail: `Dernière collecte il y a ${days} jours.`,
+        view: "collections",
+      });
+    }
+  }
+  return actions;
+}
+
+function actionChecklist(actions) {
+  if (!actions.length) return `<div class="empty">Rien d’urgent : couverture, validation et collectes sont à jour.</div>`;
+  return `<ul class="fam-list">${actions.map(a => `<li><button class="fam-item" data-goto-view="${esc(a.view)}">
+      <span class="fam-row-top"><span class="fam-actor">${esc(a.label)}</span></span>
+      <span class="fam-cap">${esc(a.detail)}</span>
+    </button></li>`).join("")}</ul>`;
+}
+
+// "Qui devient plus dangereux et pourquoi": an objective capability-trajectory proxy (count of
+// new capacités per actor this period), not a fabricated threat score.
+function actorActivityRanking(newOffers) {
+  const counts = new Map();
+  for (const row of newOffers) counts.set(row.actor_name, (counts.get(row.actor_name) || 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+}
+
+function activityRankingList(ranking) {
+  if (!ranking.length) return `<div class="empty">Aucun mouvement de capacité sur la période.</div>`;
+  return `<ol class="rank-list">${ranking.map(([actor, count]) => `<li><span class="fam-actor">${esc(actor)}</span><span class="fam-proof-pill">${count} nouvelle${count > 1 ? "s" : ""} capacité${count > 1 ? "s" : ""}</span></li>`).join("")}</ol>`;
+}
+
+// "Quelles opportunités commerciales": a radar-bucket fact where only one tracked actor is
+// active in that market+component pairing -- a competitive whitespace signal, not a confirmed
+// opportunity (could just mean under-documented, said explicitly in the section copy).
+function marketOpportunities(market) {
+  const all = [...(market.existing || []), ...(market.radar || [])];
+  const density = new Map();
+  for (const row of all) {
+    const key = `${row.market}||${row.component}`;
+    if (!density.has(key)) density.set(key, new Set());
+    density.get(key).add(row.actor_name);
+  }
+  return (market.radar || []).filter(row => (density.get(`${row.market}||${row.component}`) || new Set()).size === 1);
+}
+
 function renderMonthly() {
   const monthly = state.monthly || {
     days: 30,
@@ -452,16 +529,37 @@ function renderMonthly() {
       </article>`).join("")}</div>`
     : `<div class="empty">Aucun nouveau document technologique collecté sur la période.</div>`;
 
+  const actions = nextBestActions();
+  const ranking = actorActivityRanking(monthly.new_offers || []);
+  const opportunities = marketOpportunities(state.market || {existing: [], radar: []});
+  const inProgressTech = (state.technologySignals || []).filter(s => s.bucket === "radar").slice(0, 5);
+  const techSignalList = inProgressTech.length
+    ? `<ul class="fam-list">${inProgressTech.map(row => `<li><button class="fam-item" data-tech-signal-proof="${Number(row.id)}">
+        <span class="fam-row-top"><span class="fam-actor">${esc(row.axis)}</span><span class="fam-proof-pill">${esc(row.maturity_stage)}</span></span>
+        <span class="fam-cap">${esc(row.project_name || "—")}${row.actor_names.length ? ` · ${row.actor_names.map(esc).join(", ")}` : ""}</span>
+      </button></li>`).join("")}</ul>`
+    : `<div class="empty">Aucun signal technologique en cours d’industrialisation pour le moment.</div>`;
+
   content.innerHTML = header(
     "Synthèse",
     `Ce qui a changé sur les ${monthly.days || 30} derniers jours`,
     "Nouveaux faits marché, mouvements concurrents, reconfirmations et signaux technologiques depuis la dernière période.",
     `<button class="primary" data-run="monthly">↻ Actualiser toute la veille</button>`
   ) +
-  `<section><div class="section-title"><div><span>01</span><div><h2>Marché & opportunités</h2><p>Nouveaux faits validés et applications déjà connues mais observées de nouveau.</p></div></div><b>${marketSignals.length} signaux</b></div>${marketList}</section>
-   <section><div class="section-title"><div><span>02</span><div><h2>Mouvements concurrents</h2><p>Nouvelles offres, capacités et savoir-faire détectés chez les acteurs suivis, classés par famille.</p></div></div><b>${Number(counts.new_offers || 0)} signaux</b></div>${offerList}</section>
-   <section><div class="section-title"><div><span>03</span><div><h2>Technologies futures</h2><p>Publications, brevets, projets et autres documents collectés récemment.</p></div></div><b>${Number(counts.technology || 0)} signaux</b></div>${techList}</section>`;
+  `<section><div class="section-title"><div><span>00</span><div><h2>Que faire maintenant</h2><p>Actions concrètes disponibles dans l’outil, dérivées de l’état réel de la base — pas une suggestion générique.</p></div></div><b>${actions.length} action${actions.length>1?"s":""}</b></div>${actionChecklist(actions)}</section>
+   <section><div class="section-title"><div><span>01</span><div><h2>Qui devient plus dangereux</h2><p>Acteurs avec le plus de nouvelles capacités documentées sur la période — un indicateur de rythme, pas un score de menace.</p></div></div><b>${ranking.length} acteur${ranking.length>1?"s":""}</b></div>${activityRankingList(ranking)}</section>
+   <section><div class="section-title"><div><span>02</span><div><h2>Marché & opportunités</h2><p>Nouveaux faits validés et applications déjà connues mais observées de nouveau.</p></div></div><b>${marketSignals.length} signaux</b></div>${marketList}</section>
+   <section><div class="section-title"><div><span>03</span><div><h2>Blancs concurrentiels</h2><p>Applications radar où un seul acteur suivi est actif sur ce couple marché/composant — signal de blanc, pas une opportunité confirmée (peut aussi juste refléter une couverture incomplète).</p></div></div><b>${opportunities.length} signaux</b></div>${opportunities.length ? evidenceTable(opportunities) : `<div class="empty">Aucun blanc concurrentiel identifié pour le moment.</div>`}</section>
+   <section><div class="section-title"><div><span>04</span><div><h2>Mouvements concurrents</h2><p>Nouvelles offres, capacités et savoir-faire détectés chez les acteurs suivis, classés par famille.</p></div></div><b>${Number(counts.new_offers || 0)} signaux</b></div>${offerList}</section>
+   <section><div class="section-title"><div><span>05</span><div><h2>Technologie qui approche l’industrie</h2><p>Axes technologiques en pré-industrialisation ou industrialisation, avec projet/acteurs sourcés.</p></div></div><b>${inProgressTech.length} signaux</b></div>${techSignalList}</section>
+   <section><div class="section-title"><div><span>06</span><div><h2>Technologies futures</h2><p>Publications, brevets, projets et autres documents collectés récemment.</p></div></div><b>${Number(counts.technology || 0)} signaux</b></div>${techList}</section>`;
   wireActions();
+  document.querySelectorAll("[data-goto-view]").forEach(el => el.addEventListener("click", () => {
+    const view = el.dataset.gotoView;
+    document.querySelectorAll(".nav").forEach(n => n.classList.toggle("active", n.dataset.view === view));
+    state.view = view;
+    render();
+  }));
 }
 
 
