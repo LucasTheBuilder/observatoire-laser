@@ -246,8 +246,13 @@ OPERATIONS: Lexicon = {
 PROCESS_TECHNOLOGIES: Lexicon = {
     "SLE": {"any_of": ("selective laser etching", "selective laser-induced etching", "selective laser induced etching", "laser assisted etching", "laser-assisted etching", "isle process"), "regex": (r"\bSLE\b",), "requires_any": ("laser", "etching", "glass", "silica")},
     "LIPSS": {"any_of": ("laser-induced periodic surface structures", "laser induced periodic surface structures"), "regex": (r"\bLIPSS\b",)},
+    "DLIP": {"any_of": ("direct laser interference patterning",), "regex": (r"\bDLIP\b",)},
     "LSFL": {"regex": (r"\bLSFL\b",)},
     "HSFL": {"regex": (r"\bHSFL\b",)},
+    # Two more axes flagged as under-covered by an external audit -- genuinely absent, verified
+    # before adding (unlike its earlier, partly-stale claims elsewhere in the same audit).
+    "Beam shaping": {"any_of": ("beam shaping", "dynamic beam shaping", "programmable laser beam", "spatial light modulator", "adaptive optics beam")},
+    "Monitoring IA procédé": {"any_of": ("process monitoring", "in-line monitoring", "digital twin", "data-driven process optimization", "process optimization ai", "closed-loop process control")},
 }
 
 APPLICATION_ARCHITECTURES: Lexicon = {

@@ -11,6 +11,7 @@ from scrapers import (
     MARKETS,
     OPERATIONS,
     PERFORMANCE_TERMS,
+    PROCESS_TECHNOLOGIES,
     _candidate,
     _match_all_labels,
     _relation_evidence,
@@ -163,6 +164,19 @@ class LocalRelationTests(unittest.TestCase):
         for text, lexicon, expected in cases:
             with self.subTest(expected=expected):
                 labels = {label for label, _ in _match_all_labels(text, lexicon)}
+                self.assertIn(expected, labels)
+
+    def test_science_to_industry_process_technologies_are_recognized(self):
+        # Two more axes flagged by the same audit as under-covered for tracking science ->
+        # industry readiness signals (see the new technology_signals table in db.py).
+        cases = [
+            ("The system relies on dynamic beam shaping via a programmable laser beam for 3D surfaces.", "Beam shaping"),
+            ("A digital twin enables data-driven process optimization and in-line monitoring.", "Monitoring IA procédé"),
+            ("Direct laser interference patterning (DLIP) produces periodic functional surfaces.", "DLIP"),
+        ]
+        for text, expected in cases:
+            with self.subTest(expected=expected):
+                labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
                 self.assertIn(expected, labels)
 
     def test_page_title_cannot_supply_market(self):

@@ -167,6 +167,13 @@ def offer_fact_key(actor: str, offer_type: str, capability: str, operation: str 
     return "|".join(_slug(value) for value in (actor, offer_type, capability, operation or "", laser_process or ""))
 
 
+def technology_signal_key(axis: str, project_name: str | None) -> str:
+    """Identity for one science->industry readiness signal: the axis plus the named project it
+    was observed in (not the source URL), so the same axis/project pair merges new citations
+    onto one row instead of creating a duplicate every time another source confirms it."""
+    return "|".join(_slug(value) for value in (axis, project_name or ""))
+
+
 def _canonicalise_existing_evidence(db: sqlite3.Connection) -> None:
     """Repair legacy labels and remove old curated seeds from automatic publication."""
     placeholders = ",".join("?" for _ in LEGACY_SEED_GROUPS)
@@ -742,6 +749,37 @@ def init_databases() -> None:
                 errors INTEGER NOT NULL DEFAULT 0,
                 message TEXT
             );
+            CREATE TABLE IF NOT EXISTS technology_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                axis TEXT NOT NULL,
+                maturity_stage TEXT NOT NULL,
+                bucket TEXT NOT NULL CHECK(bucket IN ('existing','radar')),
+                project_name TEXT,
+                actor_names TEXT NOT NULL DEFAULT '[]',
+                source_url TEXT NOT NULL,
+                source_title TEXT,
+                quote TEXT NOT NULL,
+                fact_key TEXT NOT NULL UNIQUE,
+                fingerprint TEXT NOT NULL UNIQUE,
+                review_status TEXT NOT NULL DEFAULT 'accepted' CHECK(review_status IN ('accepted','review','rejected')),
+                field_confidence REAL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_seen_at TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS technology_signals_fact_key_uq ON technology_signals(fact_key);
+            CREATE TABLE IF NOT EXISTS technology_signal_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER NOT NULL REFERENCES technology_signals(id) ON DELETE CASCADE,
+                source_url TEXT NOT NULL,
+                source_title TEXT,
+                quote TEXT NOT NULL,
+                language TEXT,
+                field_confidence REAL,
+                fingerprint TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS technology_signal_sources_signal_idx ON technology_signal_sources(signal_id);
             """
         )
         _add_columns(db, "documents", {

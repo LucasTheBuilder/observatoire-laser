@@ -724,6 +724,43 @@ def offer_proofs(offer_id: int):
     )
 
 
+# Intelligence techno (P0 audit item): science->industry readiness signals are transverse --
+# a project like OPeraTIC can span several actors at once -- so they get their own table
+# instead of being force-fit onto one actor's facts. See db.technology_signal_key.
+@app.get("/api/technology-signals")
+def technology_signals():
+    signals = rows(
+        TECH_DB,
+        """SELECT t.id,t.axis,t.maturity_stage,t.bucket,t.project_name,t.actor_names,
+                  COUNT(ts.id) AS proofs,
+                  COUNT(DISTINCT COALESCE(ts.language,'unknown')) AS languages
+           FROM technology_signals t
+           LEFT JOIN technology_signal_sources ts ON ts.signal_id=t.id
+           WHERE t.review_status='accepted'
+           GROUP BY t.id,t.axis,t.maturity_stage,t.bucket,t.project_name,t.actor_names
+           ORDER BY t.bucket DESC,t.axis""",
+    )
+    for signal in signals:
+        signal["actor_names"] = json.loads(signal["actor_names"]) if signal["actor_names"] else []
+    return signals
+
+
+@app.get("/api/technology-signals/{signal_id}/proofs")
+def technology_signal_proofs(signal_id: int):
+    proofs = rows(
+        TECH_DB,
+        """SELECT t.axis,t.maturity_stage,t.project_name,t.actor_names,
+                  ts.source_url,ts.source_title,ts.quote,ts.language
+           FROM technology_signals t JOIN technology_signal_sources ts ON ts.signal_id=t.id
+           WHERE t.id=? AND t.review_status='accepted'
+           ORDER BY ts.created_at DESC""",
+        (signal_id,),
+    )
+    for proof in proofs:
+        proof["actor_names"] = json.loads(proof["actor_names"]) if proof["actor_names"] else []
+    return proofs
+
+
 def _run_job(kind: str) -> None:
     try:
         try:

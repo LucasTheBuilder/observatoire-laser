@@ -4,6 +4,7 @@ const state = {
   monthly: null,
   market: null,
   offers: [],
+  technologySignals: [],
   actors: [],
   profiles: [],
   vocabulary: [],
@@ -565,6 +566,48 @@ function renderOffers() {
   ]));
 }
 
+// --- Intelligence techno: science -> industry readiness signals ---------------------------
+
+function technologySignalTable(rows) {
+  if (!rows.length) return `<div class="empty">Aucun signal documenté pour le moment.</div>`;
+  return `<div class="evidence-table no-market-col">
+    <div class="evidence-head"><span>Axe technologique</span><span>Projet / acteurs</span><span>Preuves</span></div>
+    ${rows.map(row => `<div class="evidence-row">
+      <div><strong>${esc(row.axis)}</strong><br><span class="operation">${esc(row.maturity_stage)}</span></div>
+      <div>${esc(row.project_name || "—")}${row.actor_names.length ? `<br><span class="operation">${row.actor_names.map(esc).join(", ")}</span>` : ""}</div>
+      <button class="proof-pill ${Number(row.languages||0)>1?'multi-source':''}" data-tech-signal-proof="${Number(row.id)}" title="Voir les sources">${esc(proofMeta(row))}</button>
+    </div>`).join("")}
+  </div>`;
+}
+
+function renderTechIntel() {
+  const signals = state.technologySignals || [];
+  const existing = signals.filter(s => s.bucket === "existing");
+  const radar = signals.filter(s => s.bucket === "radar");
+  content.innerHTML = header(
+    "Intelligence",
+    "Intelligence techno",
+    "Signaux de passage science → industrie par axe technologique (haute puissance, parallélisation, beam shaping, TGV, LIPSS/DLIP…). Recherchés et sourcés manuellement, comme les fiches acteurs — jamais déduits automatiquement.",
+  ) +
+  `<section><div class="section-title"><div><span>01</span><div><h2>Déjà industrialisé</h2><p>Axe en production ou en industrialisation avancée, avec preuve documentée.</p></div></div><b>${existing.length} signaux</b></div>${technologySignalTable(existing)}</section>
+   <section><div class="section-title"><div><span>02</span><div><h2>En cours d’industrialisation</h2><p>Prototype, pré-industrialisation ou R&D avec une trajectoire vers la production.</p></div></div><b>${radar.length} signaux</b></div>${technologySignalTable(radar)}</section>`;
+  wireActions();
+}
+
+async function showTechnologySignalProofs(signalId) {
+  const proofs = await api(`/api/technology-signals/${signalId}/proofs`);
+  if (!proofs.length) {
+    document.querySelector("#proof-content").innerHTML = `<div class="empty">Aucune source disponible.</div>`;
+    dialog.classList.remove("wide");
+    dialog.showModal();
+    return;
+  }
+  const first = proofs[0];
+  document.querySelector("#proof-content").innerHTML = `<p class="eyebrow">${esc(first.maturity_stage)}</p><h2>${esc(first.axis)}</h2><p class="dialog-operation">${esc(first.project_name || "")}${first.actor_names.length ? ` · ${first.actor_names.map(esc).join(", ")}` : ""}</p>${proofs.map(p => `<article class="proof"><div><strong>Source</strong>${p.language ? `<span>${esc(String(p.language).toUpperCase())}</span>` : ""}</div><blockquote>${esc(p.quote)}</blockquote><a href="${esc(p.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a></article>`).join("")}`;
+  dialog.classList.remove("wide");
+  dialog.showModal();
+}
+
 const ACTOR_TYPE_LABELS = {
   groupe_industriel: "Groupe industriel",
   prestataire_industriel: "Prestataire industriel",
@@ -1066,6 +1109,7 @@ function render(){
   if(state.view==="monthly") renderMonthly();
   if(state.view==="market") renderMarket();
   if(state.view==="offers") renderOffers();
+  if(state.view==="techintel") renderTechIntel();
   if(state.view==="actors") renderActors();
   if(state.view==="vocabulary") renderVocabulary();
   if(state.view==="collections") renderCollections();
@@ -1188,6 +1232,7 @@ function wireActions(){
   document.querySelectorAll("[data-run]").forEach(button=>button.addEventListener("click",()=>run(button.dataset.run)));
   document.querySelectorAll("[data-proof]").forEach(button=>button.addEventListener("click",()=>showProofs(JSON.parse(button.dataset.proof))));
   document.querySelectorAll("[data-offer-proof]").forEach(button=>button.addEventListener("click",()=>showOfferProofs(Number(button.dataset.offerProof))));
+  document.querySelectorAll("[data-tech-signal-proof]").forEach(button=>button.addEventListener("click",()=>showTechnologySignalProofs(Number(button.dataset.techSignalProof))));
   document.querySelectorAll("[data-toggle-actor]").forEach(button=>button.addEventListener("click",()=>toggleActorActive(Number(button.dataset.toggleActor), button.dataset.nextActive==="1")));
   document.querySelectorAll("[data-accept-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.acceptVocab),"accept",button.dataset.dimension)));
   document.querySelectorAll("[data-reject-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.rejectVocab),"reject")));
@@ -1209,11 +1254,12 @@ document.querySelector(".dialog-close").addEventListener("click",()=>dialog.clos
 dialog.addEventListener("click",e=>{if(e.target===dialog)dialog.close()});
 
 async function refresh(){
-  [state.overview,state.monthly,state.market,state.offers,state.actors,state.profiles,state.vocabulary,state.network,state.duplicates,state.pipelineFunnel]=await Promise.all([
+  [state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.actors,state.profiles,state.vocabulary,state.network,state.duplicates,state.pipelineFunnel]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
     api("/api/market"),
     api("/api/offers"),
+    api("/api/technology-signals"),
     api("/api/actors"),
     api("/api/profiles"),
     api("/api/vocabulary-candidates"),
