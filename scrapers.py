@@ -216,6 +216,7 @@ OPERATIONS: Lexicon = {
     "Rainurage": {"any_of": ("grooving", "laser grooving")},
     "Milling": {"any_of": ("laser milling", "micromilling", "micro-milling")},
     "Fabrication additive": {"any_of": ("additive manufacturing", "laser additive manufacturing", "directed energy deposition", "fabrication additive", "metal 3d printing")},
+    "Tournage laser": {"any_of": ("laser turning", "tournage laser")},
 }
 
 PROCESS_TECHNOLOGIES: Lexicon = {
