@@ -31,7 +31,7 @@ from hybrid import (
     parse_document,
     profile_json,
 )
-from site_profiles import crawl_budget, get_site_profile, seed_urls
+from site_profiles import SITE_OVERRIDES, crawl_budget, get_site_profile, seed_urls
 
 AiClient = OllamaClient | AnthropicClient
 
@@ -162,6 +162,9 @@ MARKETS: Lexicon = {
     "Défense": {"any_of": ("defence", "defense", "military", "défense")},
     "Automobile": {"any_of": ("automotive", "automobile", "e-mobility", "electric vehicle")},
     "Luxe": {"any_of": ("luxury", "luxe", "horlogerie", "watchmaking")},
+    "Quantum": {"any_of": ("quantum", "ion trap", "ion traps", "quantum computing", "quantum sensing", "quantum cryptography")},
+    "Photonique": {"any_of": ("photonic", "photonics", "photonique")},
+    "Sciences de la vie": {"any_of": ("life sciences", "drug discovery", "cell therapy", "cell therapies", "antibody isolation", "single-cell analysis", "single cell analysis", "biophotonics")},
 }
 
 COMPONENTS: Lexicon = {
@@ -1636,10 +1639,12 @@ def _select_market_sources(max_pages: int = 120) -> list[dict]:
             if len(selected) >= max_pages:
                 return selected
 
-    # Pass 2: deepen priority actors according to their profile quotas.
+    # Pass 2: deepen actors we've deliberately invested crawl effort in -- either flagged
+    # priority, or carrying a hand-written SITE_OVERRIDE (a site profile is itself a signal
+    # that this actor's structure was worth the analysis, independent of the priority flag).
     for actor_id in actor_ids:
         meta = actor_meta[actor_id]
-        if not int(meta["priority"]):
+        if not int(meta["priority"]) and meta["name"] not in SITE_OVERRIDES:
             continue
         profile = get_site_profile({"name": meta["name"], "official_url": meta["official_url"]})
         quotas = profile.get("market_source_quotas", {})

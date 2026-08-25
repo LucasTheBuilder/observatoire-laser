@@ -8,9 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import db as dbmod
 import scrapers
 from hybrid import classify_source, parse_document
-from scrapers import _push_crawl_item
+from scrapers import _push_crawl_item, _select_market_sources
 from site_profiles import crawl_budget, get_site_profile
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -232,6 +233,64 @@ class DynamicCrawlIntegrationTests(unittest.TestCase):
             urls = {row[0] for row in conn.execute("SELECT url FROM actor_sources")}
             conn.close()
             self.assertIn("https://example.test/service/deep/deeper/", urls)
+
+
+class MarketSourceSelectionTests(unittest.TestCase):
+    def _seed_actor_with_application_sources(self, actors_db, name, *, priority, count):
+        with patch.object(dbmod, "ACTORS_DB", actors_db):
+            with dbmod.connect(actors_db) as db:
+                existing = db.execute("SELECT id FROM actors WHERE name=?", (name,)).fetchone()
+            if existing:
+                # init_databases() already seeded this actor (e.g. FEMTOprint, a real
+                # SITE_OVERRIDES key) -- reuse its row instead of failing on a name clash.
+                actor_id = existing["id"]
+                with dbmod.connect(actors_db) as db:
+                    db.execute("UPDATE actors SET priority=? WHERE id=?", (int(priority), actor_id))
+            else:
+                actor_id = dbmod.create_actor(
+                    name, "Suisse", "Test", f"https://{name.lower().replace(' ', '')}.example/", priority=priority
+                )
+            with dbmod.connect(actors_db) as db:
+                for i in range(count):
+                    db.execute(
+                        """INSERT INTO actor_sources(actor_id,url,source_kind,page_type,active,source_score)
+                           VALUES(?,?,?,?,1,?)""",
+                        (
+                            actor_id,
+                            f"https://{name.lower().replace(' ', '')}.example/applications/market-{i}.asp",
+                            "discovered", "application", 50 - i,
+                        ),
+                    )
+        return actor_id
+
+    def test_site_override_deepens_pass_two_even_without_the_priority_flag(self):
+        # FEMTOprint is a real SITE_OVERRIDES key (site_profiles.py) with priority=0 in the
+        # live base -- Pass 2 must still deepen it via its own market_source_quotas override,
+        # or its whole per-market applications taxonomy stays capped at Pass 1's baseline of 1
+        # forever. A plain actor with no override and no priority flag gets no such deepening.
+        # max_pages is kept tight (below the 20 rows available) so Pass 3's "fill remaining
+        # capacity" can't silently paper over a broken Pass 2.
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                dbmod.init_databases()
+                # init_databases() also seeds the ~20 real actors from db.ACTORS (with their
+                # own SEED_SOURCES rows); drop them so Pass 1's per-actor budget isn't spent
+                # on unrelated actors before FEMTOprint's Pass-2 deepening gets a turn.
+                with dbmod.connect(actors_db) as db:
+                    db.execute("DELETE FROM actors WHERE name NOT IN ('FEMTOprint')")
+            self._seed_actor_with_application_sources(actors_db, "FEMTOprint", priority=False, count=10)
+            self._seed_actor_with_application_sources(actors_db, "Generic Co", priority=False, count=10)
+
+            with patch.object(scrapers, "ACTORS_DB", actors_db):
+                selected = _select_market_sources(max_pages=10)
+
+            counts: dict[str, int] = {}
+            for row in selected:
+                if row["page_type"] == "application":
+                    counts[row["name"]] = counts.get(row["name"], 0) + 1
+            self.assertGreaterEqual(counts.get("FEMTOprint", 0), 8)
+            self.assertLessEqual(counts.get("Generic Co", 0), 2)
 
 
 class ProfileTests(unittest.TestCase):

@@ -22,7 +22,10 @@ DEFAULT_SITE_PROFILE: dict[str, Any] = {
         "service": 1,
         "capability": 1,
         "technology": 1,
-        "application": 1,
+        # A real "Applications" section is usually a taxonomy of several distinct markets, not
+        # one generic page -- a target of 1 satisfies the boost after the first hit and lets the
+        # rest of a rich site (e.g. one page per vertical) starve for budget indefinitely.
+        "application": 6,
         "case_study": 1,
         "market": 1,
         "project": 1,
@@ -58,7 +61,7 @@ DEFAULT_SITE_PROFILE: dict[str, Any] = {
     # Market extraction must not be monopolised by one page family.
     "market_source_quotas": {
         "service_capability": 3,
-        "application_market": 3,
+        "application_market": 6,
         "technology": 2,
         "project": 2,
         "news": 1,
@@ -156,6 +159,25 @@ SITE_OVERRIDES: dict[str, dict[str, Any]] = {
         "priority_paths": ["/laser-contract-manufacturing/", "/applications/", "/technology/", "/news/"],
         "priority_terms": ["contract manufacturing", "laser contract manufacturing"],
     },
+    "FEMTOprint": {
+        # The Applications hub is a full per-market taxonomy (one dedicated page per vertical) --
+        # seeding them directly means the crawler doesn't have to wait for nav-link discovery to
+        # reach them, and a higher application target keeps them boosted across more of the budget.
+        "seed_paths": [
+            "/applications.asp",
+            "/applications/watchmaking-luxury.asp",
+            "/applications/quantum.asp",
+            "/applications/space.asp",
+            "/applications/life-sciences.asp",
+            "/applications/medtech.asp",
+            "/applications/optics.asp",
+            "/applications/photonics.asp",
+            "/applications/research-development-sciences.asp",
+        ],
+        "priority_paths": ["/applications/"],
+        "coverage_targets": {"application": 8},
+        "market_source_quotas": {"application_market": 8},
+    },
 }
 
 
@@ -165,6 +187,7 @@ DOMAIN_OVERRIDES: dict[str, dict[str, Any]] = {
     "hef.group": SITE_OVERRIDES["HEF"],
     "lasea.eu": SITE_OVERRIDES["LASEA"],
     "pulsar-photonics.de": SITE_OVERRIDES["Pulsar Photonics"],
+    "femtoprint.ch": SITE_OVERRIDES["FEMTOprint"],
 }
 
 

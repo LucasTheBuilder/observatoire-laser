@@ -83,6 +83,25 @@ class LocalRelationTests(unittest.TestCase):
         self.assertEqual(fact["relation_strength"], "contextual")
         self.assertEqual(fact["source_role"], "project")
 
+    def test_quantum_photonics_and_life_sciences_markets_are_recognized(self):
+        # Dedicated application-hub verticals that a pure equipment/CDMO vendor commonly
+        # publishes (e.g. FEMTOprint's applications/quantum.asp, /photonics.asp, /life-sciences.asp)
+        # -- previously unrecognized, so pages about them never produced a market fact.
+        cases = [
+            ("Femtosecond laser micromachining of glass wafer components for quantum ion trap systems.", "Quantum"),
+            ("Femtosecond laser engraving of glass waveguide components for photonics interconnects.", "Photonique"),
+            ("Femtosecond laser micromachining of microfluidic device components for life sciences applications.", "Sciences de la vie"),
+        ]
+        for text, expected_market in cases:
+            with self.subTest(market=expected_market):
+                block = ContentBlock(
+                    heading="Applications", h1="Applications", h2=expected_market, h3="",
+                    path="main > section.applications", text=text,
+                )
+                fact = _candidate("FEMTOprint", "https://www.femtoprint.ch/applications/example.asp", "Applications", block)
+                self.assertIsNotNone(fact)
+                self.assertEqual(fact["market"], expected_market)
+
     def test_page_title_cannot_supply_market(self):
         block = ContentBlock(
             heading="Process",
