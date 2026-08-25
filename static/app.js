@@ -13,6 +13,7 @@ const state = {
   query: "",
   offerQuery: "",
   offerDrill: {family: null, level2: null, level3: null},
+  marketDrill: null,
   actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
 };
 
@@ -132,8 +133,18 @@ function marketFamilyCards(rows) {
   return `<div class="market-fam-grid">${groups.map(([market, bucket]) => {
     const chips = [...bucket.subthemes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
       .map(([label, count]) => `<span class="subtheme-chip">${esc(label)}<b>${count}</b></span>`).join("");
-    return `<article class="market-fam-card"><header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${bucket.total} faits</b></div></header><div class="subtheme-chips">${chips}</div></article>`;
+    return `<button class="market-fam-card market-fam-card-link" data-drill-market="${esc(market)}"><header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${bucket.total} faits</b></div></header><div class="subtheme-chips">${chips}</div></button>`;
   }).join("")}</div>`;
+}
+
+// Single-level equivalent of offerBreadcrumb: only ever "Tous les marchés" or "Tous les
+// marchés › {market}", but reuses the same visual pattern for consistency across the two pages.
+function marketBreadcrumb(selected) {
+  if (!selected) return "";
+  return `<nav class="drill-breadcrumb" tabindex="-1">
+    <button class="drill-crumb" data-drill-market="">Tous les marchés</button><span class="drill-sep">›</span>
+    <span class="drill-crumb current">${esc(selected)}</span>
+  </nav>`;
 }
 
 // Capacity families: an operation/capability is matched against every keyword family
@@ -354,12 +365,18 @@ function proofMeta(row) {
   return String(proofs);
 }
 
-function evidenceTable(rows) {
-  if (!rows.length) return `<div class="empty">Aucune application suffisamment documentée pour le moment.</div>`;
-  return `<div class="evidence-table">
-    <div class="evidence-head"><span>Marché</span><span>Pièce / composant</span><span>Fonction / opération laser</span><span>Preuves</span></div>
+// hideMarketColumn drops the now-redundant "Marché" column once the reader has already picked
+// a market via marketFamilyCards -- same idea as offers' hideMaterialSuffix: don't repeat what
+// the breadcrumb already says.
+function evidenceTable(rows, {hideMarketColumn = false, emptyMessage} = {}) {
+  if (!rows.length) {
+    return `<div class="empty">${emptyMessage || "Aucune application suffisamment documentée pour le moment."}</div>`;
+  }
+  const marketHead = hideMarketColumn ? "" : "<span>Marché</span>";
+  return `<div class="evidence-table ${hideMarketColumn ? "no-market-col" : ""}">
+    <div class="evidence-head">${marketHead}<span>Pièce / composant</span><span>Fonction / opération laser</span><span>Preuves</span></div>
     ${rows.map(row => `<div class="evidence-row">
-      <div class="market-cell"><i></i>${esc(row.market)}</div>
+      ${hideMarketColumn ? "" : `<div class="market-cell"><i></i>${esc(row.market)}</div>`}
       <div>${esc(row.component)}</div>
       <div class="operation">${esc(row.operation)}</div>
       <button class="proof-pill ${Number(row.languages||0)>1?'multi-source':''}" data-proof='${esc(JSON.stringify(row))}' title="Voir les sources">${esc(proofMeta(row))}</button>
@@ -370,18 +387,33 @@ function evidenceTable(rows) {
 function renderMarket() {
   const market = state.market || {existing:[], radar:[]};
   const allRows = [...market.existing, ...market.radar];
+  const selected = state.marketDrill;
+  const existingRows = selected ? market.existing.filter(row => row.market === selected) : market.existing;
+  const radarRows = selected ? market.radar.filter(row => row.market === selected) : market.radar;
+
+  // Same idea as Offres & capacités: the family-card overview is the entry point; once a market
+  // is picked it steps aside for a breadcrumb, and the two fact tables below narrow to it with
+  // their now-redundant "Marché" column dropped.
+  const section01 = selected
+    ? marketBreadcrumb(selected)
+    : `<div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché, avec ses sous-thèmes (pièce / composant) les plus documentés. Cliquer un marché filtre les deux tableaux ci-dessous.</p></div></div><b>${allRows.length} faits</b></div>${marketFamilyCards(allRows)}`;
+
   content.innerHTML = header(
     "Lecture marché",
     "Applications femtoseconde",
     "Uniquement les faits où marché, pièce/composant et opération laser sont explicitement reliés. Les versions linguistiques d’un même fait sont regroupées comme preuves.",
     `<div class="header-actions"><button class="export-btn" data-export="market">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser l’analyse</button></div>`
   ) +
-  `<section><div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché, avec ses sous-thèmes (pièce / composant) les plus documentés.</p></div></div><b>${allRows.length} faits</b></div>${marketFamilyCards(allRows)}</section>
-   <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${market.existing.length} faits</b></div>${evidenceTable(market.existing)}</section>
-   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${market.radar.length} faits</b></div>${evidenceTable(market.radar)}</section>`;
+  `<section id="market-drill-root">${section01}</section>
+   <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${existingRows.length} faits</b></div>${evidenceTable(existingRows, {hideMarketColumn: !!selected, emptyMessage: selected ? `Aucune application existante documentée pour ${selected}.` : undefined})}</section>
+   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${radarRows.length} faits</b></div>${evidenceTable(radarRows, {hideMarketColumn: !!selected, emptyMessage: selected ? `Aucune application radar documentée pour ${selected}.` : undefined})}</section>`;
   wireActions();
+  document.querySelectorAll("[data-drill-market]").forEach(el => el.addEventListener("click", () => {
+    state.marketDrill = el.dataset.drillMarket || null;
+    renderMarket();
+  }));
   const exportBtn = document.querySelector('[data-export="market"]');
-  if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("marche.csv", allRows, [
+  if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("marche.csv", selected ? [...existingRows, ...radarRows] : allRows, [
     {key: "market", label: "Marché"}, {key: "component", label: "Composant"},
     {key: "operation", label: "Opération"}, {key: "languages", label: "Langues"},
   ]));
