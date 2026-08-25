@@ -10,6 +10,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import app as appmod
 import db as dbmod
 from scrapers import _load_custom_lexicon_entries
 
@@ -196,6 +197,64 @@ class ActorManagementTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     dbmod.add_actor_relation(actor_id, "partner", "  ")  # blank name
 
+    def test_update_actor_classification_sets_strategic_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example")
+                dbmod.update_actor_classification(actor_id, strategic_summary="Prestataire de micro-usinage USP.")
+                with dbmod.connect(actors_db) as db:
+                    summary = db.execute("SELECT strategic_summary FROM actors WHERE id=?", (actor_id,)).fetchone()[0]
+                self.assertEqual("Prestataire de micro-usinage USP.", summary)
+
+                # A call touching a different field must not clobber the summary.
+                dbmod.update_actor_classification(actor_id, parent_actor="Bigger Group")
+                with dbmod.connect(actors_db) as db:
+                    summary = db.execute("SELECT strategic_summary FROM actors WHERE id=?", (actor_id,)).fetchone()[0]
+                self.assertEqual("Prestataire de micro-usinage USP.", summary)
+
+    def test_add_actor_fact_and_rejects_bad_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example")
+                fact_id = dbmod.add_actor_fact(actor_id, "certification", "ISO 9001", source_url="https://newlaser.example/iso")
+                with dbmod.connect(actors_db) as db:
+                    row = db.execute(
+                        "SELECT actor_id,dimension,value,source_url,review_status FROM actor_facts WHERE id=?", (fact_id,)
+                    ).fetchone()
+                self.assertEqual((actor_id, "certification", "ISO 9001", "https://newlaser.example/iso", "verified"), tuple(row))
+
+                with self.assertRaises(ValueError):
+                    dbmod.add_actor_fact(actor_id, "not-a-dimension", "value")
+                with self.assertRaises(ValueError):
+                    dbmod.add_actor_fact(actor_id, "certification", "  ")  # blank value
+                with self.assertRaises(ValueError):
+                    dbmod.add_actor_fact(999999, "certification", "ISO 9001")  # unknown actor
+
+    def test_add_actor_event_and_rejects_bad_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example")
+                event_id = dbmod.add_actor_event(
+                    actor_id, "acquisition", "Acquired by Bigger Group.", event_date="2026-05-19", source_url="https://news.example/deal"
+                )
+                with dbmod.connect(actors_db) as db:
+                    row = db.execute(
+                        "SELECT actor_id,event_type,description,event_date,source_url FROM actor_events WHERE id=?", (event_id,)
+                    ).fetchone()
+                self.assertEqual(
+                    (actor_id, "acquisition", "Acquired by Bigger Group.", "2026-05-19", "https://news.example/deal"), tuple(row)
+                )
+
+                with self.assertRaises(ValueError):
+                    dbmod.add_actor_event(actor_id, "  ", "Description")  # blank event_type
+                with self.assertRaises(ValueError):
+                    dbmod.add_actor_event(actor_id, "acquisition", "  ")  # blank description
+                with self.assertRaises(ValueError):
+                    dbmod.add_actor_event(999999, "acquisition", "Description")  # unknown actor
+
     def test_find_actor_duplicate_candidates_flags_domain_parent_and_name_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             actors_db = self._fresh_actors_db(tmp)
@@ -215,6 +274,66 @@ class ActorManagementTests(unittest.TestCase):
                     row["id"] for row in dbmod.rows(actors_db, "SELECT id FROM actors WHERE name='Unrelated Co'")
                 )
                 self.assertNotIn(unrelated_id, flagged_ids)
+
+
+class ActorFichesEnrichmentTests(unittest.TestCase):
+    """Fiches-cibles audit integration: coverage_level is computed (never hand-set) from
+    market.db's own distinct-source count, and actor_facts/actor_events ride along with each
+    actor in /api/actors so the drawer never has to make a second round trip.
+    """
+
+    def test_coverage_level_thresholds(self):
+        self.assertEqual("weak", appmod._coverage_level(0))
+        self.assertEqual("partial", appmod._coverage_level(1))
+        self.assertEqual("partial", appmod._coverage_level(9))
+        self.assertEqual("good", appmod._coverage_level(10))
+        self.assertEqual("good", appmod._coverage_level(24))
+
+    def test_list_actors_attaches_coverage_level_and_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            actors_db, market_db, tech_db = root / "actors.db", root / "market.db", root / "technology.db"
+            with (
+                patch.object(dbmod, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "MARKET_DB", market_db),
+                patch.object(dbmod, "TECH_DB", tech_db),
+            ):
+                dbmod.init_databases()
+                actor_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example")
+                dbmod.update_actor_classification(actor_id, strategic_summary="Prestataire USP.")
+                dbmod.add_actor_fact(actor_id, "certification", "ISO 9001", source_url="https://newlaser.example/iso")
+                dbmod.add_actor_event(actor_id, "acquisition", "Racheté par Big Group.", event_date="2026-01-01")
+
+            stamp = dbmod.utc_now()
+            with dbmod.connect(market_db) as db:
+                for i in range(2):
+                    db.execute(
+                        """INSERT INTO offers(actor_name,offer_type,capability,source_url,source_title,quote,
+                               fact_key,fingerprint,review_status,created_at,updated_at,last_seen_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        ("New Laser Co", "service", "Découpe", f"https://example.test/offer{i}", "t", "q",
+                         f"key{i}", f"fp{i}", "accepted", stamp, stamp, stamp),
+                    )
+                    db.execute(
+                        """INSERT INTO offer_sources(offer_id,source_url,quote,fingerprint,created_at)
+                           VALUES((SELECT id FROM offers WHERE fingerprint=?),?,?,?,?)""",
+                        (f"fp{i}", f"https://example.test/offer{i}", "q", f"src-fp{i}", stamp),
+                    )
+
+            with (
+                patch.object(appmod, "ACTORS_DB", actors_db),
+                patch.object(appmod, "MARKET_DB", market_db),
+                patch.object(appmod, "TECH_DB", tech_db),
+            ):
+                actors = appmod.list_actors()
+
+            actor = next(a for a in actors if a["name"] == "New Laser Co")
+            self.assertEqual("Prestataire USP.", actor["strategic_summary"])
+            self.assertEqual("partial", actor["coverage_level"])  # 2 distinct sources -> partial
+            self.assertEqual([{"actor_id": actor_id, "dimension": "certification", "value": "ISO 9001",
+                                "source_url": "https://newlaser.example/iso"}], actor["facts"])
+            self.assertEqual(1, len(actor["events"]))
+            self.assertEqual("acquisition", actor["events"][0]["event_type"])
 
 
 class VocabularyPromotionTests(unittest.TestCase):

@@ -61,6 +61,19 @@ def _leading_value_chain_stage(raw: str | None) -> str | None:
     name = raw.split("|", 1)[0].strip()
     return name if name in VALUE_CHAIN_STAGES else None
 
+
+def _coverage_level(source_count: int) -> str:
+    """How much of market.db's own evidence backs an actor's fiche -- computed live from
+    distinct documentary sources (offers + evidence) rather than stored, so it can never
+    drift from the facts actually collected. Thresholds calibrated against the fiches-cibles
+    audit's own "Couverture documentaire" ratings (bonne/partielle/faible).
+    """
+    if source_count >= 10:
+        return "good"
+    if source_count >= 1:
+        return "partial"
+    return "weak"
+
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="observatoire")
 job_lock = threading.Lock()
 jobs: dict[str, dict[str, Any]] = {
@@ -320,7 +333,7 @@ def list_actors():
     # "reactivate" action -- filtering them out here would make pausing one-way.
     actors = rows(ACTORS_DB, """SELECT a.id,a.name,a.country,a.role,a.priority,a.official_url,a.active,a.last_scraped_at,a.last_status,
                                a.competitive_class,a.is_reference,a.parent_actor,a.entity_note,a.review_status,
-                               a.actor_type,a.business_models,
+                               a.actor_type,a.business_models,a.strategic_summary,a.last_verified_at,
                                p.strategy,p.status AS profile_status,p.confidence,p.generated_by,p.needs_reprofile,p.health_score,
                                p.coverage_ready,p.coverage_discovered
                                FROM actors a LEFT JOIN site_profiles p ON p.actor_id=a.id
@@ -339,6 +352,20 @@ def list_actors():
         stage = _leading_value_chain_stage(row["industrial_stage"])
         if stage:
             stages_by_actor.setdefault(row["actor_name"], set()).add(stage)
+    # Coverage level (fiches-cibles audit): computed from the same distinct-source count the
+    # pipeline funnel uses, never hand-set, so a fiche can't claim more than market.db proves.
+    sources_by_actor: dict[str, set[str]] = {}
+    for row in (
+        rows(MARKET_DB, "SELECT o.actor_name,os.source_url FROM offer_sources os JOIN offers o ON o.id=os.offer_id")
+        + rows(MARKET_DB, "SELECT e.actor_name,es.source_url FROM evidence_sources es JOIN evidence e ON e.id=es.evidence_id")
+    ):
+        sources_by_actor.setdefault(row["actor_name"], set()).add(row["source_url"])
+    facts_by_actor: dict[int, list[dict[str, Any]]] = {}
+    for row in rows(ACTORS_DB, "SELECT actor_id,dimension,value,source_url FROM actor_facts ORDER BY dimension,id"):
+        facts_by_actor.setdefault(row["actor_id"], []).append(row)
+    events_by_actor: dict[int, list[dict[str, Any]]] = {}
+    for row in rows(ACTORS_DB, "SELECT actor_id,event_type,description,event_date,source_url FROM actor_events ORDER BY event_date DESC,id"):
+        events_by_actor.setdefault(row["actor_id"], []).append(row)
     for actor in actors:
         actor["business_models"] = json.loads(actor["business_models"]) if actor["business_models"] else []
         actor["evidence_confirmed"] = (
@@ -346,6 +373,9 @@ def list_actors():
         )
         demonstrated = stages_by_actor.get(actor["name"], set())
         actor["value_chain_stages"] = [stage for stage in VALUE_CHAIN_STAGES if stage in demonstrated]
+        actor["coverage_level"] = _coverage_level(len(sources_by_actor.get(actor["name"], set())))
+        actor["facts"] = facts_by_actor.get(actor["id"], [])
+        actor["events"] = events_by_actor.get(actor["id"], [])
     return actors
 
 
@@ -416,6 +446,7 @@ class ActorUpdateRequest(BaseModel):
     review_status: str | None = None
     actor_type: str | None = None
     business_models: list[str] | None = None
+    strategic_summary: str | None = None
 
 
 @app.patch("/api/actors/{actor_id}")
@@ -442,6 +473,7 @@ def update_actor(actor_id: int, payload: ActorUpdateRequest):
             review_status=payload.review_status,
             actor_type=payload.actor_type,
             business_models=payload.business_models,
+            strategic_summary=payload.strategic_summary,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

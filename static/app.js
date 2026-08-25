@@ -424,6 +424,24 @@ function valueChainTrack(stages, compact = false) {
   ).join("")}</div>`;
 }
 
+const COVERAGE_LABELS = {good: "Bonne", partial: "Partielle", weak: "Faible"};
+const COVERAGE_HINTS = {
+  good: "La fiche dispose déjà d'un socle documentaire suffisant.",
+  partial: "Des faits existent mais la couverture est insuffisante pour considérer la fiche comme complète.",
+  weak: "Le crawler ne fournit actuellement aucun socle structuré suffisant ; ne pas interpréter cette absence comme une absence de compétence.",
+};
+
+function differentiatorFacts(a) { return (a.facts || []).filter(f => f.dimension === "differentiator"); }
+function certificationFacts(a) { return (a.facts || []).filter(f => f.dimension === "certification"); }
+
+function factLine(f) {
+  return `<li>${esc(f.value)}${f.source_url ? ` <a href="${esc(f.source_url)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`;
+}
+
+function eventLine(e) {
+  return `<li>${e.event_date ? `<b>${esc(e.event_date)}</b> — ` : ""}${esc(e.description)}${e.source_url ? ` <a href="${esc(e.source_url)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`;
+}
+
 function actorDetailContent(a) {
   const offers = state.offers.filter(o => o.actor_name === a.name);
   const marketRows = [...(state.market?.existing || []), ...(state.market?.radar || [])].filter(r => r.actor_name === a.name);
@@ -438,6 +456,7 @@ function actorDetailContent(a) {
 
     <div class="detail-block">
       <h4>Positionnement</h4>
+      ${a.strategic_summary ? `<p>${esc(a.strategic_summary)}</p>` : ""}
       <p>${esc(ACTOR_TYPE_LABELS[a.actor_type] || a.role)}</p>
       ${(a.business_models || []).length ? `<div class="business-model-tags">${a.business_models.map(m => `<span class="business-tag ${esc(m)}">${esc(BUSINESS_MODEL_LABELS[m] || m)}</span>`).join("")}</div>` : ""}
     </div>
@@ -448,11 +467,18 @@ function actorDetailContent(a) {
 
     ${markets.length ? `<div class="detail-block"><h4>Marchés</h4><div class="subtheme-chips">${markets.map(m => `<span class="subtheme-chip">${esc(m)}</span>`).join("")}</div></div>` : ""}
 
+    ${differentiatorFacts(a).length ? `<div class="detail-block"><h4>Différenciateurs</h4><ul class="fact-list">${differentiatorFacts(a).map(f => factLine(f)).join("")}</ul></div>` : ""}
+
+    ${certificationFacts(a).length ? `<div class="detail-block"><h4>Certifications</h4><ul class="fact-list">${certificationFacts(a).map(f => factLine(f)).join("")}</ul></div>` : ""}
+
+    ${(a.events || []).length ? `<div class="detail-block"><h4>Événements</h4><ul class="fact-list">${a.events.map(eventLine).join("")}</ul></div>` : ""}
+
     ${a.parent_actor ? `<div class="detail-block"><h4>Mouvement capitalistique</h4><p class="actor-entity-note">Racheté par <b>${esc(a.parent_actor)}</b>${a.entity_note ? ` — ${esc(a.entity_note)}` : ""}</p></div>` : ""}
 
     <div class="detail-block">
       <h4>Preuves</h4>
       <p>${proofsTotal} preuve(s) issues de nos collectes${a.evidence_confirmed === false ? ' — <span class="evidence-warning">⚠ non confirmé par nos preuves</span>' : ""}</p>
+      <p class="coverage-note">Couverture documentaire : <b>${COVERAGE_LABELS[a.coverage_level] || "Non documenté dans la base"}</b>. ${COVERAGE_HINTS[a.coverage_level] || ""}</p>
     </div>
 
     <div class="detail-block admin-block">
@@ -486,7 +512,8 @@ function actorFormFields(a) {
     <label class="checkbox-row"><input type="checkbox" name="priority" ${a.priority ? "checked" : ""}> Prioritaire</label>
     <label>Classe concurrentielle<select name="competitive_class">${classOptions}</select></label>
     <label>Type d'acteur<select name="actor_type"><option value="">Non classé</option>${typeOptions}</select></label>
-    <fieldset><legend>Business models</legend>${modelCheckboxes}</fieldset>`;
+    <fieldset><legend>Business models</legend>${modelCheckboxes}</fieldset>
+    <label>Résumé stratégique<textarea name="strategic_summary" rows="3">${esc(a.strategic_summary || "")}</textarea></label>`;
 }
 
 function showActorEdit(actorId) {
@@ -512,6 +539,7 @@ function showActorEdit(actorId) {
           competitive_class: data.get("competitive_class") || null,
           actor_type: data.get("actor_type") || null,
           business_models: data.getAll("business_models"),
+          strategic_summary: data.get("strategic_summary") || null,
         }),
       });
       toast("Acteur mis à jour.");

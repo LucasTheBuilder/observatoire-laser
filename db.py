@@ -22,26 +22,26 @@ BACKUP_RETENTION_COUNT = int(os.getenv("BACKUP_RETENTION_COUNT", "14"))
 
 
 ACTORS = [
-    ("ALPHANOV", "France", "Centre technologique", 1, "https://www.alphanov.com"),
-    ("MANUTECH USD", "France", "Plateforme technologique", 1, "https://www.manutech-usd.fr"),
-    ("HEF", "France", "Groupe industriel", 1, "https://hef.group"),
-    ("LASEA", "Belgique", "Intégrateur et services", 1, "https://www.lasea.eu"),
-    ("IREPA LASER", "France", "Centre technologique", 0, "https://www.irepa-laser.com"),
-    ("Pulsar Photonics", "Allemagne", "Production et développement", 0, "https://www.pulsar-photonics.de"),
-    ("Lightmotif", "Pays-Bas", "Texturation de surfaces", 0, "https://www.lightmotif.nl"),
-    ("FEMTO Engineering", "France", "Centre d’ingénierie", 0, "https://www.femto-engineering.fr"),
-    ("Workshop of Photonics", "Lituanie", "Micro-usinage et production", 0, "https://wophotonics.com"),
-    ("LightFab", "Allemagne", "Microfabrication du verre", 0, "https://lightfab.de"),
-    ("Femtika", "Lituanie", "Microfabrication 3D", 0, "https://femtika.com"),
-    ("Micreon", "Allemagne", "Micro-usinage laser", 0, "https://www.micreon.de"),
-    ("OpTek Systems", "Royaume-Uni", "Production laser", 0, "https://optek.humaneticsgroup.com"),
-    ("Blueacre Technology", "Irlande", "Dispositifs médicaux", 0, "https://blueacretechnology.com"),
-    ("Oxford Lasers", "Royaume-Uni", "Micro-usinage laser", 0, "https://oxfordlasers.com"),
-    ("3D-Micromac", "Allemagne", "Procédés industriels", 0, "https://3d-micromac.com"),
-    ("Fraunhofer ILT", "Allemagne", "Institut technologique", 0, "https://www.ilt.fraunhofer.de/en.html"),
-    ("Laser Zentrum Hannover", "Allemagne", "Institut technologique", 0, "https://www.lzh.de/en"),
-    ("FEMTOprint", "Suisse", "Microfabrication du verre", 0, "https://www.femtoprint.ch"),
-    ("LightPulse Laser Precision", "Allemagne", "Production sous contrat", 0, "https://www.light-pulse.de/en-gb/"),
+    ("ALPHANOV", "France", "Centre technologique - procédés laser & micro-usinage", 1, "https://www.alphanov.com"),
+    ("MANUTECH USD", "France", "Plateforme technologique femtoseconde - texturation/fonctionnalisation", 1, "https://www.manutech-usd.fr"),
+    ("HEF", "France", "Référence interne - groupe industriel", 1, "https://hef.group"),
+    ("LASEA", "Belgique", "Systèmes femtoseconde & développement d'applications", 1, "https://www.lasea.eu"),
+    ("IREPA LASER", "France", "Centre technologique - développement, industrialisation & production laser", 0, "https://www.irepa-laser.com"),
+    ("Pulsar Photonics", "Allemagne", "Développement d'applications USP & fabrication sous contrat", 0, "https://www.pulsar-photonics.de"),
+    ("Lightmotif", "Pays-Bas", "Micro-usinage USP & texturation - process development / contract manufacturing", 0, "https://www.lightmotif.nl"),
+    ("FEMTO Engineering", "France", "Centre d'ingénierie - micro/nano-usinage femtoseconde", 0, "https://www.femto-engineering.fr"),
+    ("Workshop of Photonics", "Lituanie", "Microfabrication femtoseconde - services, production & équipements", 0, "https://wophotonics.com"),
+    ("LightFab", "Allemagne", "SLE / microfabrication 3D du verre", 0, "https://lightfab.de"),
+    ("Femtika", "Lituanie", "Microfabrication 3D femtoseconde - équipements & contract manufacturing", 0, "https://femtika.com"),
+    ("Micreon", "Allemagne", "Contract manufacturing en micro-usinage USP", 0, "https://www.micreon.de"),
+    ("OpTek Systems", "Royaume-Uni", "Process development & contract laser micromachining", 0, "https://optek.humaneticsgroup.com"),
+    ("Blueacre Technology", "Irlande", "Laser micromachining & Nitinol contract manufacturing - MedTech", 0, "https://blueacretechnology.com"),
+    ("Oxford Lasers", "Royaume-Uni", "Contract laser micromachining & process development", 0, "https://oxfordlasers.com"),
+    ("3D-Micromac", "Allemagne", "Développement de procédés laser & contract manufacturing", 0, "https://3d-micromac.com"),
+    ("Fraunhofer ILT", "Allemagne", "Institut de recherche appliquée - procédés USP", 0, "https://www.ilt.fraunhofer.de/en.html"),
+    ("Laser Zentrum Hannover", "Allemagne", "Institut technologique - micromachining USP", 0, "https://www.lzh.de/en"),
+    ("FEMTOprint", "Suisse", "CDMO de microfabrication 3D du verre par femtoseconde/SLE", 0, "https://www.femtoprint.ch"),
+    ("LightPulse Laser Precision", "Allemagne", "Développement / échantillonnage & micro-usinage USP", 0, "https://www.light-pulse.de/en-gb/"),
 ]
 
 SEED_SOURCES = [
@@ -316,6 +316,27 @@ def init_databases() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS actor_relations_actor_idx ON actor_relations(actor_id);
+            CREATE TABLE IF NOT EXISTS actor_facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
+                dimension TEXT NOT NULL CHECK(dimension IN ('certification','differentiator')),
+                value TEXT NOT NULL,
+                source_url TEXT,
+                review_status TEXT NOT NULL DEFAULT 'verified' CHECK(review_status IN ('pending','verified','rejected')),
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS actor_facts_actor_idx ON actor_facts(actor_id);
+            CREATE TABLE IF NOT EXISTS actor_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                event_date TEXT,
+                source_url TEXT,
+                review_status TEXT NOT NULL DEFAULT 'verified' CHECK(review_status IN ('pending','verified','rejected')),
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS actor_events_actor_idx ON actor_events(actor_id);
             CREATE TABLE IF NOT EXISTS actor_sources (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
@@ -390,6 +411,11 @@ def init_databases() -> None:
             # An actor selling both must have both, but only "service"/"process"/"research"
             # lines should ever feed the competitive score -- "equipment" alone never does.
             "business_models": "TEXT",
+            # Analyst synthesis and human-validation metadata that market.db cannot supply --
+            # see actor_facts/actor_events for the sourced, itemized facts (certifications,
+            # differentiators, M&A events) that back this summary up.
+            "strategic_summary": "TEXT",
+            "last_verified_at": "TEXT",
         })
         _add_columns(db, "actor_sources", {
             "page_type": "TEXT",
@@ -824,6 +850,7 @@ def update_actor_classification(
     review_status: str | None = None,
     actor_type: str | None = None,
     business_models: list[str] | None = None,
+    strategic_summary: str | None = None,
 ) -> None:
     """Patch an actor's editable fields: the plain descriptive ones (name, country, role,
     official_url, priority) plus the analytical fields (competitive class, actor type,
@@ -873,6 +900,8 @@ def update_actor_classification(
         if invalid:
             raise ValueError(f"Invalid business_models: {sorted(invalid)!r}")
         updates["business_models"] = json.dumps(business_models)
+    if strategic_summary is not None:
+        updates["strategic_summary"] = strategic_summary
     if not updates:
         return
     updates["updated_at"] = utc_now()
@@ -922,6 +951,46 @@ def add_actor_relation(
             """INSERT INTO actor_relations(actor_id,related_actor_id,related_name,relation_type,note,source_url,created_at)
                VALUES(?,?,?,?,?,?,?)""",
             (actor_id, related_actor_id, related_name, relation_type, note, source_url, utc_now()),
+        ).lastrowid
+
+
+def add_actor_fact(actor_id: int, dimension: str, value: str, *, source_url: str | None = None) -> int:
+    """Record one sourced, itemized fact (certification or differentiator) that market.db
+    cannot supply -- see the fiches-cibles integration plan. Distinct from actors.role/
+    strategic_summary, which stay free text: this is queryable per dimension.
+    """
+    if dimension not in {"certification", "differentiator"}:
+        raise ValueError(f"Invalid dimension: {dimension!r}")
+    value = value.strip()
+    if not value:
+        raise ValueError("value is required")
+    with connect(ACTORS_DB) as db:
+        exists = db.execute("SELECT 1 FROM actors WHERE id=?", (actor_id,)).fetchone()
+        if not exists:
+            raise ValueError(f"Actor {actor_id} not found")
+        return db.execute(
+            "INSERT INTO actor_facts(actor_id,dimension,value,source_url,created_at) VALUES(?,?,?,?,?)",
+            (actor_id, dimension, value, source_url, utc_now()),
+        ).lastrowid
+
+
+def add_actor_event(
+    actor_id: int, event_type: str, description: str, *, event_date: str | None = None, source_url: str | None = None
+) -> int:
+    """Record one dated, sourced event (e.g. an acquisition) for an actor's fiche."""
+    event_type = event_type.strip()
+    if not event_type:
+        raise ValueError("event_type is required")
+    description = description.strip()
+    if not description:
+        raise ValueError("description is required")
+    with connect(ACTORS_DB) as db:
+        exists = db.execute("SELECT 1 FROM actors WHERE id=?", (actor_id,)).fetchone()
+        if not exists:
+            raise ValueError(f"Actor {actor_id} not found")
+        return db.execute(
+            "INSERT INTO actor_events(actor_id,event_type,description,event_date,source_url,created_at) VALUES(?,?,?,?,?,?)",
+            (actor_id, event_type, description, event_date, source_url, utc_now()),
         ).lastrowid
 
 

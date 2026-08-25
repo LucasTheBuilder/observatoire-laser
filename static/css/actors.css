@@ -54,6 +54,11 @@
 .detail-block:first-of-type{border-top:0;padding-top:0}
 .detail-block h4{margin:0 0 10px;text-transform:uppercase;letter-spacing:.06em;color:#5c7986;font-size:11px;font-weight:850}
 .detail-block p{margin:0 0 8px;color:var(--ink);font-size:13px}
+.fact-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.fact-list li{font-size:13px;color:var(--ink);line-height:1.5}
+.fact-source{color:var(--teal);text-decoration:none;font-size:11px}
+.coverage-note{color:var(--muted);font-size:11.5px;line-height:1.5}
+.coverage-note b{color:var(--ink)}
 .detail-block.admin-block{background:#f8faf9;margin:22px -31px -31px;padding:18px 31px 31px}
 .value-chain-track{display:flex;align-items:center;gap:4px}
 .value-chain-node{display:flex;flex-direction:column;align-items:center;gap:6px;flex:1;position:relative}
@@ -120,7 +125,7 @@
 .detail-form{display:flex;flex-direction:column;gap:14px}
 .detail-form label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:750;color:var(--ink)}
 .detail-form label.checkbox-row{flex-direction:row;align-items:center;gap:8px;font-weight:700}
-.detail-form input[type=text],.detail-form input[type=url],.detail-form select{padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:#fbfcfc;font-size:13px;font-family:inherit}
+.detail-form input[type=text],.detail-form input[type=url],.detail-form select,.detail-form textarea{padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:#fbfcfc;font-size:13px;font-family:inherit;resize:vertical}
 .detail-form fieldset{margin:0;padding:12px;border:1px solid var(--line);border-radius:9px;display:flex;flex-direction:column;gap:8px}
 .detail-form legend{padding:0 6px;font-size:11px;font-weight:850;text-transform:uppercase;letter-spacing:.05em;color:#5c7986}
 .detail-form-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
