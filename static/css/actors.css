@@ -9,8 +9,7 @@
 .initial{display:grid;place-items:center;width:38px;height:38px;border-radius:10px;background:#e7f3f2;color:var(--teal);font-weight:900;font-size:12px}
 .actor-card h3{font-family:Georgia,serif;font-weight:500;font-size:18px;margin:18px 0 5px}
 .actor-card p{margin:0;color:var(--muted);font-size:12px}
-.actor-card footer{display:flex;justify-content:space-between;align-items:center;margin-top:15px;padding-top:12px;border-top:1px solid #edf0f1;font-size:10px;color:#7c8991}
-.actor-card a{color:var(--teal);text-decoration:none}
+.actor-summary-line{line-height:1.5}
 
 .actor-category{margin-bottom:34px}
 .actor-category>p{display:flex;align-items:center;gap:10px;margin:0 0 16px;text-transform:uppercase;letter-spacing:.08em;color:#5c7986;font-size:11.5px;font-weight:850}
@@ -111,8 +110,8 @@
 .actor-menu summary::-webkit-details-marker{display:none}
 .actor-menu[open] summary{border-color:var(--teal);color:var(--teal)}
 .actor-menu-list{position:absolute;right:0;bottom:calc(100% + 6px);z-index:5;display:flex;flex-direction:column;min-width:190px;padding:6px;border:1px solid var(--line);border-radius:10px;background:#fff;box-shadow:0 14px 34px #17313c1f}
-.actor-menu-list button{padding:9px 11px;border:0;border-radius:7px;background:transparent;color:var(--ink);font-size:12px;font-weight:700;text-align:left;cursor:pointer}
-.actor-menu-list button:hover{background:#eef2f1}
+.actor-menu-list button,.actor-menu-list a{display:block;padding:9px 11px;border:0;border-radius:7px;background:transparent;color:var(--ink);font-size:12px;font-weight:700;text-align:left;text-decoration:none;cursor:pointer}
+.actor-menu-list button:hover,.actor-menu-list a:hover{background:#eef2f1}
 .actor-menu-list button.menu-danger{color:#c14a2f}
 .actor-menu-list button.menu-danger:hover{background:#fdeeec}
 

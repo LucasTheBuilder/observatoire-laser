@@ -372,37 +372,26 @@ const ACTOR_TYPE_LABELS = {
 };
 const BUSINESS_MODEL_LABELS = {equipment: "Équipement", service: "Service", process: "Procédé", research: "Recherche", internal: "Interne"};
 
+function cardSummaryLine(a) {
+  const text = a.strategic_summary || a.role || "";
+  return text.length > 300 ? `${text.slice(0, 299)}…` : text;
+}
+
 function actorCard(a) {
   const paused = !a.active;
   const classBadge = a.competitive_class
     ? `<span class="class-badge ${esc(a.competitive_class)}">${esc(a.competitive_class)}${COMPETITIVE_CLASS_SHORT[a.competitive_class] ? ` · ${esc(COMPETITIVE_CLASS_SHORT[a.competitive_class])}` : ""}</span>`
     : "";
-  const entityNote = a.parent_actor
-    ? `<p class="actor-entity-note">Racheté par <b>${esc(a.parent_actor)}</b>${a.entity_note ? ` — ${esc(a.entity_note)}` : ""}</p>`
-    : "";
   const typeLabel = ACTOR_TYPE_LABELS[a.actor_type] ? `<p class="actor-type-label">${esc(ACTOR_TYPE_LABELS[a.actor_type])}</p>` : "";
-  const businessTags = (a.business_models || []).length
-    ? `<div class="business-model-tags">${a.business_models.map(m => `<span class="business-tag ${esc(m)}">${esc(BUSINESS_MODEL_LABELS[m] || m)}</span>`).join("")}</div>`
-    : "";
-  const unconfirmed = a.evidence_confirmed === false
-    ? `<p class="evidence-warning" title="Aucune capacité/service extrait par nos propres collectes pour cet acteur : classification issue de l'audit externe, pas encore confirmée en interne.">⚠ Non confirmé par nos preuves</p>`
-    : "";
-  const valueChain = (a.value_chain_stages || []).length
-    ? valueChainTrack(a.value_chain_stages, true)
-    : "";
   return `<article class="actor-card ${a.priority?'priority':''}" ${paused?'style="opacity:.55"':''}>
     <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>★ Prioritaire</span>':''}</div></div>
-    <h3 class="actor-name-link" data-actor-detail="${a.id}">${esc(a.name)}</h3>${typeLabel}<p>${esc(a.role)}</p>
-    ${businessTags}
-    ${valueChain}
-    ${entityNote}
-    ${unconfirmed}
-    <footer><span>${esc(a.country)}</span><a href="${esc(a.official_url)}" target="_blank" rel="noopener">Site officiel ↗</a></footer>
+    <h3 class="actor-name-link" data-actor-detail="${a.id}">${esc(a.name)}</h3>${typeLabel}<p class="actor-summary-line">${esc(cardSummaryLine(a))}</p>
     <div class="actor-card-actions">
       <button class="actor-detail-link" data-actor-detail="${a.id}">Voir la fiche →</button>
       <details class="actor-menu">
         <summary>⋯</summary>
         <div class="actor-menu-list">
+          <a href="${esc(a.official_url)}" target="_blank" rel="noopener">Site officiel ↗</a>
           <button data-actor-edit="${a.id}">Modifier</button>
           <button data-actor-toggle-priority="${a.id}" data-next-priority="${a.priority?'0':'1'}">${a.priority?'Retirer la priorité':'Marquer prioritaire'}</button>
           <button data-toggle-actor="${a.id}" data-next-active="${paused?'1':'0'}">${paused?'Réactiver':'Mettre en pause'}</button>
@@ -492,6 +481,7 @@ function showActorDetail(actorId) {
   const actor = state.actors.find(a => a.id === actorId);
   if (!actor) return;
   document.querySelector("#proof-content").innerHTML = actorDetailContent(actor);
+  dialog.classList.add("wide");
   dialog.showModal();
 }
 
@@ -525,6 +515,7 @@ function showActorEdit(actorId) {
       ${actorFormFields(actor)}
       <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Enregistrer</button></div>
     </form>`;
+  dialog.classList.add("wide");
   dialog.showModal();
   document.querySelector("#actor-edit-form").addEventListener("submit", async e => {
     e.preventDefault();
@@ -750,6 +741,7 @@ function showActorAdd() {
       <label class="checkbox-row"><input type="checkbox" name="priority"> Prioritaire</label>
       <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Ajouter</button></div>
     </form>`;
+  dialog.classList.remove("wide");
   dialog.showModal();
   document.querySelector("#actor-add-form").addEventListener("submit", async e => {
     e.preventDefault();
@@ -910,6 +902,7 @@ async function showProofs(row) {
   const qs=new URLSearchParams({bucket:row.bucket,market:row.market,component:row.component,operation:row.operation});
   const proofs=await api(`/api/market/proofs?${qs}`);
   document.querySelector("#proof-content").innerHTML=`<p class="eyebrow">${esc(row.market)}</p><h2>${esc(row.component)}</h2><p class="dialog-operation">${esc(row.operation)}</p>${proofs.map(p=>`<article class="proof"><div><strong>${esc(p.actor_name)}</strong><span>${esc(p.industrial_stage)}</span></div>${p.language?`<small class="source-language">${esc(String(p.language).toUpperCase())}</small>`:''}${p.block_heading?`<small class="block-label">Bloc : ${esc(p.block_heading)}</small>`:''}${[p.laser_process,p.material,p.performance].filter(Boolean).length?`<small class="block-label">${[p.laser_process,p.material,p.performance].filter(Boolean).map(esc).join(' · ')}</small>`:''}${p.relation_strength?`<small class="block-label">Relation : ${esc(p.relation_strength==='direct'?'directe':'contextuelle')}${p.source_role?` · source : ${esc(p.source_role)}`:''}</small>`:''}<blockquote>${esc(p.quote)}</blockquote><a href="${esc(p.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a></article>`).join("")}`;
+  dialog.classList.remove("wide");
   dialog.showModal();
 }
 
@@ -917,11 +910,13 @@ async function showOfferProofs(offerId) {
   const proofs = await api(`/api/offers/${offerId}/proofs`);
   if (!proofs.length) {
     document.querySelector("#proof-content").innerHTML = `<div class="empty">Aucune source disponible.</div>`;
+    dialog.classList.remove("wide");
     dialog.showModal();
     return;
   }
   const first = proofs[0];
   document.querySelector("#proof-content").innerHTML=`<p class="eyebrow">${esc(first.actor_name)}</p><h2>${esc(first.capability)}</h2><p class="dialog-operation">${esc(offerTypeLabel(first.offer_type))}</p>${proofs.map(p=>`<article class="proof"><div><strong>${esc(p.operation || p.laser_process || p.capability)}</strong><span>${esc(p.industrial_stage || '')}</span></div>${p.language?`<small class="source-language">${esc(String(p.language).toUpperCase())}</small>`:''}${p.block_heading?`<small class="block-label">Bloc : ${esc(p.block_heading)}</small>`:''}${[p.laser_process,p.material,p.performance].filter(Boolean).length?`<small class="block-label">${[p.laser_process,p.material,p.performance].filter(Boolean).map(esc).join(' · ')}</small>`:''}${p.relation_strength?`<small class="block-label">Relation : ${esc(p.relation_strength==='direct'?'directe':'contextuelle')}${p.source_role?` · source : ${esc(p.source_role)}`:''}</small>`:''}<blockquote>${esc(p.quote)}</blockquote><a href="${esc(p.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a></article>`).join("")}`;
+  dialog.classList.remove("wide");
   dialog.showModal();
 }
 
