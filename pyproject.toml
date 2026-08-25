@@ -26,7 +26,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
-files = ["app.py", "db.py", "scrapers.py", "hybrid.py", "site_profiles.py", "browser_fetcher.py", "browser_service.py"]
+files = ["app.py", "db.py", "scrapers.py", "hybrid.py", "site_profiles.py"]
 ignore_missing_imports = true
 # The codebase already carries rich type hints (PEP 604 unions, `from __future__ import
 # annotations`) but candidate/row dicts are intentionally dynamic (sqlite3.Row, scraped
