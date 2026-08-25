@@ -14,6 +14,7 @@
 .rank-list li:first-child{border-top:0}
 .rank-list li::before{content:counter(rank)".";color:var(--muted);font-weight:800;margin-right:10px}
 .rank-list{counter-reset:rank}
+.rank-model-tags{color:var(--muted);font-weight:600;font-size:11px}
 
 .signal-list{overflow:hidden;border:1px solid var(--line);border-radius:14px;background:#fff}
 .signal-item{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 19px;border-top:1px solid #edf0f1}

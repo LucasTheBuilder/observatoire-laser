@@ -472,16 +472,28 @@ function actionChecklist(actions) {
 }
 
 // "Qui devient plus dangereux et pourquoi": an objective capability-trajectory proxy (count of
-// new capacités per actor this period), not a fabricated threat score.
-function actorActivityRanking(newOffers) {
+// new capacités per actor this period), not a fabricated threat score. T1 actors (centres
+// technologiques/instituts) are excluded entirely -- they aren't commercial competitors, so
+// counting their activity on the same scale as a C1/C2 competitor would compare incomparable
+// things (an audit finding confirmed against this exact ranking). Hybrid C1/C2 actors (both an
+// equipment vendor and a service provider) stay in, but tagged with their business model(s) so
+// the reader isn't silently comparing a machine-maker's activity to a job-shop's.
+function actorActivityRanking(newOffers, actors) {
+  const byName = new Map((actors || []).map(a => [a.name, a]));
   const counts = new Map();
-  for (const row of newOffers) counts.set(row.actor_name, (counts.get(row.actor_name) || 0) + 1);
-  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  for (const row of newOffers) {
+    if (byName.get(row.actor_name)?.competitive_class === "T1") continue;
+    counts.set(row.actor_name, (counts.get(row.actor_name) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => [name, count, byName.get(name)?.business_models || []])
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
 }
 
 function activityRankingList(ranking) {
-  if (!ranking.length) return `<div class="empty">Aucun mouvement de capacité sur la période.</div>`;
-  return `<ol class="rank-list">${ranking.map(([actor, count]) => `<li><span class="fam-actor">${esc(actor)}</span><span class="fam-proof-pill">${count} nouvelle${count > 1 ? "s" : ""} capacité${count > 1 ? "s" : ""}</span></li>`).join("")}</ol>`;
+  if (!ranking.length) return `<div class="empty">Aucun mouvement de capacité chez les concurrents directs/partiels sur la période.</div>`;
+  return `<ol class="rank-list">${ranking.map(([actor, count, models]) => `<li><span class="fam-actor">${esc(actor)}${models.length ? ` <span class="rank-model-tags">(${models.map(m => esc(BUSINESS_MODEL_LABELS[m] || m)).join(", ")})</span>` : ""}</span><span class="fam-proof-pill">${count} nouvelle${count > 1 ? "s" : ""} capacité${count > 1 ? "s" : ""}</span></li>`).join("")}</ol>`;
 }
 
 // "Quelles opportunités commerciales": a radar-bucket fact where only one tracked actor is
@@ -530,7 +542,7 @@ function renderMonthly() {
     : `<div class="empty">Aucun nouveau document technologique collecté sur la période.</div>`;
 
   const actions = nextBestActions();
-  const ranking = actorActivityRanking(monthly.new_offers || []);
+  const ranking = actorActivityRanking(monthly.new_offers || [], state.actors);
   const opportunities = marketOpportunities(state.market || {existing: [], radar: []});
   const inProgressTech = (state.technologySignals || []).filter(s => s.bucket === "radar").slice(0, 5);
   const techSignalList = inProgressTech.length
@@ -547,7 +559,7 @@ function renderMonthly() {
     `<button class="primary" data-run="monthly">↻ Actualiser toute la veille</button>`
   ) +
   `<section><div class="section-title"><div><span>00</span><div><h2>Que faire maintenant</h2><p>Actions concrètes disponibles dans l’outil, dérivées de l’état réel de la base — pas une suggestion générique.</p></div></div><b>${actions.length} action${actions.length>1?"s":""}</b></div>${actionChecklist(actions)}</section>
-   <section><div class="section-title"><div><span>01</span><div><h2>Qui devient plus dangereux</h2><p>Acteurs avec le plus de nouvelles capacités documentées sur la période — un indicateur de rythme, pas un score de menace.</p></div></div><b>${ranking.length} acteur${ranking.length>1?"s":""}</b></div>${activityRankingList(ranking)}</section>
+   <section><div class="section-title"><div><span>01</span><div><h2>Qui devient plus dangereux</h2><p>Concurrents directs/partiels (C1/C2) avec le plus de nouvelles capacités sur la période — un indicateur de rythme, pas un score de menace. Centres technologiques/instituts exclus : ce ne sont pas des concurrents commerciaux.</p></div></div><b>${ranking.length} acteur${ranking.length>1?"s":""}</b></div>${activityRankingList(ranking)}</section>
    <section><div class="section-title"><div><span>02</span><div><h2>Marché & opportunités</h2><p>Nouveaux faits validés et applications déjà connues mais observées de nouveau.</p></div></div><b>${marketSignals.length} signaux</b></div>${marketList}</section>
    <section><div class="section-title"><div><span>03</span><div><h2>Blancs concurrentiels</h2><p>Applications radar où un seul acteur suivi est actif sur ce couple marché/composant — signal de blanc, pas une opportunité confirmée (peut aussi juste refléter une couverture incomplète).</p></div></div><b>${opportunities.length} signaux</b></div>${opportunities.length ? evidenceTable(opportunities) : `<div class="empty">Aucun blanc concurrentiel identifié pour le moment.</div>`}</section>
    <section><div class="section-title"><div><span>04</span><div><h2>Mouvements concurrents</h2><p>Nouvelles offres, capacités et savoir-faire détectés chez les acteurs suivis, classés par famille.</p></div></div><b>${Number(counts.new_offers || 0)} signaux</b></div>${offerList}</section>
