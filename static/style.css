@@ -85,6 +85,15 @@
 .class-badge.T1{background:#f0ecfa;color:#6b4fb3}
 .class-badge.A1{background:#eef2f1;color:#5c7986}
 .actor-entity-note{margin:6px 0 0;padding:8px 10px;border-radius:8px;background:#fdf3ee;color:#8a5a3f;font-size:11px;line-height:1.5}
+.actor-type-label{margin:2px 0 4px;color:#5c7986;font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.04em}
+.business-model-tags{display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 6px}
+.business-tag{padding:2px 7px;border-radius:9px;font-size:9.5px;font-weight:800}
+.business-tag.equipment{background:#eef2f1;color:#5c7986}
+.business-tag.service{background:#e5f3e9;color:#2f7d52}
+.business-tag.process{background:#e8eef5;color:#35577a}
+.business-tag.research{background:#f0ecfa;color:#6b4fb3}
+.business-tag.internal{background:#eef2f1;color:#8a959c}
+.evidence-warning{margin:0 0 6px;color:#a8790b;font-size:10.5px;font-weight:750}
 
 .chart-legend{display:flex;gap:16px;margin-bottom:14px;font-size:11px;color:var(--muted)}
 .chart-legend span{display:inline-flex;align-items:center;gap:6px}
@@ -105,6 +114,13 @@
 .review-actions{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
 .review-monitor{padding:7px 11px;border:0;border-radius:20px;background:#eef2f1;color:#5c7986;font-weight:800;font-size:11px;cursor:pointer}
 .review-monitor:hover{background:#e2e7e6}
+
+.funnel-row{display:flex;align-items:center;gap:10px;overflow-x:auto;padding-bottom:4px}
+.funnel-stage{flex:1;min-width:110px;padding:16px;border:1px solid var(--line);border-radius:12px;background:#fff;text-align:center}
+.funnel-stage strong{display:block;font:500 26px Georgia,serif;color:var(--ink)}
+.funnel-stage span{display:block;margin-top:4px;font-size:11px;color:var(--muted)}
+.funnel-stage small{display:block;margin-top:2px;color:var(--teal);font-weight:800;font-size:10px}
+.funnel-arrow{color:#ccd6d9;font-size:18px;flex-shrink:0}
 
 .dup-list{overflow:hidden;border:1px solid var(--line);border-radius:14px;background:#fff}
 .dup-row{padding:14px 18px;border-top:1px solid #edf0f1;font-size:13px}

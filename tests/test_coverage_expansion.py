@@ -115,6 +115,24 @@ class ActorManagementTests(unittest.TestCase):
                     status = db.execute("SELECT review_status FROM actors WHERE id=?", (actor_id,)).fetchone()[0]
                 self.assertEqual("candidate", status)
 
+    def test_update_actor_classification_sets_actor_type_and_business_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._fresh_actors_db(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor_id = dbmod.create_actor("New Laser Co", "France", "Intégrateur", "https://newlaser.example")
+                dbmod.update_actor_classification(
+                    actor_id, actor_type="societe_technologique_specialisee", business_models=["equipment", "service"]
+                )
+                with dbmod.connect(actors_db) as db:
+                    row = db.execute("SELECT actor_type,business_models FROM actors WHERE id=?", (actor_id,)).fetchone()
+                self.assertEqual("societe_technologique_specialisee", row["actor_type"])
+                self.assertEqual(["equipment", "service"], json.loads(row["business_models"]))
+
+                with self.assertRaises(ValueError):
+                    dbmod.update_actor_classification(actor_id, actor_type="not-a-real-type")
+                with self.assertRaises(ValueError):
+                    dbmod.update_actor_classification(actor_id, business_models=["equipment", "not-a-real-model"])
+
     def test_add_actor_relation_and_rejects_bad_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             actors_db = self._fresh_actors_db(tmp)

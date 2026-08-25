@@ -303,12 +303,23 @@ def monthly(days: int = Query(default=30, ge=1, le=365)):
 def list_actors():
     # Includes paused (active=0) actors too, with the flag exposed, so the UI can offer a
     # "reactivate" action -- filtering them out here would make pausing one-way.
-    return rows(ACTORS_DB, """SELECT a.id,a.name,a.country,a.role,a.priority,a.official_url,a.active,a.last_scraped_at,a.last_status,
+    actors = rows(ACTORS_DB, """SELECT a.id,a.name,a.country,a.role,a.priority,a.official_url,a.active,a.last_scraped_at,a.last_status,
                                a.competitive_class,a.is_reference,a.parent_actor,a.entity_note,a.review_status,
+                               a.actor_type,a.business_models,
                                p.strategy,p.status AS profile_status,p.confidence,p.generated_by,p.needs_reprofile,p.health_score,
                                p.coverage_ready,p.coverage_discovered
                                FROM actors a LEFT JOIN site_profiles p ON p.actor_id=a.id
                                ORDER BY a.active DESC,a.priority DESC,a.name""")
+    # Evidence gate (P0): a C1/C2 label is only an analyst's classification until our own
+    # crawl has actually produced a capability/service claim for that actor -- otherwise it
+    # is indistinguishable from a guess. This never downgrades the class, it just flags it.
+    confirmed_actors = {row["actor_name"] for row in rows(MARKET_DB, "SELECT DISTINCT actor_name FROM offers")}
+    for actor in actors:
+        actor["business_models"] = json.loads(actor["business_models"]) if actor["business_models"] else []
+        actor["evidence_confirmed"] = (
+            actor["competitive_class"] not in ("C1", "C2") or actor["name"] in confirmed_actors
+        )
+    return actors
 
 
 @app.get("/api/actors/duplicates")
@@ -317,6 +328,33 @@ def actor_duplicates():
     deletes anything by itself.
     """
     return find_actor_duplicate_candidates()
+
+
+@app.get("/api/pipeline-funnel")
+def pipeline_funnel():
+    """Discovered -> fetched -> parsed -> evidence -> validated funnel (P0 audit item): a
+    row in actor_sources is not proof of anything by itself -- this reports how many
+    actually became a stored, human-reviewable claim, instead of just counting pages.
+    """
+    with connect(ACTORS_DB) as db:
+        discovered = db.execute("SELECT COUNT(*) FROM actor_sources").fetchone()[0]
+        fetched = db.execute("SELECT COUNT(*) FROM actor_sources WHERE last_http_status IS NOT NULL").fetchone()[0]
+        parsed = db.execute("SELECT COUNT(*) FROM actor_sources WHERE extraction_mode IS NOT NULL").fetchone()[0]
+    evidence_urls: set[str] = set()
+    validated_urls: set[str] = set()
+    with connect(MARKET_DB) as db:
+        for row in db.execute("SELECT os.source_url,o.review_status FROM offer_sources os JOIN offers o ON o.id=os.offer_id"):
+            evidence_urls.add(row["source_url"])
+            if row["review_status"] == "accepted":
+                validated_urls.add(row["source_url"])
+        for row in db.execute("SELECT es.source_url,e.review_status FROM evidence_sources es JOIN evidence e ON e.id=es.evidence_id"):
+            evidence_urls.add(row["source_url"])
+            if row["review_status"] == "accepted":
+                validated_urls.add(row["source_url"])
+    return {
+        "discovered": discovered, "fetched": fetched, "parsed": parsed,
+        "evidence": len(evidence_urls), "validated": len(validated_urls),
+    }
 
 
 class ActorCreateRequest(BaseModel):
@@ -344,13 +382,16 @@ class ActorUpdateRequest(BaseModel):
     parent_actor: str | None = None
     entity_note: str | None = None
     review_status: str | None = None
+    actor_type: str | None = None
+    business_models: list[str] | None = None
 
 
 @app.patch("/api/actors/{actor_id}")
 def update_actor(actor_id: int, payload: ActorUpdateRequest):
     """Partial update: pause/resume, and/or set the analytical classification fields
-    (competitive class, internal-reference flag, M&A parent/note, review status). History
-    (sources, evidence) is always kept -- only these columns change.
+    (competitive class, actor type, business model(s), internal-reference flag, M&A
+    parent/note, review status). History (sources, evidence) is always kept -- only these
+    columns change.
     """
     try:
         if payload.active is not None:
@@ -362,6 +403,8 @@ def update_actor(actor_id: int, payload: ActorUpdateRequest):
             parent_actor=payload.parent_actor,
             entity_note=payload.entity_note,
             review_status=payload.review_status,
+            actor_type=payload.actor_type,
+            business_models=payload.business_models,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -9,6 +9,7 @@ const state = {
   vocabulary: [],
   network: {nodes: [], edges: []},
   duplicates: [],
+  pipelineFunnel: {discovered: 0, fetched: 0, parsed: 0, evidence: 0, validated: 0},
   query: "",
   offerQuery: "",
 };
@@ -379,16 +380,37 @@ function renderOffers() {
   ]));
 }
 
+const ACTOR_TYPE_LABELS = {
+  groupe_industriel: "Groupe industriel",
+  prestataire_industriel: "Prestataire industriel",
+  societe_developpement_procedes: "Société de développement de procédés",
+  societe_technologique_specialisee: "Société technologique spécialisée",
+  centre_technologique: "Centre technologique",
+  institut_recherche_appliquee: "Institut de recherche appliquée",
+  laboratoire_academique: "Laboratoire académique",
+  partenaire_adjacent: "Partenaire adjacent",
+};
+const BUSINESS_MODEL_LABELS = {equipment: "Équipement", service: "Service", process: "Procédé", research: "Recherche", internal: "Interne"};
+
 function actorCard(a) {
   const paused = !a.active;
   const classBadge = a.competitive_class ? `<span class="class-badge ${esc(a.competitive_class)}">${esc(a.competitive_class)}</span>` : "";
   const entityNote = a.parent_actor
     ? `<p class="actor-entity-note">Racheté par <b>${esc(a.parent_actor)}</b>${a.entity_note ? ` — ${esc(a.entity_note)}` : ""}</p>`
     : "";
+  const typeLabel = ACTOR_TYPE_LABELS[a.actor_type] ? `<p class="actor-type-label">${esc(ACTOR_TYPE_LABELS[a.actor_type])}</p>` : "";
+  const businessTags = (a.business_models || []).length
+    ? `<div class="business-model-tags">${a.business_models.map(m => `<span class="business-tag ${esc(m)}">${esc(BUSINESS_MODEL_LABELS[m] || m)}</span>`).join("")}</div>`
+    : "";
+  const unconfirmed = a.evidence_confirmed === false
+    ? `<p class="evidence-warning" title="Aucune capacité/service extrait par nos propres collectes pour cet acteur : classification issue de l'audit externe, pas encore confirmée en interne.">⚠ Non confirmé par nos preuves</p>`
+    : "";
   return `<article class="actor-card ${a.priority?'priority':''}" ${paused?'style="opacity:.55"':''}>
     <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>Prioritaire</span>':''}</div></div>
-    <h3>${esc(a.name)}</h3><p>${esc(a.role)}</p>
+    <h3>${esc(a.name)}</h3>${typeLabel}<p>${esc(a.role)}</p>
+    ${businessTags}
     ${entityNote}
+    ${unconfirmed}
     <div class="profile-line"><span class="profile-badge ${a.needs_reprofile?'warning':a.strategy}">${a.needs_reprofile?'À recalibrer':a.strategy==='adaptive'?'Adaptatif':'Générique'}</span><small>${a.profile_status==='ready'?'Profil prêt':a.profile_status==='partial'?'Profil partiel':a.profile_status==='degraded'?'Mode dégradé':'À cartographier'}</small></div>
     <footer><span>${esc(a.country)}</span><a href="${esc(a.official_url)}" target="_blank" rel="noopener">Site officiel ↗</a></footer>
     <button class="actor-pause" data-toggle-actor="${a.id}" data-next-active="${paused?'1':'0'}">${paused?'↻ Réactiver':'⏸ Mettre en pause'}</button>
@@ -582,8 +604,28 @@ function renderCollections() {
   `<div class="db-grid">${dbCard("actors","Acteurs","actors.db",`${o.actors.count} acteurs`,`${o.actors.priority} prioritaires · ${o.actors.count-o.actors.priority} suivis`)}${dbCard("market","Marché & offres","market.db",`${o.market.existing+o.market.radar} applications`,`${o.market.offers||0} offres/capacités · ${o.market.proof_sources||0} sources de preuve`)}${dbCard("technology","Technologie","technology.db",`${o.technology.documents} documents`,`Planification en pause`,true)}</div>
    <section class="adaptive-panel"><div class="adaptive-heading"><div><p class="eyebrow">Couverture déterministe</p><h2>Profils des acteurs prioritaires</h2></div><span class="ollama ${o.adaptive.ollama_available?'online':'offline'}">${o.adaptive.ollama_available?`${aiProviderName(o.adaptive)} · ${esc(o.adaptive.model)}${aiCostSuffix(o.adaptive)}`:`${aiProviderName(o.adaptive)} indisponible · crawler autonome`}</span></div><div class="profile-grid">${priorityProfiles.map(p=>`<article><div><strong>${esc(p.name)}</strong><span class="profile-badge ${p.needs_reprofile?'warning':p.strategy}">${p.needs_reprofile?'À recalibrer':p.strategy==='adaptive'?'Adaptatif':'Générique'}</span></div><p>${p.status==='ready'?'Rubriques stratégiques exploitables':p.status==='partial'?'Couverture partielle':p.status==='degraded'?'Aucune rubrique stratégique exploitable':'Cartographie au prochain lancement'}</p>${sectionStates(p)}<small>${p.last_profiled_at?`Dernière analyse : ${dateLabel(p.last_profiled_at)}`:'Pas encore analysé'}</small></article>`).join("")}</div></section>
    <div class="rule-note"><strong>Règle de séparation</strong><p>Le crawler collecte les pages et reconstruit leurs blocs. La vue Marché exige marché + composant + opération explicitement reliés. Les pages de service, technologie ou savoir-faire qui ne portent pas de marché explicite sont conservées séparément dans « Offres & capacités ».</p></div>
+   ${pipelineFunnelPanel()}
    ${duplicatesPanel()}`;
   wireActions();
+}
+
+function pipelineFunnelPanel() {
+  const funnel = state.pipelineFunnel || {};
+  const stages = [
+    {key: "discovered", label: "Découvertes"},
+    {key: "fetched", label: "Récupérées"},
+    {key: "parsed", label: "Analysées"},
+    {key: "evidence", label: "Preuves"},
+    {key: "validated", label: "Validées"},
+  ];
+  const total = funnel.discovered || 1;
+  const cells = stages.map(stage => {
+    const value = Number(funnel[stage.key] || 0);
+    return `<div class="funnel-stage"><strong>${value}</strong><span>${stage.label}</span><small>${Math.round(100 * value / total)}%</small></div>`;
+  }).join(`<div class="funnel-arrow">→</div>`);
+  return `<section><div class="section-title"><div><span>▤</span><div><h2>Pipeline de preuve</h2><p>Une page découverte n'est pas encore une preuve : voici combien deviennent réellement un fait exploitable, jusqu'à validation.</p></div></div></div>
+    <div class="funnel-row">${cells}</div>
+  </section>`;
 }
 
 function duplicatesPanel() {
@@ -746,7 +788,7 @@ document.querySelector(".dialog-close").addEventListener("click",()=>dialog.clos
 dialog.addEventListener("click",e=>{if(e.target===dialog)dialog.close()});
 
 async function refresh(){
-  [state.overview,state.monthly,state.market,state.offers,state.actors,state.profiles,state.vocabulary,state.network,state.duplicates]=await Promise.all([
+  [state.overview,state.monthly,state.market,state.offers,state.actors,state.profiles,state.vocabulary,state.network,state.duplicates,state.pipelineFunnel]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
     api("/api/market"),
@@ -756,6 +798,7 @@ async function refresh(){
     api("/api/vocabulary-candidates"),
     api("/api/network"),
     api("/api/actors/duplicates"),
+    api("/api/pipeline-funnel"),
   ]);
   render();
 }

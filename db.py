@@ -377,6 +377,19 @@ def init_databases() -> None:
             # 'verified' is the default so every actor added the normal way (or already
             # in the base before this column existed) counts as a real actor immediately.
             "review_status": "TEXT NOT NULL DEFAULT 'verified' CHECK(review_status IN ('candidate','verified','rejected','monitor'))",
+            # actor_type is the *nature* of the organization (orthogonal to competitive_class,
+            # which is the *relation* to us) -- a centre technologique and a prestataire
+            # industriel can both be C1, but they are not the same kind of actor.
+            "actor_type": (
+                "TEXT CHECK(actor_type IN ("
+                "'groupe_industriel','prestataire_industriel','societe_developpement_procedes',"
+                "'societe_technologique_specialisee','centre_technologique','institut_recherche_appliquee',"
+                "'laboratoire_academique','partenaire_adjacent'))"
+            ),
+            # JSON array of the business lines actually demonstrated, e.g. ["equipment","service"].
+            # An actor selling both must have both, but only "service"/"process"/"research"
+            # lines should ever feed the competitive score -- "equipment" alone never does.
+            "business_models": "TEXT",
         })
         _add_columns(db, "actor_sources", {
             "page_type": "TEXT",
@@ -788,6 +801,14 @@ def set_actor_active(actor_id: int, active: bool) -> None:
         raise ValueError(f"Actor {actor_id} not found")
 
 
+ACTOR_TYPES = {
+    "groupe_industriel", "prestataire_industriel", "societe_developpement_procedes",
+    "societe_technologique_specialisee", "centre_technologique", "institut_recherche_appliquee",
+    "laboratoire_academique", "partenaire_adjacent",
+}
+BUSINESS_MODELS = {"equipment", "service", "process", "research", "internal"}
+
+
 def update_actor_classification(
     actor_id: int,
     *,
@@ -796,11 +817,13 @@ def update_actor_classification(
     parent_actor: str | None = None,
     entity_note: str | None = None,
     review_status: str | None = None,
+    actor_type: str | None = None,
+    business_models: list[str] | None = None,
 ) -> None:
-    """Patch the analytical fields (competitive class, internal-reference flag, M&A parent/
-    note, human-review status) added on top of the free-text ``role``. Only fields
-    explicitly passed (not None) are updated, so a caller can set a single field without
-    clobbering the others.
+    """Patch the analytical fields (competitive class, actor type, business model(s),
+    internal-reference flag, M&A parent/note, human-review status) added on top of the
+    free-text ``role``. Only fields explicitly passed (not None) are updated, so a caller
+    can set a single field without clobbering the others.
     """
     updates: dict[str, object] = {}
     if competitive_class is not None:
@@ -815,6 +838,15 @@ def update_actor_classification(
         if review_status not in {"candidate", "verified", "rejected", "monitor"}:
             raise ValueError(f"Invalid review_status: {review_status!r}")
         updates["review_status"] = review_status
+    if actor_type is not None:
+        if actor_type not in ACTOR_TYPES:
+            raise ValueError(f"Invalid actor_type: {actor_type!r}")
+        updates["actor_type"] = actor_type
+    if business_models is not None:
+        invalid = set(business_models) - BUSINESS_MODELS
+        if invalid:
+            raise ValueError(f"Invalid business_models: {sorted(invalid)!r}")
+        updates["business_models"] = json.dumps(business_models)
     if not updates:
         return
     updates["updated_at"] = utc_now()
