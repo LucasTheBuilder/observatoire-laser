@@ -227,13 +227,14 @@ APPLICATION_ARCHITECTURES: Lexicon = {
 }
 
 MATERIALS: Lexicon = {
-    "Verre": {"any_of": ("glass", "fused silica", "borosilicate", "quartz glass")},
-    "Saphir": {"any_of": ("sapphire",)},
-    "Silicium": {"any_of": ("silicon",)},
+    "Verre": {"any_of": ("glass", "fused silica", "borosilicate", "quartz glass", "verre")},
+    "Saphir": {"any_of": ("sapphire", "saphir")},
+    "Silicium": {"any_of": ("silicon", "silicium")},
     "Nitinol": {"any_of": ("nitinol", "ni-ti", "niti")},
-    "Céramique": {"any_of": ("ceramic", "alumina", "zirconia")},
-    "Polymère": {"any_of": ("polymer", "polymeric", "peek", "polyimide")},
-    "Métal": {"any_of": ("stainless steel", "titanium", "aluminium", "aluminum", "copper", "nickel")},
+    "Céramique": {"any_of": ("ceramic", "alumina", "zirconia", "céramique", "céramiques")},
+    "Polymère": {"any_of": ("polymer", "polymeric", "peek", "polyimide", "polymère", "polymères")},
+    "Métal": {"any_of": ("stainless steel", "titanium", "aluminium", "aluminum", "copper", "nickel", "titane", "acier inoxydable", "cuivre", "métaux")},
+    "Composite": {"any_of": ("composite", "cfrp", "carbon fiber reinforced polymer", "cmc", "ceramic matrix composite")},
 }
 
 PERFORMANCE_TERMS: Lexicon = {
