@@ -124,6 +124,8 @@ class HybridExtractionTests(unittest.TestCase):
                 self.url = url
                 self.status_code = 200
                 self.text = section if any(term in url for term in ("applications", "projects", "blog")) else homepage
+                self.content = self.text.encode("utf-8")
+                self.headers: dict[str, str] = {}
 
             def raise_for_status(self):
                 return None

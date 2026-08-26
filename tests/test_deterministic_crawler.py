@@ -87,7 +87,9 @@ class DynamicCrawlIntegrationTests(unittest.TestCase):
         def __init__(self, url: str, text: str):
             self.url = url
             self.text = text
+            self.content = text.encode("utf-8")
             self.status_code = 200
+            self.headers: dict[str, str] = {}
 
         def raise_for_status(self):
             return None

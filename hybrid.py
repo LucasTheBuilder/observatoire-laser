@@ -1,6 +1,22 @@
+"""Parseur HTML déterministe + abstraction des clients IA. Deux parties bien distinctes :
+
+1. Le pipeline d'extraction (la majorité du fichier) : transforme le HTML brut d'une page en
+   un ``ParsedDocument`` -- un titre, une liste de liens "intéressants" classés par type/score
+   (``_meaningful_links`` / ``classify_source``), et une liste de ``ContentBlock`` (des
+   fragments de contenu éditorial nettoyés, avec leur hiérarchie de titres H1/H2/H3). C'est
+   entièrement basé sur BeautifulSoup, sans IA -- l'IA n'intervient jamais dans cette partie.
+   Le point d'entrée est ``parse_document()``, appelé par scrapers.py sur chaque page visitée ;
+   ``diagnose_document()`` est un outil de debug qui expose les étapes intermédiaires.
+2. L'abstraction des clients IA (``OllamaClient``/``AnthropicClient``, sélectionnés par
+   ``get_ai_client()``) et ``build_profile()``, qui les utilise en repli optionnel pour
+   affiner le profil de crawl d'un acteur. Cette partie est utilisée par scrapers.py comme
+   repli conservateur (jamais pour inventer des faits), voir _ai_candidates dans scrapers.py.
+"""
+
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -19,6 +35,10 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from site_profiles import DEFAULT_SITE_PROFILE
 
 CORE_SECTIONS = ("application", "project", "news")
+# Score de base par type de page détecté (voir classify_source), avant les ajustements du
+# profil du site (page_type_boosts, priority_paths/terms). Reflète à quel point ce type de
+# page contient typiquement de l'info métier exploitable (une page "application" vaut mieux
+# qu'une page "about").
 SECTION_SCORES = {
     "application": 100,
     "case_study": 100,
@@ -36,6 +56,8 @@ SECTION_SCORES = {
     "other": 15,
     "ignore": 0,
 }
+# Mots-clés (dans le libellé du lien ou son URL) qui laissent penser qu'un lien de contenu
+# (pas de navigation) mène vers une page intéressante -- voir _meaningful_links.
 DISCOVERY_TERMS = (
     "application", "applications", "use case", "case study", "case-study", "customer case",
     "product", "products", "produit", "produits", "solution", "solutions", "service", "services", "prestation", "prestations",
@@ -48,6 +70,16 @@ DISCOVERY_TERMS = (
 
 @dataclass(frozen=True)
 class ContentBlock:
+    """Un fragment de contenu éditorial extrait d'une page (un paragraphe, une carte produit,
+    une section...), avec sa hiérarchie de titres. C'est l'unité de base sur laquelle
+    scrapers.py cherche des faits marché -- voir scrapers._candidate().
+
+    ``path`` encode à la fois la position DOM (ex: "div#main > section.cards") ET, après
+    "::", un marqueur du type d'unité éditoriale qui l'a produit (repeated/pseudo/segment/
+    linked-item) -- voir _repeated_editorial_blocks, _pseudo_heading_blocks,
+    _heading_segment_blocks, _linked_editorial_blocks plus bas.
+    """
+
     heading: str
     text: str
     path: str
@@ -58,11 +90,15 @@ class ContentBlock:
 
     @property
     def fingerprint(self) -> str:
+        """Empreinte de contenu (pas d'identité) : sert à détecter si une page a changé d'une
+        collecte à l'autre en comparant les empreintes agrégées de tous ses blocs."""
         hierarchy = "|".join((self.h1, self.h2, self.h3))
         return hashlib.sha256(f"{self.path}|{hierarchy}|{self.text}".encode("utf-8", "ignore")).hexdigest()
 
     @property
     def section_context(self) -> str:
+        """Concatène titre + hiérarchie H1/H2/H3 (sans doublon) -- le texte utilisé pour
+        détecter le contexte "laser ultra-rapide" d'un bloc, voir scrapers._laser_context."""
         return " ".join(dict.fromkeys(filter(None, (self.h1, self.h2, self.h3, self.heading))))
 
     @property
@@ -96,6 +132,11 @@ class ContentBlock:
 
 @dataclass(frozen=True)
 class ParsedDocument:
+    """Résultat complet du parsing d'une page (voir parse_document()) : ses métadonnées
+    (titre, type de page détecté, H1), ses liens sortants exploitables, ses blocs de contenu,
+    et des métriques de qualité d'extraction (text_coverage, quality_score...) utilisées pour
+    diagnostiquer si l'extraction a bien fonctionné sur ce site."""
+
     title: str
     links: list[dict[str, Any]]
     blocks: list[ContentBlock]
@@ -112,6 +153,9 @@ class ParsedDocument:
 
 
 
+# Note : cette constante n'est référencée nulle part ailleurs dans le fichier -- _is_cmp_zone
+# et _remove_noise_zones ci-dessous utilisent leurs propres tuples de termes en dur à la place.
+# Semble être du code mort (candidat à suppression), à vérifier avant de la retirer.
 CMP_HINTS = (
     "cookie", "cookies", "consent", "cmp", "onetrust", "didomi", "tarteaucitron",
     "privacy-manager", "privacy manager", "audience measurement", "advertising network",
@@ -134,7 +178,10 @@ def _attr_str(tag: Tag, name: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+# === Nettoyage du HTML : retirer menus/bandeaux cookies avant l'extraction éditoriale ===
 def _noise_signature(tag: Tag) -> str:
+    """Texte normalisé (id + classes + attributs + contenu) d'un tag, utilisé pour repérer
+    les bandeaux de consentement (cookies/CMP) par mots-clés plutôt que par sélecteur CSS fixe."""
     attrs = " ".join([_attr_str(tag, "id"), " ".join(_class_list(tag)), _attr_str(tag, "aria-label"), _attr_str(tag, "role")])
     text = _clean(tag.get_text(" ", strip=True))[:1200]
     return _plain(f"{attrs} {text}")
@@ -156,7 +203,15 @@ def _is_cmp_zone(tag: Tag) -> bool:
 
 
 def _remove_noise_zones(soup: BeautifulSoup) -> int:
-    """Remove navigation/chrome plus entire CMP roots before editorial extraction."""
+    """Remove navigation/chrome plus entire CMP roots before editorial extraction.
+
+    Modifie `soup` en place (les tags supprimés disparaissent de l'arbre) et renvoie le
+    nombre de tags retirés. Trois passes successives, du plus sûr au plus permissif :
+    1. Tags techniques/structurels toujours à exclure (script, nav, header, footer...).
+    2. Conteneurs dont l'id/la classe mentionne explicitement cookie/consent/onetrust/....
+    3. Boîtes de dialogue (role=dialog) qui ressemblent à un bandeau de consentement
+       (voir _is_cmp_zone), pour les CMP qui n'utilisent pas de nom de classe explicite.
+    """
     removed = 0
     base_selector = "script,style,noscript,svg,template,form,nav,header,footer,aside,[role=navigation]"
     for tag in list(soup.select(base_selector)):
@@ -177,16 +232,24 @@ def _remove_noise_zones(soup: BeautifulSoup) -> int:
 
 
 def _clean(value: str) -> str:
+    """Écrase tous les espaces/retours à la ligne consécutifs en un seul espace, et trim."""
     return re.sub(r"\s+", " ", value or "").strip()
 
 
 def _plain(value: str) -> str:
+    """Normalise agressivement une chaîne pour la comparaison de mots-clés : décode l'URL-
+    encoding, retire les accents, tout en minuscules, ponctuation remplacée par des espaces.
+    Distinct de scrapers._normalize_text (qui préserve les accents) -- ici on veut une
+    comparaison "sac de mots" insensible aux accents pour les URLs/labels de navigation."""
     value = unicodedata.normalize("NFKD", unquote(value or ""))
     value = "".join(char for char in value if not unicodedata.combining(char))
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
 
 def canonical_url(url: str) -> str:
+    """Forme canonique d'une URL (schéma+host sans "www."+chemin sans "/" final), utilisée
+    comme clé de déduplication partout où deux URLs "équivalentes" doivent compter comme une
+    seule page (file de crawl, actor_sources, ...)."""
     parsed = urlparse(url)
     host = parsed.netloc.lower().removeprefix("www.")
     path = parsed.path.rstrip("/") or "/"
@@ -194,6 +257,7 @@ def canonical_url(url: str) -> str:
 
 
 def _contains_fragment(value: str, fragment: str) -> bool:
+    """Test d'inclusion insensible aux accents/casse/ponctuation (via _plain) entre deux chaînes."""
     plain_value = _plain(value)
     plain_fragment = _plain(fragment)
     return bool(plain_fragment and plain_fragment in plain_value)
@@ -227,7 +291,15 @@ def classify_source(
     h1: str = "",
     profile: dict[str, Any] | None = None,
 ) -> tuple[str, int]:
-    """Classify and score a page from deterministic URL/anchor/title/H1 evidence."""
+    """Classify and score a page from deterministic URL/anchor/title/H1 evidence.
+
+    Utilisée à deux moments : sur un simple LIEN découvert (url + label du lien, avant même
+    de le télécharger, pour décider s'il vaut la peine d'être crawlé) et sur une PAGE déjà
+    téléchargée (url + title + h1 réels, pour affiner le classement une fois le contenu
+    connu -- voir parse_document). Renvoie (type_de_page, score) où le score combine :
+    score de base par type (SECTION_SCORES) + boost du profil (page_type_boosts) + bonus
+    priority_paths (+18) + bonus priority_terms (jusqu'à +12), plafonné à 140.
+    """
     profile = profile or DEFAULT_SITE_PROFILE
     parsed = urlparse(url)
     path = _plain(parsed.path)
@@ -274,6 +346,9 @@ def classify_source(
 
 
 def _path(tag: Tag) -> str:
+    """Construit un "chemin DOM" lisible pour un tag (ex: "div#main > section.cards > article"),
+    en remontant jusqu'à 7 ancêtres. Sert d'identifiant de position pour ContentBlock.path et
+    de base à editorial_group_id -- pas un vrai sélecteur CSS, juste une trace de position."""
     parts: list[str] = []
     current: Tag | None = tag
     while current and current.name not in (None, "[document]") and len(parts) < 7:
@@ -290,6 +365,13 @@ def _path(tag: Tag) -> str:
 
 
 def _meaningful_links(soup: BeautifulSoup, base_url: str, profile: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Filtre tous les liens `<a href>` de la page pour ne garder que ceux qui valent la peine
+    d'être ajoutés à la file de crawl : même domaine, pas de type "ignore", et soit un lien de
+    navigation (menu), soit un lien de contenu qui contient un terme de découverte
+    (DISCOVERY_TERMS) ou un fragment priority_paths. Un même lien vu plusieurs fois (URL
+    canonique identique) ne garde que sa meilleure occurrence. Trié par score décroissant et
+    limité à `crawl.max_links_per_page` -- c'est cette liste que scrapers.py pousse dans sa
+    file de priorité (voir scrapers.scrape_actors)."""
     profile = profile or DEFAULT_SITE_PROFILE
     base_host = urlparse(base_url).netloc.lower().removeprefix("www.")
     found: dict[str, dict[str, Any]] = {}
@@ -377,6 +459,11 @@ def _heading_hierarchy(tag: Tag) -> tuple[str, str, str, str]:
 
 
 def _content_block(tag: Tag, heading_hint: str = "") -> ContentBlock | None:
+    """Construit un ContentBlock à partir d'un tag DOM déjà jugé "candidat" : renvoie None si
+    le texte est trop court (< 55 caractères, seuil anti-bruit). Le titre du bloc (`heading`)
+    est choisi par priorité décroissante : titre H1-H6 propre au tag, sinon un élément qui
+    "ressemble" à un titre (_title_like_text), sinon l'indice fourni par l'appelant, sinon la
+    hiérarchie de titres ambiante (h3 > h2 > h1)."""
     text = _clean(tag.get_text(" ", strip=True))
     if len(text) < 55:
         return None
@@ -403,6 +490,9 @@ def _content_block(tag: Tag, heading_hint: str = "") -> ContentBlock | None:
 
 
 
+# === Segmentation éditoriale : découper une grosse zone de contenu en unités plus locales
+# (cartes répétées, faux titres en <strong>, sections H2/H3, listes de liens) plutôt que de
+# garder un seul bloc fourre-tout -- voir _split_oversized_block et parse_document plus bas. ===
 def _title_like_text(tag: Tag) -> str:
     """Return a short editorial title carried by a non-heading element."""
     candidates: list[Tag] = []
@@ -604,6 +694,12 @@ def _linked_editorial_blocks(container: Tag, profile: dict[str, Any] | None = No
 
 
 def _split_oversized_block(tag: Tag, block: ContentBlock, profile: dict[str, Any] | None = None) -> list[ContentBlock]:
+    """Si `block` (déjà extrait de `tag`) dépasse le seuil "trop gros" (oversized_block_chars),
+    tente de le redécouper en unités plus locales en combinant les 3 stratégies de
+    segmentation (titres H2-H4, cartes/pseudo-titres, listes de liens). Ne garde que les
+    morceaux réellement plus petits que le bloc d'origine, et n'accepte le découpage que s'il
+    produit au moins `oversized_split_min_units` morceaux -- sinon on préfère garder le seul
+    gros bloc plutôt qu'un découpage qui n'a pas vraiment isolé grand-chose."""
     profile = profile or DEFAULT_SITE_PROFILE
     cfg = profile.get("quality_extraction", {})
     threshold = int(cfg.get("oversized_block_chars", 1500))
@@ -620,7 +716,12 @@ def _split_oversized_block(tag: Tag, block: ContentBlock, profile: dict[str, Any
     return pieces if len(pieces) >= min_units else []
 
 
+# === Métriques de qualité d'extraction : mesurent, après coup, si les blocs retenus
+# représentent bien le contenu utile de la page -- utilisées pour piloter les stratégies de
+# secours dans parse_document (coverage-rescue) et exposées dans ParsedDocument/diagnose_document. ===
 def _noise_ratio(blocks: list[ContentBlock]) -> float:
+    """Fraction (0-1) des mots extraits qui appartiennent à des blocs "bruités" (bandeaux
+    cookies/consentement qui auraient échappé à _remove_noise_zones)."""
     if not blocks:
         return 0.0
     noise_terms = (
@@ -655,6 +756,11 @@ def _useful_coverage(root: Tag | BeautifulSoup, blocks: list[ContentBlock], over
 
 
 def _quality_metrics(root: Tag | BeautifulSoup, blocks: list[ContentBlock], profile: dict[str, Any] | None = None) -> dict[str, float | int]:
+    """Calcule le `quality_score` (0-100) final d'une extraction, combinaison pondérée de :
+    couverture utile (42%), couverture brute (23%), proportion de blocs de taille raisonnable
+    (20%), et absence de titres répétés en boucle (15%) -- puis pénalisée par le bruit détecté
+    et le nombre de blocs surdimensionnés. Sert surtout de signal de diagnostic (exposé dans
+    ParsedDocument et /api diagnose), pas de critère bloquant dans le pipeline lui-même."""
     profile = profile or DEFAULT_SITE_PROFILE
     cfg = profile.get("quality_extraction", {})
     oversized_chars = int(cfg.get("oversized_block_chars", 1500))
@@ -724,6 +830,7 @@ def _dedupe_blocks(blocks: list[ContentBlock]) -> list[ContentBlock]:
 
 
 def _heading_level(tag: Tag) -> int | None:
+    """Renvoie 1-6 si `tag` est un titre h1..h6, sinon None."""
     if tag.name and len(tag.name) == 2 and tag.name[0].lower() == "h" and tag.name[1].isdigit():
         level = int(tag.name[1])
         return level if 1 <= level <= 6 else None
@@ -789,6 +896,10 @@ def _heading_segment_blocks(root: Tag | BeautifulSoup, profile: dict[str, Any] |
     return blocks
 
 
+# === Outil de debug (non utilisé par le pipeline de collecte lui-même) : réexpose chaque
+# étape intermédiaire de parse_document() pour comprendre pourquoi une page donnée extrait
+# bien/mal. Reparse la page une seconde fois en interne (via parse_document) -- coût CPU
+# volontairement ignoré puisque c'est un outil ponctuel, pas un chemin chaud. ===
 def diagnose_document(html: str, base_url: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return extraction diagnostics without changing or storing any data."""
     profile = profile or DEFAULT_SITE_PROFILE
@@ -865,12 +976,18 @@ def diagnose_document(html: str, base_url: str, profile: dict[str, Any] | None =
     }
 
 def _usable_candidate(tag: Tag) -> bool:
+    """Filtre grossier appliqué à tout tag matché par le sélecteur CSS "candidat" (article,
+    section, [class*=card]...) dans parse_document : au moins 55 caractères de texte, et soit
+    un tag sémantique (article/section), soit contenant un titre/paragraphe/légende."""
     if len(_clean(tag.get_text(" ", strip=True))) < 55:
         return False
     return tag.name in ("article", "section") or bool(tag.find(["h1", "h2", "h3", "h4", "h5", "h6", "p", "figcaption"]))
 
 
 def _heading_fallback(root: Tag) -> list[ContentBlock]:
+    """Dernier recours quand aucune autre stratégie n'a produit de bloc : pour chaque titre de
+    la page, remonte jusqu'au plus petit ancêtre "utilisable" qui ne contient qu'un seul titre
+    (pour ne pas fusionner plusieurs sections), sinon se rabat sur chaque <p>/<li> individuel."""
     blocks: list[ContentBlock] = []
     used_paths: set[str] = set()
     for heading in root.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])[:80]:
@@ -900,7 +1017,28 @@ def _heading_fallback(root: Tag) -> list[ContentBlock]:
 
 
 def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = None) -> ParsedDocument:
-    """Deterministically discover links and extract independent, hierarchy-aware content blocks."""
+    """Deterministically discover links and extract independent, hierarchy-aware content blocks.
+
+    Point d'entrée principal du fichier, appelé par scrapers.py sur chaque page téléchargée.
+    Grandes étapes, dans l'ordre :
+    1. Extraire les liens (_meaningful_links) AVANT de retirer nav/header du DOM.
+    2. Nettoyer le bruit (_remove_noise_zones) puis choisir la zone de contenu principale
+       (`root`, ex: <main>) et classer le type de page (classify_source).
+    3. Sélectionner les tags "candidats" (article/section/[class*=card]...), ne garder que
+       les feuilles (un candidat dont un descendant est lui-même un candidat est exclu, pour
+       éviter d'avoir à la fois le conteneur et son contenu comme deux blocs).
+    4. Affiner : redécouper les blocs trop gros (_split_oversized_block), sinon tenter une
+       segmentation locale plus fine (titres H2-H4 + cartes) si elle apporte plus de détail.
+    5. Repêcher les parents riches ignorés par la règle "feuille seule" (rescue), puis
+       basculer entièrement en segmentation par titres si le résultat est encore trop pauvre
+       (< 4 blocs mais >= 4 titres sur la page).
+    6. Filet de sécurité "coverage" : si les blocs retenus ne couvrent pas assez du texte de
+       la page (_token_coverage), ajouter les unités éditoriales de la page entière.
+    7. Si toujours aucun bloc, retomber sur _heading_fallback puis un dernier recours brutal
+       (chaque enfant direct de `root`).
+    Chaque étape ajoute un suffixe à `method` (ex: "semantic+editorial-rescue"), ce qui permet
+    de savoir a posteriori quelle stratégie a produit le résultat final pour une page donnée.
+    """
     profile = profile or DEFAULT_SITE_PROFILE
     soup = BeautifulSoup(html, "html.parser")
     title = _clean(soup.title.get_text(" ", strip=True)) if soup.title else ""
@@ -1048,7 +1186,97 @@ def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = No
     )
 
 
+# === PDF : même contrat de sortie (ParsedDocument) que parse_document(), pour que le reste du
+# pipeline (scrapers.scrape_actors/_candidate/_offer_candidates, actor_sources.blocks_json)
+# n'ait besoin d'aucun changement pour exploiter des brochures/datasheets/rapports annuels. ===
+def is_pdf_response(content_type: str, url: str) -> bool:
+    """True si une réponse HTTP doit être traitée comme un PDF plutôt que comme du HTML :
+    Content-Type application/pdf, ou à défaut une URL qui finit par .pdf (certains serveurs
+    renvoient un Content-Type générique/absent pour les fichiers statiques)."""
+    if "application/pdf" in (content_type or "").lower():
+        return True
+    return urlparse(url).path.lower().endswith(".pdf")
+
+
+def _pdf_paragraphs(page_text: str) -> list[str]:
+    """Découpe le texte d'une page PDF (extraction ligne par ligne de pdfplumber, sans
+    structure de bloc) en paragraphes, en recollant les lignes séparées par un saut de ligne
+    simple et en coupant sur les lignes vides -- l'équivalent, pour du texte plat, de ce que
+    la hiérarchie DOM donne gratuitement pour du HTML."""
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for line in (page_text or "").splitlines():
+        if line.strip():
+            current.append(line.strip())
+        elif current:
+            paragraphs.append(_clean(" ".join(current)))
+            current = []
+    if current:
+        paragraphs.append(_clean(" ".join(current)))
+    return paragraphs
+
+
+def parse_pdf_document(data: bytes, base_url: str, profile: dict[str, Any] | None = None) -> ParsedDocument:
+    """Équivalent PDF de parse_document() : pas de DOM ni de liens sortants à découvrir, on
+    extrait le texte page par page (pdfplumber) et on le découpe en paragraphes, chacun
+    devenant un ContentBlock -- la même unité que le pipeline HTML produit déjà.
+
+    Les métriques de qualité (text_coverage, quality_score...) n'ont pas d'équivalent PDF
+    direct (pas de DOM à mesurer) : elles sont fixées à une valeur conventionnelle plutôt que
+    calculées, uniquement pour du diagnostic -- rien dans le pipeline ne les utilise comme
+    critère bloquant (voir ParsedDocument et parse_document ci-dessus).
+    """
+    import pdfplumber  # import paresseux : seul le chemin PDF du crawler en a besoin
+
+    profile = profile or DEFAULT_SITE_PROFILE
+    max_pages = int(profile.get("pdf", {}).get("max_pages", 30))
+    max_chars = int(profile.get("editorial_units", {}).get("max_chars", 3500))
+
+    blocks: list[ContentBlock] = []
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        metadata_title = _clean(str((pdf.metadata or {}).get("Title") or ""))
+        title = metadata_title or unquote(base_url.rsplit("/", 1)[-1])
+        for page_index, page in enumerate(pdf.pages[:max_pages]):
+            page_text = page.extract_text() or ""
+            for paragraph_index, paragraph in enumerate(_pdf_paragraphs(page_text)):
+                if len(paragraph) < 55:
+                    continue
+                heading = paragraph.splitlines()[0][:180] if paragraph else ""
+                blocks.append(ContentBlock(
+                    heading=heading,
+                    text=paragraph[:max_chars],
+                    path=f"pdf > page-{page_index + 1} > paragraph-{paragraph_index + 1}::segment",
+                ))
+
+    blocks = _dedupe_blocks(blocks)[:80]
+    page_type, page_score = classify_source(base_url, title, title=title, profile=profile)
+    structure = "|".join(f"{block.path}:{block.heading}" for block in blocks)
+    return ParsedDocument(
+        title=title,
+        links=[],
+        blocks=blocks,
+        structure_hash=hashlib.sha256(structure.encode("utf-8", "ignore")).hexdigest(),
+        extraction_method="pdf-text",
+        page_type=page_type,
+        page_score=page_score,
+        h1="",
+        text_coverage=1.0 if blocks else 0.0,
+        useful_coverage=1.0 if blocks else 0.0,
+        quality_score=60.0 if blocks else 0.0,
+        noise_ratio=0.0,
+        oversized_blocks=sum(1 for block in blocks if len(block.text) >= max_chars),
+    )
+
+
+# === Abstraction des clients IA : deux implémentations interchangeables (duck typing, pas
+# de classe abstraite) exposant .available(), .ask_json(system, prompt), .model,
+# .total_input_tokens/.total_output_tokens. get_ai_client() choisit laquelle instancier selon
+# la variable d'env AI_PROVIDER. Utilisées uniquement comme repli optionnel (jamais comme
+# source de vérité) par scrapers._ai_candidates et build_profile ci-dessous. ===
 class OllamaClient:
+    """Client pour un modèle local via Ollama (repli par défaut si AI_PROVIDER n'est pas
+    "anthropic") -- pas de coût, mais nécessite un daemon Ollama accessible."""
+
     # Class-level, not per-instance: /api/overview calls get_ai_client() on every request and
     # gets a brand-new OllamaClient() each time. Caching on the class lets all of those instances
     # share one 15s-TTL liveness probe instead of hitting the daemon (or timing out after 2.5s
@@ -1154,6 +1382,9 @@ class AnthropicClient:
 
 
 def get_ai_client() -> OllamaClient | AnthropicClient:
+    """Fabrique du client IA actif, basée sur la variable d'environnement AI_PROVIDER.
+    Une nouvelle instance à chaque appel (léger : pas de connexion ouverte au constructeur),
+    ce qui est pourquoi OllamaClient met son cache de disponibilité au niveau de la classe."""
     return AnthropicClient() if os.getenv("AI_PROVIDER", "").strip().lower() == "anthropic" else OllamaClient()
 
 
@@ -1183,6 +1414,17 @@ def build_profile(
     coverage: dict[str, dict[str, Any]] | None = None,
     site_profile: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str, float]:
+    """Construit le "profil" stocké dans site_profiles.profile_json à la fin d'un crawl
+    (voir scrapers.scrape_actors), à partir des pages effectivement visitées pour cet acteur.
+
+    Toujours déterministe d'abord (`preliminary`, construit uniquement à partir des liens et
+    chemins de blocs observés) ; l'IA n'est appelée qu'en option, seulement si
+    `site_profile["ollama_profile_assist"]` est activé, que l'acteur est "priority", et que le
+    client IA est disponible. Même alors, l'IA ne peut que RÉORDONNER/FILTRER des entry_points
+    et content_paths déjà présents dans l'inventaire déterministe (`allowed_urls`,
+    `block_paths` servent de liste blanche) -- elle ne peut jamais inventer une nouvelle URL
+    ou un nouveau chemin. Renvoie (profil, méthode utilisée, score de confiance).
+    """
     host = urlparse(actor["official_url"]).netloc
     site_profile = site_profile or DEFAULT_SITE_PROFILE
     links: list[dict[str, Any]] = []
@@ -1260,6 +1502,9 @@ def build_profile(
 
 
 def block_payload(block: ContentBlock) -> dict[str, str]:
+    """Sérialise un ContentBlock en dict JSON-compatible -- utilisé pour le stocker
+    (actor_sources.blocks_json), l'envoyer à l'IA (scrapers._ai_candidates), ou l'exposer
+    dans diagnose_document."""
     return {
         "heading": block.heading,
         "h1": block.h1,
@@ -1274,5 +1519,8 @@ def block_payload(block: ContentBlock) -> dict[str, str]:
 
 
 def profile_json(profile: dict[str, Any]) -> tuple[str, str]:
+    """Sérialise un profil (dict) en JSON stable (clés triées, donc la même donnée produit
+    toujours le même texte) et renvoie (texte JSON, empreinte SHA-256) -- stockés dans
+    site_profiles.profile_json/profile_hash pour détecter si le profil a changé entre 2 crawls."""
     encoded = json.dumps(profile, ensure_ascii=False, sort_keys=True)
     return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()

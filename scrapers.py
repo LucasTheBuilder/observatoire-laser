@@ -1,5 +1,30 @@
+"""Moteur de collecte : crawl des sites acteurs, extraction de "faits marché", et collecte
+de publications scientifiques. C'est le plus gros fichier du projet ; il se lit en 6 blocs :
+
+1. HTTP poli (robots.txt, throttle par host, retries) : _fetch() et ses helpers.
+2. Lexiques métier (MARKETS, COMPONENTS, OPERATIONS, PROCESS_TECHNOLOGIES, MATERIALS,
+   PERFORMANCE_TERMS, LASER_RULES, MATURITY_RULES...) : des dictionnaires de règles de
+   correspondance texte -> libellé canonique, qui remplacent un vrai NLP par une approche
+   déterministe et auditable (chaque libellé retenu est traçable à un terme précis du texte).
+3. Moteur de correspondance générique sur ces lexiques (_match_label, _rule_match_terms,
+   _laser_match, _detect_maturity...) et de validation de "relation" entre marché/composant/
+   opération dans un même passage de texte (_relation_evidence) pour éviter de recombiner à
+   tort des informations qui viennent de deux endroits différents de la page.
+4. Extraction des candidats à partir des blocs de contenu d'une page déjà parsée par
+   hybrid.parse_document : _candidate() (fait marché complet), _offer_candidates() (capacité/
+   offre concurrente), _ai_candidates() (repli IA conservateur avec file de relecture pour le
+   vocabulaire inconnu).
+5. Le crawler lui-même : scrape_actors() explore chaque site acteur avec une file de priorité
+   (heap) qui favorise dynamiquement les types de page pas encore couverts (voir
+   site_profiles.coverage_targets), et enregistre chaque page visitée dans actor_sources.
+6. Les deux autres collectes : scrape_market() (relit les pages déjà crawlées et en extrait
+   des faits, écrits en base via _upsert_market_candidate/_upsert_offer_candidate) et
+   scrape_technology() (interroge l'API Crossref pour des publications récentes).
+"""
+
 from __future__ import annotations
 
+import gzip
 import hashlib
 import heapq
 import itertools
@@ -13,6 +38,7 @@ from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from urllib import robotparser
 from urllib.parse import urlparse
+from xml.etree import ElementTree
 
 import httpx
 
@@ -38,8 +64,10 @@ from hybrid import (
     canonical_url,
     classify_source,
     get_ai_client,
+    is_pdf_response,
     normalize_page_type,
     parse_document,
+    parse_pdf_document,
     profile_json,
 )
 from site_profiles import SITE_OVERRIDES, crawl_budget, get_site_profile, seed_urls
@@ -61,6 +89,7 @@ CRAWL_MAX_RETRIES = int(os.getenv("CRAWL_MAX_RETRIES", "2"))
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 ROBOTS_CACHE_TTL_SECONDS = 6 * 3600
 
+# === Bloc 1/6 : HTTP poli (robots.txt, throttle par host, retries) ===
 _robots_cache: dict[str, tuple[float, "robotparser.RobotFileParser | None"]] = {}
 _last_request_at: dict[str, float] = {}
 
@@ -86,6 +115,7 @@ def _robots_parser(client: httpx.Client, origin: str) -> "robotparser.RobotFileP
 
 
 def _robots_allowed(client: httpx.Client, url: str) -> bool:
+    """True si robots.txt (mis en cache par _robots_parser) autorise notre user-agent à visiter cette URL."""
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
         return True
@@ -137,6 +167,94 @@ def _fetch(client: httpx.Client, url: str) -> httpx.Response:
         response.raise_for_status()
         return response
 
+
+_SITEMAP_TAG = "loc"
+
+
+def _sitemap_locations(client: httpx.Client, origin: str) -> list[str]:
+    """URLs de sitemap à essayer pour ce site : celles déclarées via `Sitemap:` dans
+    robots.txt (déjà téléchargé/mis en cache par _robots_parser -- RobotFileParser expose ces
+    directives via .site_maps()), sinon l'emplacement conventionnel /sitemap.xml."""
+    parser = _robots_parser(client, origin)
+    locations: list[str] = []
+    if parser is not None:
+        try:
+            locations = [str(item) for item in (parser.site_maps() or [])]
+        except Exception:
+            locations = []
+    return locations or [f"{origin}/sitemap.xml"]
+
+
+def _parse_sitemap_xml(content: bytes) -> tuple[list[str], list[str]]:
+    """Parse un document sitemap (urlset ou sitemapindex, transparently gzippé ou non) et
+    renvoie (urls de page, urls de sous-sitemaps) -- l'appelant décide s'il faut redescendre
+    dans les sous-sitemaps (voir _discover_sitemap_urls)."""
+    if content[:2] == b"\x1f\x8b":
+        try:
+            content = gzip.decompress(content)
+        except Exception:
+            return [], []
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError:
+        return [], []
+    locs = [
+        (element.text or "").strip()
+        for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1] == _SITEMAP_TAG and (element.text or "").strip()
+    ]
+    is_index = root.tag.rsplit("}", 1)[-1] == "sitemapindex"
+    return ([], locs) if is_index else (locs, [])
+
+
+def _discover_sitemap_urls(client: httpx.Client, official_url: str, profile: dict) -> list[str]:
+    """Explore robots.txt puis le(s) sitemap(s) du site (en suivant les sitemap_index
+    imbriqués, dans une limite de fichiers et d'URLs -- voir profile["sitemap"]) et renvoie la
+    liste des URLs de page découvertes sur le même domaine que l'acteur.
+
+    C'est l'amélioration décrite dans l'audit : au lieu de compter uniquement sur les liens
+    trouvés en explorant les pages une à une (profondeur 2-3, budget de quelques pages),
+    on lit la liste exhaustive que le site publie lui-même pour les moteurs de recherche.
+    La priorisation reste inchangée : ces URLs ne font qu'entrer dans la même file
+    "coverage-first" que les liens découverts normalement (voir scrape_actors).
+    """
+    cfg = profile.get("sitemap", {})
+    if not cfg.get("enabled", True):
+        return []
+    parsed = urlparse(official_url)
+    if not parsed.scheme or not parsed.netloc:
+        return []
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    base_host = parsed.netloc.lower().removeprefix("www.")
+    max_sitemaps = int(cfg.get("max_sitemaps", 15))
+    max_urls = int(cfg.get("max_urls", 800))
+
+    queue = list(dict.fromkeys(_sitemap_locations(client, origin)))
+    seen: set[str] = set()
+    page_urls: list[str] = []
+    fetched = 0
+    while queue and fetched < max_sitemaps and len(page_urls) < max_urls:
+        sitemap_url = queue.pop(0)
+        key = canonical_url(sitemap_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        if urlparse(sitemap_url).netloc.lower().removeprefix("www.") != base_host:
+            continue
+        try:
+            response = _fetch(client, sitemap_url)
+            locs, children = _parse_sitemap_xml(response.content)
+        except Exception:
+            continue
+        fetched += 1
+        for loc in locs:
+            if urlparse(loc).netloc.lower().removeprefix("www.") == base_host:
+                page_urls.append(loc)
+        queue.extend(child for child in children if canonical_url(child) not in seen)
+    return page_urls[:max_urls]
+
+
+# Requêtes bibliographiques envoyées à l'API Crossref par scrape_technology(), une par ligne.
 TECHNOLOGY_QUERIES = (
     "femtosecond laser micromachining",
     "ultrafast laser processing manufacturing",
@@ -146,6 +264,17 @@ TECHNOLOGY_QUERIES = (
     "femtosecond laser semiconductor processing",
 )
 
+# === Bloc 2/6 : lexiques métier (dictionnaires de règles texte -> libellé canonique) ===
+# Chaque lexique associe un libellé "propre" (ex: "Médical") à une règle (LexiconRule) qui
+# décrit comment le reconnaître dans un texte brut :
+#   - any_of: le libellé matche si AU MOINS UN des termes est présent
+#   - all_of: le libellé matche seulement si TOUS les termes sont présents
+#   - regex: motif regex alternatif (utile pour un sigle comme "SLE", "TGV"...)
+#   - requires_any: garde-fou -- même si any_of/regex matche, le fait ne compte que si un des
+#     mots de ce groupe est AUSSI présent (évite les faux positifs sur un sigle trop court)
+#   - exclude: annule le match si un de ces termes est présent
+# Voir _rule_match_terms() pour l'implémentation exacte de ces clés, et _match_label_details()
+# pour comment on choisit le meilleur libellé quand plusieurs règles matchent à la fois.
 # A lexicon rule maps a few well-known keys (any_of/all_of/regex/requires_any/exclude) to
 # tuples of terms/patterns. Annotating the lexicons below lets mypy check every call site
 # that takes a lexicon (_rule_match_terms, _match_label, _match_all_labels, ...) instead of
@@ -153,6 +282,9 @@ TECHNOLOGY_QUERIES = (
 LexiconRule = dict[str, tuple[str, ...]]
 Lexicon = dict[str, LexiconRule]
 
+# Vocabulaire laser : sert de "garde d'entrée" (_laser_match) -- une page/bloc doit contenir
+# au moins un de ces termes pour être considéré comme pertinent au domaine (ultra-rapide/
+# femtoseconde), avant même de chercher un marché/composant/opération.
 LASER_RULES: Lexicon = {
     "femtosecond": {"any_of": ("femtosecond", "femtoseconde")},
     "fs laser": {"regex": (r"\bfs[ -]?laser\b",)},
@@ -163,6 +295,8 @@ LASER_RULES: Lexicon = {
     "Ultrakurzpulslaser": {"any_of": ("ultrakurzpulslaser", "ultrakurzpuls laser")},
 }
 
+# Marchés/secteurs applicatifs finaux (une des 3 dimensions "core" d'un fait marché, avec
+# COMPONENTS et OPERATIONS -- voir _candidate()).
 MARKETS: Lexicon = {
     "Médical": {"any_of": ("medical", "medtech", "surgical", "healthcare", "biomedical")},
     "Batteries": {"any_of": ("battery", "batteries", "energy storage", "battery cell")},
@@ -182,6 +316,7 @@ MARKETS: Lexicon = {
     "Hydrogène": {"any_of": ("hydrogen", "hydrogène", "electrolyzer", "electrolyser", "électrolyseur", "fuel cell", "pile à combustible", "power-to-gas")},
 }
 
+# Composants/objets physiques fabriqués ou traités (2e dimension "core").
 COMPONENTS: Lexicon = {
     "Composants en Nitinol pour cathéters": {"all_of": ("nitinol", "catheter")},
     "Lentilles intraoculaires (IOL)": {"any_of": ("intraocular lens", "intraocular lenses"), "regex": (r"\biol\b",)},
@@ -220,6 +355,9 @@ COMPONENTS: Lexicon = {
     "Moules et outillage de précision": {"any_of": ("mold", "molds", "moule", "moules", "injection mold", "tooling insert", "outillage de précision")},
 }
 
+# Opérations/procédés laser appliqués au composant (3e dimension "core" -- un fait marché
+# valide requiert un market + un component + une operation trouvés dans la même "fenêtre" de
+# texte, voir _relation_evidence).
 OPERATIONS: Lexicon = {
     "Micro-usinage": {"any_of": ("micromachining", "micro-machining", "micro machining")},
     "Microdécoupe": {"any_of": ("microcutting", "micro-cutting", "laser cutting", "microdécoupe", "découpe laser", "tube cutting")},
@@ -243,6 +381,9 @@ OPERATIONS: Lexicon = {
     "Micro-assemblage": {"any_of": ("micro-assembly", "micro assembly", "micro-assemblage", "die attach", "wire bonding", "flip-chip")},
 }
 
+# Dimensions "complémentaires" (facultatives, jamais requises pour valider un fait) : elles
+# enrichissent le fait mais ne peuvent jamais se substituer à market/component/operation
+# (voir _candidate(): "Complementary dimensions ... can never substitute a core one").
 PROCESS_TECHNOLOGIES: Lexicon = {
     "SLE": {"any_of": ("selective laser etching", "selective laser-induced etching", "selective laser induced etching", "laser assisted etching", "laser-assisted etching", "isle process"), "regex": (r"\bSLE\b",), "requires_any": ("laser", "etching", "glass", "silica")},
     "LIPSS": {"any_of": ("laser-induced periodic surface structures", "laser induced periodic surface structures"), "regex": (r"\bLIPSS\b",)},
@@ -271,6 +412,7 @@ MATERIALS: Lexicon = {
     "Magnésium": {"any_of": ("magnesium", "magnésium")},
 }
 
+# Bénéfices/besoins client mis en avant (productivité, propreté du procédé...).
 PERFORMANCE_TERMS: Lexicon = {
     "Productivité": {"any_of": ("high throughput", "throughput", "high-speed processing", "high speed processing", "large-area processing", "large area processing", "débit", "cadence de production", "cadence élevée")},
     "Parallélisation": {"any_of": ("parallel processing", "multibeam", "multi-beam", "beam splitting", "diffractive optical element", "polygon scanner")},
@@ -357,6 +499,11 @@ MARKET_SYNONYM_CLUSTERS = (
     frozenset({"Optique", "Photonique"}),
 )
 
+# Niveaux de maturité industrielle, du plus mature (Production) au moins mature (R&D) --
+# _detect_maturity() parcourt cette liste DANS L'ORDRE et retourne le premier stage dont un
+# terme apparaît dans le texte, donc l'ordre encode une priorité : si un texte mentionne à la
+# fois "prototype" et "production en série", "Production" gagne. Chaque règle associe un
+# stage précis à un bucket large ("existing" = déjà en production, "radar" = pas encore).
 MATURITY_RULES = (
     ("Production", "existing", ("mass production", "volume production", "series production", "serial production", "production industrielle", "production en série", "production line", "manufacturing line", "high-volume manufacturing", "commercial production", "customer production", "contract manufacturing", "job shop", "manufacturing services", "small series", "small batch", "lohnfertigung", "auftragsfertigung", "lavorazione conto terzi", "conto terzi", "fabricación por contrato", "fabricacion por contrato", "subcontratación", "subcontratacion")),
     ("Industrialisation", "radar", ("industrialization", "industrialisation", "industrial implementation", "industrialiser", "to industrialize", "scale-up", "scaling-up", "production-ready", "manufacturing integration")),
@@ -386,6 +533,7 @@ INDUSTRIAL_TERMS = MATURITY_RULES[0][2]
 RADAR_TERMS = tuple(term for _, bucket, terms in MATURITY_RULES[1:] if bucket == "radar" for term in terms)
 
 
+# === Bloc 3/6 : moteur de correspondance générique sur les lexiques ci-dessus ===
 def _normalize_text(text: str) -> str:
     """Normalize Unicode, punctuation variants and whitespace without losing semantics."""
     text = unicodedata.normalize("NFKC", text or "")
@@ -435,6 +583,8 @@ MORPHOLOGY_VARIANTS = {
 
 @lru_cache(maxsize=1024)
 def _term_variants(term: str) -> tuple[str, ...]:
+    """Renvoie le terme original + ses variantes de pluriel/langue connues (MORPHOLOGY_VARIANTS),
+    pour qu'un lexique n'ait pas besoin de lister "stent" ET "stents" séparément."""
     norm = _normalize_text(term)
     variants = MORPHOLOGY_VARIANTS.get(norm, ())
     return tuple(dict.fromkeys((term, *variants)))
@@ -496,6 +646,7 @@ def _rule_match_terms(text: str, rule: LexiconRule) -> list[str]:
 
 
 def _rule_matches(text: str, rule: LexiconRule) -> bool:
+    """Version booléenne de _rule_match_terms, pour les appels qui n'ont pas besoin des termes trouvés."""
     return bool(_rule_match_terms(text, rule))
 
 
@@ -508,6 +659,8 @@ def _specificity_score(rule: LexiconRule, hits: list[str]) -> tuple[int, int, in
 
 
 def _match_label_details(text: str, lexicon: Lexicon) -> tuple[str | None, list[str]]:
+    """Cherche le MEILLEUR libellé (le plus spécifique, voir _specificity_score) qui matche
+    dans `text` pour un lexique donné, et renvoie (libellé, termes trouvés) ou (None, [])."""
     matches: list[tuple[tuple[int, int, int], str, list[str]]] = []
     for label, rule in lexicon.items():
         hits = _rule_match_terms(text, rule)
@@ -521,6 +674,7 @@ def _match_label_details(text: str, lexicon: Lexicon) -> tuple[str | None, list[
 
 
 def _match_label(text: str, lexicon: Lexicon) -> str | None:
+    """Comme _match_label_details, mais ne renvoie que le libellé (sans les termes trouvés)."""
     return _match_label_details(text, lexicon)[0]
 
 
@@ -543,6 +697,8 @@ def _matching_terms(text: str, lexicon: Lexicon) -> list[str]:
 
 
 def _laser_match(text: str) -> bool:
+    """Le "portail d'entrée" du domaine : vrai si `text` contient au moins un terme laser
+    ultra-rapide connu (voir LASER_RULES). Sans ce match, aucun candidat n'est jamais créé."""
     return any(_rule_matches(text, rule) for rule in LASER_RULES.values())
 
 
@@ -555,6 +711,8 @@ def _detect_maturity(text: str) -> tuple[str, str]:
 
 
 def _quote(text: str, terms: tuple[str, ...] | list[str]) -> str:
+    """Choisit, parmi les phrases de `text`, celle qui contient le plus de `terms` (la citation
+    la plus "preuve") pour l'afficher dans l'UI comme justification du fait extrait."""
     text = (text or "").strip()
     if not text:
         return ""
@@ -566,6 +724,11 @@ def _quote(text: str, terms: tuple[str, ...] | list[str]) -> str:
     return (ranked[0] if ranked else text)[:700]
 
 
+# === Bloc 4/6 : extraction des candidats à partir des blocs de contenu d'une page ===
+# Un ContentBlock (défini dans hybrid.py) est un fragment de contenu déjà extrait/nettoyé
+# d'une page HTML (un paragraphe, une carte produit, une section...), avec sa hiérarchie de
+# titres (h1/h2/h3/heading) et un identifiant de "groupe éditorial" (editorial_group_id) qui
+# relie les blocs issus d'un même élément répété (ex: les blocs d'une même carte produit).
 def _context_for_block(title: str, blocks: list[ContentBlock], index: int) -> tuple[str, str]:
     """Return direct block text and strict local section context.
 
@@ -599,7 +762,11 @@ def _is_negated(text: str) -> bool:
 
 
 def _section_role(block: ContentBlock) -> str:
-    """Describe the local editorial zone without excluding it from market evidence."""
+    """Devine à quelle zone éditoriale appartient un bloc (publication/news/project/
+    application/service/content) d'après ses titres H2/H3, pour ajuster les règles de
+    propagation de contexte plus loin (une zone "publication"/"news"/"project" ne propage
+    jamais son marché/composant/opération aux blocs voisins -- voir _structured_neighbors).
+    Describe the local editorial zone without excluding it from market evidence."""
     heading = _normalize_text(" ".join(filter(None, (block.h2, block.h3, block.heading))))
     roles = (
         ("publication", ("publication", "publications", "paper", "papers", "reference", "references", "bibliography", "bibliographie")),
@@ -615,6 +782,9 @@ def _section_role(block: ContentBlock) -> str:
 
 
 def _core_labels(text: str) -> tuple[str | None, str | None, str | None]:
+    """Les 3 dimensions "core" (marché, composant, opération) détectées dans `text`, chacune
+    au sens du MEILLEUR match seulement (voir _match_label_details) -- contrairement à
+    _core_label_sets qui renvoie TOUS les matches possibles."""
     return (
         _match_label_details(text, MARKETS)[0],
         _match_label_details(text, COMPONENTS)[0],
@@ -628,6 +798,9 @@ def _editorial_group_key(block: ContentBlock) -> str:
 
 
 def _is_isolated_editorial_item(block: ContentBlock) -> bool:
+    """Vrai si ce bloc fait partie d'une carte répétée ou d'un item de liste (voir hybrid.py) :
+    ces blocs ne partagent jamais leur contexte avec leurs voisins, pour éviter qu'une info
+    d'une carte "fuite" vers la carte suivante (ex : deux applications différentes côte à côte)."""
     marker = (block.path or "").partition("::")[2].casefold()
     return marker in {"repeated", "linked-item"}
 
@@ -716,6 +889,9 @@ def _is_multi_context_block(block: ContentBlock) -> bool:
     return len(markets) > 1 or len(components) > 1
 
 def _inc_diagnostic(diagnostics: dict[str, int] | None, key: str, amount: int = 1) -> None:
+    """Incrémente un compteur de télémétrie (ex: "relation_too_weak", "no_laser_context") si un
+    dict `diagnostics` est fourni -- sert à comprendre après coup pourquoi tel bloc a/n'a pas
+    produit de fait (voir le résumé stocké dans collection_runs.diagnostics_json)."""
     if diagnostics is not None:
         diagnostics[key] = int(diagnostics.get(key, 0)) + amount
 
@@ -834,7 +1010,19 @@ def _is_noise_block(block: ContentBlock) -> bool:
 def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode: str = "block-rules",
                context_text: str | None = None, structured_blocks: list[ContentBlock] | None = None,
                diagnostics: dict[str, int] | None = None) -> dict | None:
-    """Create a market application only when the three core dimensions form a local relation."""
+    """Tente de transformer UN bloc de contenu en UN "fait marché" complet (ou renvoie None).
+
+    Pipeline, dans l'ordre (chaque étape peut arrêter net et renvoyer None) :
+    1. Rejeter les blocs de bruit (menu, mentions légales...) -- _is_noise_block.
+    2. Exiger un contexte laser ultra-rapide (_laser_match) : sans ça, pas de fait du tout.
+    3. Valider une "relation" locale entre marché/composant/opération (_relation_evidence) --
+       c'est ici que la fenêtre de texte réellement retenue comme preuve est choisie.
+    4. Re-résoudre market/component/operation à partir de CETTE fenêtre validée (pas de la page
+       entière), pour que le fait ne mélange jamais des infos venues d'ailleurs sur la page.
+    5. Ajouter les dimensions complémentaires (procédé, matériau, performance...) et calculer
+       la maturité industrielle, puis un score de confiance.
+    6. Construire le dict candidat final avec sa citation et ses clés de déduplication.
+    Create a market application only when the three core dimensions form a local relation."""
     _inc_diagnostic(diagnostics, "blocks_examined")
     if _is_noise_block(block):
         _inc_diagnostic(diagnostics, "noise_block")
@@ -963,7 +1151,12 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
 
 def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock, *, page_type: str,
                       mode: str = "block-rules") -> list[dict]:
-    """Extract competitor offer/capability facts without inventing a market or component."""
+    """Comme _candidate(), mais pour une "offre" (capacité/prestation) : plus permissif, car il
+    n'exige PAS un triplet marché/composant/opération complet -- une simple opération ou un
+    procédé laser détecté sur une page de type service/capability/technology/product suffit à
+    produire une offre (voir db.offers). Peut renvoyer plusieurs offres pour un même bloc si
+    plusieurs opérations/procédés y sont mentionnés.
+    Extract competitor offer/capability facts without inventing a market or component."""
     if _is_noise_block(block):
         return []
     direct = " ".join(filter(None, (block.heading, block.text, block.media_context)))
@@ -1037,6 +1230,8 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
 
 
 def _validate_ai_value(value: object, allowed: set[str]) -> str:
+    """Garde-fou anti-hallucination : ne garde la valeur renvoyée par l'IA que si elle est
+    EXACTEMENT (chaîne pour chaîne) l'un des libellés autorisés, sinon "Non identifié"."""
     text = str(value or "").strip()
     if not text or text == "Non identifié":
         return "Non identifié"
@@ -1044,6 +1239,8 @@ def _validate_ai_value(value: object, allowed: set[str]) -> str:
 
 
 def _ai_mode_label(ollama: AiClient) -> str:
+    """Étiquette de traçabilité stockée dans `mode` (ex: "anthropic:claude-...") pour savoir
+    quel modèle/fournisseur a produit un candidat donné."""
     provider = "anthropic" if isinstance(ollama, AnthropicClient) else "ollama"
     return f"{provider}:{ollama.model}"
 
@@ -1288,7 +1485,11 @@ def _dedupe_candidates(candidates: list[dict]) -> list[dict]:
     return list(best.values())
 
 
+# === Bloc 5/6 : le crawler (scrape_actors) et sa file de priorité "coverage-first" ===
 def adaptive_decision(priority: bool, document_count: int, block_count: int, errors: int, source_count: int) -> tuple[str, bool]:
+    """Décide, après un crawl, si cet acteur doit passer en stratégie "adaptive" (IA de secours
+    activée lors de la prochaine collecte marché) : soit parce qu'il est marqué priority, soit
+    parce que le crawl a été manifestement anormal (0 document, 0 bloc, ou trop d'erreurs)."""
     anomaly = document_count == 0 or block_count == 0 or errors >= max(1, source_count // 2)
     return ("adaptive" if priority or anomaly else "generic", anomaly)
 
@@ -1299,6 +1500,11 @@ def _push_crawl_item(
     counter: itertools.count,
     item: dict,
 ) -> None:
+    """Ajoute une URL candidate à la file de crawl (un tas/heap min, donc on stocke le score
+    négatif pour que le plus haut score sorte en premier). Ignore l'ajout si une URL équivalente
+    est déjà en file avec un score égal ou meilleur (queued_scores), pour éviter les doublons ;
+    `counter` sert uniquement de départage stable quand deux items ont exactement le même
+    (score, profondeur), car un tuple ne peut pas comparer deux dicts entre eux."""
     key = canonical_url(item["url"])
     score = int(item.get("score", 0))
     if score <= queued_scores.get(key, -1):
@@ -1308,6 +1514,10 @@ def _push_crawl_item(
 
 
 def _effective_crawl_score(item: dict, visited_by_type: dict[str, int], profile: dict) -> int:
+    """Score "effectif" d'un item de la file : son score de base, PLUS un gros bonus temporaire
+    (`coverage_boost`) si son type de page (item["page_type"]) n'a pas encore atteint son
+    objectif de couverture (profile["coverage_targets"]) -- c'est ce qui fait que le crawler
+    va chercher en priorité au moins une page de chaque famille stratégique avant d'approfondir."""
     base = int(item.get("score", 0))
     page_type = str(item.get("page_type") or "other")
     target = int(profile.get("coverage_targets", {}).get(page_type, 0))
@@ -1349,6 +1559,9 @@ def _pop_crawl_item(
 
 
 def _source_coverage(actor_id: int, profile: dict | None = None) -> dict[str, dict[str, int | str]]:
+    """État de couverture par type de page pour un acteur (combien découvertes, combien
+    "prêtes" i.e. répondant en 2xx sans être ambiguës), utilisé à la fois pour piloter le
+    crawl (voir _effective_crawl_score) et pour l'afficher dans /api/profiles."""
     coverage: dict[str, dict[str, int | str]] = {}
     with connect(ACTORS_DB) as db:
         rows = db.execute(
@@ -1372,7 +1585,18 @@ def _source_coverage(actor_id: int, profile: dict | None = None) -> dict[str, di
 
 
 def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
-    """Deterministic dynamic crawler with per-site profiles and a priority queue."""
+    """Crawle chaque acteur actif l'un après l'autre. Pour chaque acteur :
+    1. Charge son profil de crawl (site_profiles.get_site_profile) et son budget de pages.
+    2. Insère ses seed_paths comme sources de départ (en plus de sa page d'accueil).
+    3. Construit une file de priorité (heap) à partir de toutes ses sources déjà connues.
+    4. Boucle : dépile le meilleur item (_pop_crawl_item, qui applique le boost de couverture),
+       télécharge la page (_fetch), la parse (hybrid.parse_document), enregistre son empreinte
+       de contenu (pour détecter les changements d'une collecte à l'autre), et pousse ses liens
+       sortants dans la file pour continuer l'exploration -- jusqu'à épuiser le budget de pages
+       ou la file elle-même.
+    5. À la fin, construit un profil de site (hybrid.build_profile), décide de la stratégie
+       adaptive/generic (adaptive_decision) et écrit tout l'état dans site_profiles.
+    Deterministic dynamic crawler with per-site profiles and a priority queue."""
     with connect(ACTORS_DB) as db:
         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
         actors = db.execute("SELECT * FROM actors WHERE active=1 ORDER BY priority DESC,name").fetchall()
@@ -1403,6 +1627,20 @@ def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
                                page_type=CASE WHEN actor_sources.page_type IS NULL OR actor_sources.page_type='' THEN excluded.page_type ELSE actor_sources.page_type END""",
                         (actor["id"], seed_url, source_kind, seed_type, seed_score),
                     )
+                for sitemap_page_url in _discover_sitemap_urls(client, actor["official_url"], site_profile):
+                    sitemap_type, sitemap_score = classify_source(sitemap_page_url, profile=site_profile)
+                    if sitemap_type == "ignore":
+                        continue
+                    existed = db.execute("SELECT id FROM actor_sources WHERE url=?", (sitemap_page_url,)).fetchone()
+                    db.execute(
+                        """INSERT INTO actor_sources(actor_id,url,source_kind,page_type,source_score,discovery_depth,discovery_reason)
+                           VALUES(?,?,'sitemap',?,?,0,'sitemap')
+                           ON CONFLICT(url) DO UPDATE SET
+                               source_score=MAX(actor_sources.source_score,excluded.source_score),
+                               page_type=CASE WHEN actor_sources.page_type IS NULL OR actor_sources.page_type='' THEN excluded.page_type ELSE actor_sources.page_type END""",
+                        (actor["id"], sitemap_page_url, sitemap_type, sitemap_score),
+                    )
+                    discovered += int(existed is None)
                 initial_sources = db.execute(
                     "SELECT * FROM actor_sources WHERE actor_id=? AND active=1",
                     (actor["id"],),
@@ -1462,7 +1700,10 @@ def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
                 try:
                     response = _fetch(client, url)
                     resolved_url = str(response.url)
-                    document = parse_document(response.text, resolved_url, profile=site_profile)
+                    if is_pdf_response(response.headers.get("content-type", ""), resolved_url):
+                        document = parse_pdf_document(response.content, resolved_url, profile=site_profile)
+                    else:
+                        document = parse_document(response.text, resolved_url, profile=site_profile)
                     documents.append((resolved_url, document))
                     digest = hashlib.sha256("|".join(block.fingerprint for block in document.blocks).encode()).hexdigest()
 
@@ -1599,7 +1840,11 @@ def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
         "crawler": "deterministic-coverage-first-v2",
     }
 
+# === Bloc 6/6 : scrape_market() et scrape_technology(), les deux autres collectes ===
 def _source_family(page_type: str | None) -> str:
+    """Regroupe les types de page détaillés (service/capability/product, application/
+    case_study/market...) en quelques "familles" plus larges, utilisées pour équilibrer la
+    sélection de pages à analyser (voir _select_market_sources)."""
     page_type = normalize_page_type(page_type)
     if page_type in {"service", "capability", "product"}:
         return "service_capability"
@@ -1615,7 +1860,14 @@ def _source_family(page_type: str | None) -> str:
 
 
 def _select_market_sources(max_pages: int = 120) -> list[dict]:
-    """Coverage-balanced source selection: first one page/family/actor, then deepen priority actors."""
+    """Choisit, parmi TOUTES les pages déjà crawlées (actor_sources), lesquelles analyser pour
+    en extraire des faits marché -- en 3 passes successives (voir `take()` plus bas) :
+    1. Une page par (acteur, famille) pour tous les acteurs -- garantit une couverture large
+       avant qu'un acteur "riche" ne monopolise le budget max_pages.
+    2. Pour les acteurs priority ou avec un SITE_OVERRIDE dédié, approfondit selon leurs
+       market_source_quotas (ex: jusqu'à 6 pages "application_market" pour FEMTOprint).
+    3. Remplit le budget restant par score décroissant, toutes familles confondues.
+    Coverage-balanced source selection: first one page/family/actor, then deepen priority actors."""
     with connect(ACTORS_DB) as db:
         rows = [dict(row) for row in db.execute(
             """SELECT a.id AS actor_id,a.name,a.priority,a.official_url,p.strategy,
@@ -1696,7 +1948,11 @@ def _select_market_sources(max_pages: int = 120) -> list[dict]:
 
 
 def _stored_blocks(source: dict, *, max_age_hours: int = 24) -> list[ContentBlock] | None:
-    """Reuse blocks produced by the actor crawl when they are recent and structurally valid."""
+    """Si la page a déjà été crawlée récemment (actor_sources.blocks_json, < max_age_hours),
+    reconstruit ses ContentBlock depuis le JSON stocké plutôt que de re-télécharger/re-parser
+    la page -- évite une requête HTTP redondante pendant scrape_market() quand scrape_actors()
+    vient de tourner juste avant. Renvoie None si rien d'utilisable n'est stocké.
+    Reuse blocks produced by the actor crawl when they are recent and structurally valid."""
     raw = source.get("blocks_json")
     checked_at = source.get("last_checked_at")
     if not raw or not checked_at:
@@ -1847,6 +2103,9 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
 
 
 def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
+    """Même logique que _upsert_market_candidate mais pour la table `offers` (clé fact_key
+    directe, sans distinction bucket/application_key puisqu'une offre n'a pas de maturité
+    "métier" à faire progresser). Renvoie (1 si nouvelle offre créée, 1 si nouvelle preuve créée)."""
     stamp = utc_now()
     row = db.execute("SELECT id,field_confidence FROM offers WHERE fact_key=?", (candidate["fact_key"],)).fetchone()
     fact_added = 0
@@ -1924,6 +2183,17 @@ def scrape_market(max_pages: int = 120, actor_names: list[str] | None = None) ->
     ``actor_names``, when given, restricts the run to those actors (matched against
     ``source["name"]``) -- meant for trying a prompt/provider change on 2-3 actors before
     opening it to the full roster, without touching the selection/coverage logic itself.
+
+    Déroulé, pour chaque page sélectionnée (_select_market_sources) :
+    1. Récupère ses blocs de contenu -- depuis le cache (_stored_blocks) si récent, sinon en
+       re-téléchargeant la page.
+    2. Pour chaque bloc : tente _candidate() (fait marché déterministe) et _offer_candidates()
+       (capacité concurrente déterministe).
+    3. Si le profil de l'acteur est "adaptive", complète avec _ai_candidates() (repli IA).
+    4. Déduplique les candidats de la page (_dedupe_candidates), puis les écrit en base via
+       _upsert_market_candidate / _upsert_offer_candidate / _upsert_vocabulary_candidate.
+    Les compteurs (`diagnostics`) et jetons IA consommés sont journalisés dans collection_runs
+    pour pouvoir diagnostiquer une collecte a posteriori sans avoir à la relancer.
     """
     _load_custom_lexicon_entries()
     with connect(MARKET_DB) as db:
