@@ -9,7 +9,14 @@
 .spinner{display:inline-block;width:12px;height:12px;margin-right:8px;border:2px solid #a9babd;border-top-color:var(--teal);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
 @keyframes spin{to{transform:rotate(360deg)}}
 
-dialog{position:fixed;inset:0 0 0 auto;margin:0;width:min(460px,92vw);height:100vh;max-height:100vh;padding:0;border:0;border-radius:0;box-shadow:-24px 0 60px #0c212b30;display:flex;flex-direction:column;transition:transform .28s cubic-bezier(.2,.7,.3,1),width .28s cubic-bezier(.2,.7,.3,1),overlay .28s allow-discrete,display .28s allow-discrete}
+/* transition is transform-only on purpose: width and display/overlay used to be animated too,
+   but "width" has no @starting-style entry (only transform does below) and "display"/"overlay"
+   depend on transition-behavior:allow-discrete's handoff between display:none and the open
+   state -- that combination could get stuck mid-transition with the panel rendered at 0 width,
+   visible but unclickable (the close button included). The slide-in/out effect only needs
+   transform; width switches (wide vs. not) always happen while the dialog is closed anyway, so
+   animating it added no visible effect, only risk. */
+dialog{position:fixed;inset:0 0 0 auto;margin:0;width:min(460px,92vw);height:100vh;max-height:100vh;padding:0;border:0;border-radius:0;box-shadow:-24px 0 60px #0c212b30;display:flex;flex-direction:column;transition:transform .28s cubic-bezier(.2,.7,.3,1)}
 /* The actor fiche (identity, positioning, capacités, marchés, différenciateurs, preuves,
    administration) outgrew the citation-popup width this dialog was designed for. */
 dialog.wide{width:min(920px,90vw)}

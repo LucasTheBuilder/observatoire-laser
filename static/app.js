@@ -20,6 +20,11 @@ const state = {
 
 const content = document.querySelector("#content");
 const dialog = document.querySelector("#proof-dialog");
+// Calling showModal() on an already-open <dialog> is spec-invalid (throws InvalidStateError) --
+// a real path here is clicking a second proof pill before closing the first. Guarding once at
+// the source protects every call site instead of repeating the check at each of them.
+const nativeDialogShowModal = dialog.showModal.bind(dialog);
+dialog.showModal = () => { if (!dialog.open) nativeDialogShowModal(); };
 
 async function api(path, options) {
   const response = await fetch(path, options);
