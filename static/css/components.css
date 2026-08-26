@@ -9,17 +9,23 @@
 .spinner{display:inline-block;width:12px;height:12px;margin-right:8px;border:2px solid #a9babd;border-top-color:var(--teal);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
 @keyframes spin{to{transform:rotate(360deg)}}
 
-/* transition is transform-only on purpose: width and display/overlay used to be animated too,
-   but "width" has no @starting-style entry (only transform does below) and "display"/"overlay"
-   depend on transition-behavior:allow-discrete's handoff between display:none and the open
-   state -- that combination could get stuck mid-transition with the panel rendered at 0 width,
-   visible but unclickable (the close button included). The slide-in/out effect only needs
-   transform; width switches (wide vs. not) always happen while the dialog is closed anyway, so
-   animating it added no visible effect, only risk. */
-dialog{position:fixed;inset:0 0 0 auto;margin:0;width:min(460px,92vw);height:100vh;max-height:100vh;padding:0;border:0;border-radius:0;box-shadow:-24px 0 60px #0c212b30;display:flex;flex-direction:column;transition:transform .28s cubic-bezier(.2,.7,.3,1)}
+/* A bare "dialog{display:flex}" (no [open] qualifier) is an author-origin rule, and author
+   styles always beat the browser's own dialog:not([open]){display:none} regardless of
+   specificity -- so it silently broke the native "closed by default" behavior, rendering the
+   panel fixed and visible at the right edge (empty, but there) on every page load, before any
+   proof/detail action ever ran. Everything that makes it a positioned panel now lives under
+   dialog[open] instead, so a closed dialog reverts to the browser's real display:none.
+   transition stays on the bare selector (always present) so the open transition still animates;
+   width and display/overlay are deliberately NOT transitioned -- "width" has no @starting-style
+   entry (only transform does, below) and display/overlay's allow-discrete handoff between
+   display:none and open could get stuck mid-transition at 0 width, visible but unclickable
+   (close button included). The slide-in/out only needs transform; width only ever changes
+   (wide vs. not) while already closed, so animating it added no visible effect, only risk. */
+dialog{border:0;padding:0;margin:0;transition:transform .28s cubic-bezier(.2,.7,.3,1)}
+dialog[open]{position:fixed;inset:0 0 0 auto;width:min(460px,92vw);height:100vh;max-height:100vh;border-radius:0;box-shadow:-24px 0 60px #0c212b30;display:flex;flex-direction:column}
 /* The actor fiche (identity, positioning, capacités, marchés, différenciateurs, preuves,
    administration) outgrew the citation-popup width this dialog was designed for. */
-dialog.wide{width:min(920px,90vw)}
+dialog[open].wide{width:min(920px,90vw)}
 dialog::backdrop{background:#102734a8;transition:background-color .28s allow-discrete}
 @starting-style{dialog[open]{transform:translateX(100%)}dialog[open]::backdrop{background-color:transparent}}
 #proof-content{flex:1;min-height:0;overflow-y:auto;padding:56px 28px 32px}
