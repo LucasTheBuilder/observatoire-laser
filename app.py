@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -116,6 +116,21 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Observatoire Laser", version="3.4.1-optimized", lifespan=lifespan)
+
+
+# StaticFiles ships an ETag/Last-Modified but no Cache-Control, which leaves browsers free to use
+# heuristic caching -- serving a stale app.js/CSS after a redeploy without even asking the server
+# first (this bit a real fix: the dialog-close CSS change wasn't visible until a hard refresh).
+# no-cache (not no-store) still lets the browser cache locally, it just forces a conditional
+# revalidation on every load, so a change is picked up on the very next request instead of never.
+@app.middleware("http")
+async def no_cache_static_assets(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
