@@ -48,6 +48,7 @@ from db import (
     MARKET_DB,
     TECH_DB,
     application_key,
+    classify_evidence_type,
     connect,
     language_from_url,
     market_fact_key,
@@ -1222,15 +1223,6 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
     # must collapse to one row instead of showing as duplicate sources.
     source_fingerprint = hashlib.sha256(f"{group}|{url}|{quote}".encode()).hexdigest()
     fact_fingerprint = hashlib.sha256(group.encode()).hexdigest()
-    stage_parts = [maturity]
-    if process:
-        stage_parts.append(f"Procédé: {process}")
-    if architecture:
-        stage_parts.append(f"Architecture: {architecture}")
-    if material:
-        stage_parts.append(f"Matériau: {material}")
-    if performance:
-        stage_parts.append(f"Performance: {performance}")
 
     result = {
         "kind": "market_application",
@@ -1246,13 +1238,17 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
         "maturity": maturity,
         "maturity_class": maturity_class,
         "fact_status": "partial" if is_partial else "validated",
-        "stage": " | ".join(stage_parts)[:240],
+        # Chantier 4 : industrial_stage n'est plus qu'une étiquette de maturité -- process/
+        # architecture/material/performance vivent déjà dans leurs propres colonnes (voir
+        # db._migrate_industrial_stage_concatenation pour le nettoyage des lignes existantes).
+        "stage": maturity[:240],
         "url": url,
         "title": title,
         "quote": quote,
         # Chantier 4 : toujours vrai ici -- `quote` est systématiquement extrait de
         # relation_text/section, un sous-texte réel du bloc, jamais reformulé.
         "is_verbatim": True,
+        "evidence_type": classify_evidence_type(quote),
         "source_date": source_date,
         "group": group,
         "fact_key": group,
@@ -1341,6 +1337,7 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
             "title": title,
             "quote": quote,
             "is_verbatim": True,
+            "evidence_type": classify_evidence_type(quote),
             "source_date": source_date,
             "fact_key": fact_key,
             "fingerprint": hashlib.sha256(fact_key.encode()).hexdigest(),
@@ -1569,13 +1566,10 @@ def _ai_candidates(
         assert market is not None and component is not None and operation is not None  # guaranteed by all(resolved.values()) above
         fact_key = market_fact_key(actor_name, bucket, market, component, operation)
         app_key = application_key(actor_name, market, component, operation)
-        extras = []
-        for key, label in (("process_technology", "Procédé"), ("application_architecture", "Architecture"), ("material", "Matériau"), ("performance", "Performance")):
-            if fields[key] != "Non identifié":
-                extras.append(f"{label}: {fields[key]}")
+        # Chantier 4 : ne plus rattacher process/architecture/material/performance au texte de
+        # stage -- ils vivent déjà dans leurs propres colonnes (voir le dict candidat plus bas).
+        # `stage` reste la description de maturité proposée par le modèle telle quelle.
         stage = str(fact.get("stage", maturity if maturity != "Non identifié" else "Maturité à confirmer")).strip()
-        if extras:
-            stage = f"{stage} | {' | '.join(extras)}"
 
         candidates.append({
             "kind": "market_application",
@@ -1598,6 +1592,7 @@ def _ai_candidates(
             # Chantier 4 : toujours vrai -- `quote` doit déjà être une sous-chaîne exacte du
             # bloc (voir "ai_fact_quote_not_verbatim" plus haut), jamais une reformulation.
             "is_verbatim": True,
+            "evidence_type": classify_evidence_type(quote),
             "source_date": source_date,
             "group": fact_key,
             "fact_key": fact_key,
@@ -2160,6 +2155,10 @@ def _ensure_market_fact_status_column(db) -> None:
         db.execute("ALTER TABLE evidence ADD COLUMN application_key TEXT")
     if "is_verbatim" not in columns:
         db.execute("ALTER TABLE evidence ADD COLUMN is_verbatim INTEGER NOT NULL DEFAULT 1")
+    if "architecture" not in columns:
+        db.execute("ALTER TABLE evidence ADD COLUMN architecture TEXT")
+    if "evidence_type" not in columns:
+        db.execute("ALTER TABLE evidence ADD COLUMN evidence_type TEXT")
     source_columns = {row[1] for row in db.execute("PRAGMA table_info(evidence_sources)").fetchall()}
     if "is_verbatim" not in source_columns:
         db.execute("ALTER TABLE evidence_sources ADD COLUMN is_verbatim INTEGER NOT NULL DEFAULT 1")
@@ -2215,14 +2214,16 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
         if float(candidate.get("confidence", 0)) > old_confidence:
             db.execute(
                 """UPDATE evidence SET industrial_stage=?,source_url=?,source_title=?,source_date=COALESCE(?,source_date),
-                          quote=?,is_verbatim=?,field_confidence=?,
+                          quote=?,is_verbatim=?,evidence_type=COALESCE(?,evidence_type),field_confidence=?,
                           laser_process=COALESCE(?,laser_process),material=COALESCE(?,material),performance=COALESCE(?,performance),
+                          architecture=COALESCE(?,architecture),
                           maturity_level=COALESCE(?,maturity_level),relation_strength=COALESCE(?,relation_strength),source_role=COALESCE(?,source_role),
                           bucket=?,fact_status=?,review_status=?,updated_at=? WHERE id=?""",
                 (
                     candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
-                    candidate["quote"], int(candidate.get("is_verbatim", True)), candidate["confidence"],
-                    candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("maturity"),
+                    candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), candidate["confidence"],
+                    candidate.get("process"), candidate.get("material"), candidate.get("performance"),
+                    candidate.get("architecture"), candidate.get("maturity"),
                     candidate.get("relation_strength"), candidate.get("source_role"), effective_bucket,
                     candidate.get("fact_status", "validated"), "accepted" if candidate.get("fact_status") == "validated" else "review",
                     stamp, evidence_id,
@@ -2234,17 +2235,17 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
         evidence_id = db.execute(
             """INSERT INTO evidence(
                    actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,source_date,
-                   quote,is_verbatim,source_group,
+                   quote,is_verbatim,evidence_type,source_group,
                    fingerprint,fact_key,application_key,evidence_kind,language,review_status,created_at,updated_at,block_heading,block_path,
-                   extraction_mode,field_confidence,laser_process,material,performance,maturity_level,relation_strength,relation_evidence,source_role,fact_status
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   extraction_mode,field_confidence,laser_process,material,performance,architecture,maturity_level,relation_strength,relation_evidence,source_role,fact_status
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 candidate["actor"], candidate["bucket"], candidate["market"], candidate["component"], candidate["operation"],
                 candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
-                candidate["quote"], int(candidate.get("is_verbatim", True)), fact_key,
+                candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), fact_key,
                 candidate["fingerprint"], fact_key, app_key, language_from_url(candidate["url"]), review_status, stamp, stamp,
                 candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
-                candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("maturity"),
+                candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("architecture"), candidate.get("maturity"),
                 candidate.get("relation_strength"), candidate.get("relation_evidence"), candidate.get("source_role"), fact_status,
             ),
         ).lastrowid
@@ -2288,11 +2289,11 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
         if float(candidate.get("confidence", 0)) > float(row["field_confidence"] or 0):
             db.execute(
                 """UPDATE offers SET industrial_stage=?,source_url=?,source_title=?,source_date=COALESCE(?,source_date),
-                          quote=?,is_verbatim=?,field_confidence=?,
+                          quote=?,is_verbatim=?,evidence_type=COALESCE(?,evidence_type),field_confidence=?,
                           material=COALESCE(?,material),performance=COALESCE(?,performance),updated_at=? WHERE id=?""",
                 (
                     candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
-                    candidate["quote"], int(candidate.get("is_verbatim", True)), candidate["confidence"],
+                    candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), candidate["confidence"],
                     candidate.get("material"), candidate.get("performance"), stamp, offer_id,
                 ),
             )
@@ -2300,13 +2301,13 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
         offer_id = db.execute(
             """INSERT INTO offers(
                    actor_name,offer_type,capability,operation,laser_process,material,performance,industrial_stage,page_type,
-                   source_url,source_title,source_date,quote,is_verbatim,fact_key,fingerprint,review_status,field_confidence,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
+                   source_url,source_title,source_date,quote,is_verbatim,evidence_type,fact_key,fingerprint,review_status,field_confidence,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
             (
                 candidate["actor"], candidate["offer_type"], candidate["capability"], candidate.get("operation"), candidate.get("process"),
                 candidate.get("material"), candidate.get("performance"), candidate["stage"], candidate["page_type"], candidate["url"],
                 candidate["title"], candidate.get("source_date"), candidate["quote"], int(candidate.get("is_verbatim", True)),
-                candidate["fact_key"], candidate["fingerprint"], candidate["confidence"], stamp, stamp,
+                candidate.get("evidence_type"), candidate["fact_key"], candidate["fingerprint"], candidate["confidence"], stamp, stamp,
             ),
         ).lastrowid
         fact_added = 1

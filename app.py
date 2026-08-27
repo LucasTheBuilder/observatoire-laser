@@ -737,7 +737,7 @@ def proofs(bucket: str, market: str, component: str, operation: str):
         """SELECT e.actor_name,e.industrial_stage,es.source_url,es.source_title,es.source_date,es.quote,es.is_verbatim,
                   es.language,es.block_heading,es.extraction_mode,es.field_confidence,
                   es.relation_strength,es.relation_evidence,es.source_role,
-                  e.laser_process,e.material,e.performance,e.maturity_level
+                  e.laser_process,e.material,e.performance,e.maturity_level,e.architecture,e.evidence_type
            FROM evidence e
            JOIN evidence_sources es ON es.evidence_id=e.id
            WHERE e.bucket=? AND e.market=? AND e.component=? AND e.operation=?
@@ -817,7 +817,7 @@ def market_review(status: Literal["pending", "accepted", "rejected"] = "pending"
     return rows(
         MARKET_DB,
         f"""SELECT id,actor_name,fact_status,bucket,market,component,operation,industrial_stage,
-                  source_url,source_title,source_date,quote,is_verbatim,relation_strength,relation_evidence,field_confidence,
+                  source_url,source_title,source_date,quote,is_verbatim,evidence_type,relation_strength,relation_evidence,field_confidence,
                   extraction_mode,created_at,last_seen_at
            FROM evidence
            WHERE {clause}
@@ -854,12 +854,12 @@ def offers():
     return rows(
         MARKET_DB,
         """SELECT o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,
-                  o.industrial_stage,o.page_type,COUNT(os.id) AS proofs,
+                  o.industrial_stage,o.evidence_type,o.page_type,COUNT(os.id) AS proofs,
                   COUNT(DISTINCT COALESCE(os.language,'unknown')) AS languages
            FROM offers o
            LEFT JOIN offer_sources os ON os.offer_id=o.id
            WHERE o.review_status='accepted'
-           GROUP BY o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.industrial_stage,o.page_type
+           GROUP BY o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.industrial_stage,o.evidence_type,o.page_type
            ORDER BY o.actor_name,o.offer_type,o.capability""",
     )
 
@@ -868,7 +868,7 @@ def offers():
 def offer_proofs(offer_id: int):
     return rows(
         MARKET_DB,
-        """SELECT o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.industrial_stage,
+        """SELECT o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.industrial_stage,o.evidence_type,
                   os.source_url,os.source_title,os.source_date,os.quote,os.is_verbatim,os.language,os.block_heading,os.extraction_mode,os.field_confidence
            FROM offers o JOIN offer_sources os ON os.offer_id=o.id
            WHERE o.id=? AND o.review_status='accepted'

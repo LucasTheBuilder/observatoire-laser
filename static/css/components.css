@@ -32,8 +32,15 @@ dialog::backdrop{background:#102734a8;transition:background-color .28s allow-dis
 .dialog-close{position:absolute;right:17px;top:14px;border:0;background:transparent;color:#64717a;font-size:26px;z-index:1}
 .dialog-operation{color:var(--teal);font-weight:700}
 .proof{padding:18px 0;border-top:1px solid var(--line)}
-.proof>div{display:flex;justify-content:space-between;gap:15px}
+.proof>div{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.proof>div>strong{margin-right:auto}
 .proof span{color:var(--muted);font-size:11px}
+/* Namespaced et-* modifiers (not the raw evidence_type value) so this never collides with the
+   unrelated top-level ".proof" article class already used by the surrounding proof card. */
+.evidence-type-badge{flex:0 0 auto;padding:3px 8px;border-radius:10px;font-size:10px;font-weight:850;letter-spacing:.03em}
+.evidence-type-badge.et-proof{background:#e9f5f3;color:var(--teal)}
+.evidence-type-badge.et-claim{background:#eef2f1;color:#5c7986}
+.evidence-type-badge.et-third_party{background:#f0ecfa;color:#6b4fb3}
 .proof blockquote{margin:14px 0;color:#4d5a63;font:italic 14px/1.6 Georgia,serif}
 .proof a{color:var(--teal);font-size:12px;text-decoration:none}
 

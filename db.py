@@ -225,6 +225,76 @@ def offer_fact_key(actor: str, offer_type: str, capability: str, operation: str 
     return "|".join(_slug(value) for value in (actor, offer_type, capability, operation or "", laser_process or ""))
 
 
+# Chantier 4 (fiabiliser la preuve) : distinguer une déclaration marketing ("nous savons faire
+# X") d'une preuve concrète ("300 trous/seconde sur titane", "certifié ISO 13485") -- l'audit
+# note qu'aujourd'hui les deux sont stockés à égalité. Volontairement étroit et déterministe
+# (comme le reste du pipeline d'extraction) : seuls deux signaux vérifiables sans ambiguïté
+# comptent comme "proof" -- un chiffre accompagné d'une unité technique, ou un code de
+# certification reconnu. Une "référence client nommée" (le troisième signal cité par l'audit)
+# est délibérément omise : la détecter fiablement demanderait une vraie reconnaissance d'entité
+# nommée, pas une regex, et un faux positif ferait passer une déclaration pour une preuve.
+# 'third_party' n'est jamais renvoyé ici -- evidence/offers ne contiennent aujourd'hui que du
+# contenu scrapé sur le site de l'acteur lui-même (premier parti par construction) ; la valeur
+# reste réservée pour une source qui ne l'est pas (voir cordis.py/press.py, d'autres tables).
+_PROOF_NUMBER_RE = re.compile(
+    r"\d[\d.,]*\s*(%|°c|µm|nm|mm|cm|kg|g|w|kw|mw|hz|khz|mhz|ghz|fs|ps|ns|mj|µj|j/cm2|"
+    r"pieces?|pi[eè]ces?|parts?|units?|unit[ée]s?|holes?|trous?|per second|/s|ppm|rpm)\b",
+    re.IGNORECASE,
+)
+_CERTIFICATION_RE = re.compile(r"\b(iso\s?\d{4,5}|as\s?9100|iatf\s?16949|itar|nadcap)\b", re.IGNORECASE)
+
+
+def classify_evidence_type(quote: str | None) -> str:
+    """'proof' si la citation porte un chiffre technique mesuré ou une certification reconnue,
+    sinon 'claim' (déclaration non chiffrée). Voir le commentaire ci-dessus pour la portée."""
+    text = quote or ""
+    if _CERTIFICATION_RE.search(text) or _PROOF_NUMBER_RE.search(text):
+        return "proof"
+    return "claim"
+
+
+_ARCHITECTURE_STAGE_RE = re.compile(r"Architecture:\s*([^|]+)")
+
+
+def _backfill_evidence_type(db: sqlite3.Connection) -> None:
+    """One-time (idempotent) backfill of evidence_type for rows written before this column
+    existed -- only ever touches NULL rows, so it costs nothing on a database already caught up."""
+    for table in ("evidence", "offers"):
+        pending = db.execute(f"SELECT id,quote FROM {table} WHERE evidence_type IS NULL").fetchall()
+        for row in pending:
+            db.execute(f"UPDATE {table} SET evidence_type=? WHERE id=?", (classify_evidence_type(row["quote"]), row["id"]))
+
+
+def _migrate_industrial_stage_concatenation(db: sqlite3.Connection) -> None:
+    """One-time (idempotent) cleanup for the audit's "industrial_stage is a denormalized
+    display field" finding: it used to concatenate maturity + process/architecture/material/
+    performance into one string (see the old scrapers._candidate ``stage_parts``), even though
+    those dimensions already have their own columns -- except architecture, which had none
+    (added alongside evidence_type above). Extracts "Architecture: X" into that new column,
+    then trims industrial_stage down to just its leading maturity segment. Only rows that still
+    contain "|" are touched, so this is a no-op once the whole table has been cleaned; new rows
+    never concatenate in the first place (see scrapers._candidate/_ai_candidates).
+    """
+    pending = db.execute("SELECT id,industrial_stage FROM evidence WHERE industrial_stage LIKE '%|%'").fetchall()
+    for row in pending:
+        raw = row["industrial_stage"] or ""
+        leading = raw.split("|", 1)[0].strip()
+        match = _ARCHITECTURE_STAGE_RE.search(raw)
+        if match:
+            db.execute(
+                "UPDATE evidence SET industrial_stage=?,architecture=COALESCE(architecture,?) WHERE id=?",
+                (leading, match.group(1).strip(), row["id"]),
+            )
+        else:
+            db.execute("UPDATE evidence SET industrial_stage=? WHERE id=?", (leading, row["id"]))
+    # offers never carried an "Architecture:" segment (that dimension doesn't apply to offers),
+    # so just trim to the leading maturity segment on the rare row that still looks concatenated.
+    pending_offers = db.execute("SELECT id,industrial_stage FROM offers WHERE industrial_stage LIKE '%|%'").fetchall()
+    for row in pending_offers:
+        leading = (row["industrial_stage"] or "").split("|", 1)[0].strip()
+        db.execute("UPDATE offers SET industrial_stage=? WHERE id=?", (leading, row["id"]))
+
+
 def technology_signal_key(axis: str, project_name: str | None) -> str:
     """Identity for one science->industry readiness signal: the axis plus the named project it
     was observed in (not the source URL), so the same axis/project pair merges new citations
@@ -697,6 +767,12 @@ def init_databases() -> None:
             "fact_status": "TEXT NOT NULL DEFAULT 'review'",
             "last_seen_at": "TEXT",
             "application_key": "TEXT",
+            # Chantier 4 : architecture avait sa propre dimension dans _candidate() depuis le
+            # début, mais jamais de colonne -- seulement du texte concaténé dans
+            # industrial_stage ("Architecture: TGV"), donc invisible dès qu'on arrêterait cette
+            # concaténation. evidence_type : voir classify_evidence_type ci-dessus.
+            "architecture": "TEXT",
+            "evidence_type": "TEXT",
         })
         db.executescript(
             """
@@ -817,6 +893,7 @@ def init_databases() -> None:
             # hybrid._extract_published_date), à défaut la date d'observation.
             "is_verbatim": "INTEGER NOT NULL DEFAULT 1",
             "source_date": "TEXT",
+            "evidence_type": "TEXT",
         })
         _add_columns(db, "evidence_sources", {
             "relation_strength": "TEXT",
@@ -856,6 +933,8 @@ def init_databases() -> None:
         db.execute("UPDATE evidence SET is_verbatim=0 WHERE extraction_mode IS NULL")
         db.execute("UPDATE evidence_sources SET is_verbatim=0 WHERE extraction_mode IS NULL")
         db.execute("UPDATE offer_sources SET is_verbatim=0 WHERE extraction_mode IS NULL")
+        _migrate_industrial_stage_concatenation(db)
+        _backfill_evidence_type(db)
         # Both migrations run on every startup, not just once: they are idempotent (a row that
         # already carries its canonical key is only re-derived, never duplicated) and this keeps
         # the evidence table self-healing if a row is ever inserted or edited outside the normal
