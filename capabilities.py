@@ -66,8 +66,13 @@ _BATCH_RANGE_RE = re.compile(
 # Un chiffre en µm/mm seul est ambigu (une page produit regorge de dimensions sans rapport) --
 # ces deux champs n'acceptent une valeur que si un mot de ce contexte apparaît dans le MÊME bloc
 # éditorial (même granularité que scrapers._candidate, pas une fenêtre de caractères arbitraire).
+# Deliberately NOT "resolution"/"résolution" alone: found in production data attached to a
+# stage motor's positioning resolution ("0.005 µm resolution" on an XY servo stage), a
+# completely different spec from the laser's achievable machining feature size -- the number
+# was real, but the label would have been wrong. Only phrases specific to the optical/machining
+# feature itself are kept.
 _FEATURE_SIZE_CONTEXT = (
-    "feature size", "spot size", "résolution", "resolution", "minimum feature",
+    "feature size", "spot size", "minimum feature",
     "line width", "taille de spot", "largeur de trait", "beam waist",
 )
 _PART_SIZE_CONTEXT = (
