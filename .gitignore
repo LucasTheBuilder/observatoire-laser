@@ -9,5 +9,6 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 data/backups/
+data/cordis_cache/
 
 .env

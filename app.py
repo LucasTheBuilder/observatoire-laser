@@ -1,3 +1,26 @@
+"""API web de l'Observatoire Laser (FastAPI) : sert le front (static/) et expose les données
+collectées par db.py/scrapers.py sous forme d'endpoints JSON.
+
+Ce fichier ne contient pas de logique de crawl ni d'extraction : il lit/écrit les 3 bases
+SQLite via db.py, et déclenche les collectes (scrapers.py) en tâche de fond via un petit
+système de "jobs" maison (voir `jobs`, `executor`, `_run_job`) plutôt que d'utiliser Celery/
+RQ -- une seule collecte à la fois suffit pour ce volume de données.
+
+Organisation des endpoints (tous préfixés /api/, sauf `/` qui sert index.html) :
+- /api/overview, /api/monthly, /api/pipeline-funnel : tableaux de bord / synthèses calculées
+  à la volée à partir des données déjà en base (aucun appel réseau).
+- /api/actors* : CRUD sur les acteurs suivis, leurs relations, leurs faits/événements sourcés.
+- /api/network : graphe acteurs <-> marchés <-> technologies pour la carte réseau du front.
+- /api/profiles* : état des profils de crawl adaptatifs (site_profiles).
+- /api/market, /api/market/proofs : faits marché validés et leurs preuves sourcées.
+- /api/market/review* : file de relecture humaine des faits partiels/proposés par l'IA
+  (fact_status='partial'/'review') avant qu'ils ne rejoignent /api/market.
+- /api/vocabulary-candidates* : file de relecture humaine des libellés proposés par l'IA.
+- /api/offers*, /api/technology-signals* : offres concurrentes et signaux technologiques.
+- /api/scrape/{kind} : démarre/consulte une collecte (actors/market/technology/cordis/
+  firmographics/monthly).
+"""
+
 from __future__ import annotations
 
 from dotenv import load_dotenv
@@ -24,10 +47,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from cordis import collect_cordis
 from db import (
     ACTORS_DB,
     MARKET_DB,
     TECH_DB,
+    accept_evidence_review,
     accept_vocabulary_candidate,
     add_actor_relation,
     backup_all_databases,
@@ -36,11 +61,13 @@ from db import (
     delete_actor,
     find_actor_duplicate_candidates,
     init_databases,
+    reject_evidence_review,
     reject_vocabulary_candidate,
     rows,
     set_actor_active,
     update_actor_classification,
 )
+from firmographics import collect_french_registry
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 
@@ -74,22 +101,35 @@ def _coverage_level(source_count: int) -> str:
         return "partial"
     return "weak"
 
+# Un seul worker : les collectes (scrape_actors/scrape_market/scrape_technology) sont
+# longues et intensives en réseau/IA, donc on les sérialise plutôt que de les paralléliser --
+# voir start_scrape() qui refuse de lancer un job si un autre tourne déjà (HTTP 409).
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="observatoire")
 job_lock = threading.Lock()
+# État en mémoire (pas en base) de chaque type de collecte : idle -> running -> completed/failed.
+# Remis à zéro à chaque redémarrage de l'appli ; l'historique persistant, lui, vit dans la
+# table collection_runs de chaque base (voir db.py).
 jobs: dict[str, dict[str, Any]] = {
     "actors": {"status": "idle", "result": None, "error": None},
     "market": {"status": "idle", "result": None, "error": None},
     "technology": {"status": "idle", "result": None, "error": None},
+    "cordis": {"status": "idle", "result": None, "error": None},
+    "firmographics": {"status": "idle", "result": None, "error": None},
     "monthly": {"status": "idle", "result": None, "error": None},
 }
 
 
 def _collect_monthly() -> dict:
-    """Run the three collectors in dependency order for a one-click monthly refresh."""
+    """Run the five collectors in dependency order for a one-click monthly refresh."""
+    # Ordre important : market/technology s'appuient sur les pages découvertes par actors.
+    # cordis/firmographics n'ont aucune dépendance sur le crawl web (sources indépendantes,
+    # chantiers 3 et 5).
     return {
         "actors": scrape_actors(),
         "market": scrape_market(),
         "technology": scrape_technology(),
+        "cordis": collect_cordis(),
+        "firmographics": collect_french_registry(),
     }
 
 
@@ -97,6 +137,8 @@ collectors: dict[str, Callable[[], dict]] = {
     "actors": scrape_actors,
     "market": scrape_market,
     "technology": scrape_technology,
+    "cordis": collect_cordis,
+    "firmographics": collect_french_registry,
     "monthly": _collect_monthly,
 }
 
@@ -108,6 +150,9 @@ def _jobs_snapshot() -> dict[str, dict]:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # S'exécute une fois au démarrage de l'appli (avant le premier appel API) : crée/met à
+    # jour le schéma des 3 bases. `yield` cède la main pendant toute la durée de vie du
+    # serveur ; le code après `finally` s'exécute à l'arrêt (Ctrl+C, redéploiement...).
     init_databases()
     try:
         yield
@@ -123,6 +168,9 @@ app = FastAPI(title="Observatoire Laser", version="3.4.1-optimized", lifespan=li
 # first (this bit a real fix: the dialog-close CSS change wasn't visible until a hard refresh).
 # no-cache (not no-store) still lets the browser cache locally, it just forces a conditional
 # revalidation on every load, so a change is picked up on the very next request instead of never.
+# Middleware FastAPI : s'exécute pour CHAQUE requête HTTP (pas seulement /static/), d'où le
+# `call_next(request)` qui laisse d'abord la requête suivre son chemin normal, puis le filtre
+# `if request.url.path.startswith("/static/")` pour ne modifier l'en-tête que sur les assets.
 @app.middleware("http")
 async def no_cache_static_assets(request: Request, call_next):
     response = await call_next(request)
@@ -146,6 +194,9 @@ def _last_run(path: Path) -> dict | None:
 
 @app.get("/api/overview")
 def overview():
+    """Chiffres-clés affichés en haut du tableau de bord : nb d'acteurs, faits marché existants/
+    radar, documents techno, état des profils de crawl adaptatifs, jobs en cours... Tout est
+    recalculé à la volée depuis les 3 bases à chaque appel (aucun cache), donc toujours à jour."""
     ai_client = get_ai_client()
 
     # One connection per database instead of opening a new SQLite connection for every scalar.
@@ -346,14 +397,20 @@ def monthly(days: int = Query(default=30, ge=1, le=365)):
 
 @app.get("/api/actors")
 def list_actors():
+    """Liste complète des acteurs avec, pour chacun, des champs calculés (jamais stockés
+    directement) à partir de market.db : `evidence_confirmed` (un C1/C2 a-t-il vraiment une
+    preuve en base ?), `value_chain_stages` (à quels stades de maturité il a été observé),
+    `coverage_level` (bonne/partielle/faible, selon le nb de sources distinctes)."""
     # Includes paused (active=0) actors too, with the flag exposed, so the UI can offer a
     # "reactivate" action -- filtering them out here would make pausing one-way.
     actors = rows(ACTORS_DB, """SELECT a.id,a.name,a.country,a.role,a.priority,a.official_url,a.active,a.last_scraped_at,a.last_status,
                                a.competitive_class,a.is_reference,a.parent_actor,a.entity_note,a.review_status,
                                a.actor_type,a.business_models,a.strategic_summary,a.last_verified_at,
                                p.strategy,p.status AS profile_status,p.confidence,p.generated_by,p.needs_reprofile,p.health_score,
-                               p.coverage_ready,p.coverage_discovered
+                               p.coverage_ready,p.coverage_discovered,
+                               f.founded_year,f.legal_form_code,f.headcount_bracket_code,f.registry_name,f.source_url AS registry_source_url
                                FROM actors a LEFT JOIN site_profiles p ON p.actor_id=a.id
+                               LEFT JOIN actor_profile f ON f.actor_id=a.id
                                ORDER BY a.active DESC,a.priority DESC,a.name""")
     # Evidence gate (P0): a C1/C2 label is only an analyst's classification until our own
     # crawl has actually produced a capability/service claim for that actor -- otherwise it
@@ -438,6 +495,8 @@ def pipeline_funnel():
     }
 
 
+# --- CRUD acteurs : les modèles Pydantic ci-dessous valident/documentent automatiquement le
+# corps JSON attendu par FastAPI pour chaque endpoint POST/PATCH. ---
 class ActorCreateRequest(BaseModel):
     name: str
     country: str
@@ -559,7 +618,13 @@ def network():
         """SELECT DISTINCT actor_name,market FROM evidence
            WHERE market IS NOT NULL AND market<>'' AND review_status='accepted' AND bucket IN ('existing','radar')""",
     )
-    tech_links = rows(MARKET_DB, "SELECT DISTINCT actor_name,operation FROM offers WHERE operation IS NOT NULL AND operation<>''")
+    # Bug fix: every other offers query in this file (list_actors, pipeline_funnel, /api/offers,
+    # /api/offers/{id}/proofs) gates on review_status='accepted'; this one didn't, so an offer
+    # stuck in 'review'/'rejected' would still show up as a technology edge on the network map.
+    tech_links = rows(
+        MARKET_DB,
+        "SELECT DISTINCT actor_name,operation FROM offers WHERE operation IS NOT NULL AND operation<>'' AND review_status='accepted'",
+    )
 
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, str]] = []
@@ -604,6 +669,8 @@ def network():
 
 @app.get("/api/profiles")
 def profiles():
+    """État de crawl de chaque acteur actif : stratégie retenue, confiance, dernière erreur,
+    et couverture par type de page stratégique (décodée depuis coverage_json)."""
     profiles = rows(ACTORS_DB, """SELECT a.id,a.name,a.priority,a.official_url,p.strategy,p.status,p.confidence,
                                p.generated_by,p.version,p.last_profiled_at,p.needs_reprofile,p.failure_count,
                                p.health_score,p.last_error,p.coverage_json,p.coverage_ready,p.coverage_discovered
@@ -627,6 +694,10 @@ def profile_sources(actor_id: int):
 
 @app.get("/api/market")
 def market():
+    """Vue "matrice marché" du front : chaque ligne evidence validée devient un item, classé
+    en `existing` (production industrielle) ou `radar` (R&D/pilote/prototype) selon son bucket.
+    Le détail de chaque preuve (citation, URL...) est chargé séparément via /api/market/proofs
+    quand l'utilisateur clique sur une cellule -- pour ne pas tout renvoyer d'un coup."""
     grouped = rows(
         MARKET_DB,
         """SELECT e.id,e.bucket,e.market,e.component,e.operation,e.actor_name,
@@ -650,9 +721,11 @@ def market():
 
 @app.get("/api/market/proofs")
 def proofs(bucket: str, market: str, component: str, operation: str):
+    """Toutes les preuves sourcées (citations + URL) derrière une cellule de la matrice marché,
+    identifiée par sa combinaison bucket/marché/composant/opération (voir /api/market)."""
     return rows(
         MARKET_DB,
-        """SELECT e.actor_name,e.industrial_stage,es.source_url,es.source_title,es.source_date,es.quote,
+        """SELECT e.actor_name,e.industrial_stage,es.source_url,es.source_title,es.source_date,es.quote,es.is_verbatim,
                   es.language,es.block_heading,es.extraction_mode,es.field_confidence,
                   es.relation_strength,es.relation_evidence,es.source_role,
                   e.laser_process,e.material,e.performance,e.maturity_level
@@ -696,6 +769,9 @@ class VocabularyDecisionRequest(BaseModel):
 
 @app.post("/api/vocabulary-candidates/{candidate_id}/accept")
 def accept_vocabulary(candidate_id: int, payload: VocabularyDecisionRequest):
+    """Valide le libellé proposé par l'IA pour une dimension (market/component/operation) :
+    il devient utilisable dès la prochaine collecte, sans toucher au code (voir
+    scrapers._load_custom_lexicon_entries)."""
     try:
         return accept_vocabulary_candidate(candidate_id, payload.dimension)
     except ValueError as exc:
@@ -704,6 +780,7 @@ def accept_vocabulary(candidate_id: int, payload: VocabularyDecisionRequest):
 
 @app.post("/api/vocabulary-candidates/{candidate_id}/reject")
 def reject_vocabulary(candidate_id: int):
+    """Marque le candidat comme relu-et-refusé, sans créer d'entrée de lexique."""
     try:
         reject_vocabulary_candidate(candidate_id)
     except ValueError as exc:
@@ -711,8 +788,60 @@ def reject_vocabulary(candidate_id: int):
     return {"id": candidate_id, "status": "rejected"}
 
 
+@app.get("/api/market/review")
+def market_review(status: Literal["pending", "accepted", "rejected"] = "pending"):
+    """File de revue humaine pour les faits marché non encore validés (chantier 2 items 2 et
+    3) : ``fact_status='partial'`` (2 dimensions sur 3, la troisième non trouvée) ou
+    ``fact_status='review'`` (proposé par l'IA sur un bloc que le lexique déterministe avait
+    rejeté). Contrairement à la matrice /api/market, ces faits n'apparaissent nulle part
+    ailleurs dans l'app tant qu'ils ne sont pas explicitement acceptés ou rejetés ici.
+
+    ``status="pending"`` also excludes fact_status='validated' as a belt-and-suspenders check;
+    it must NOT be applied to "accepted", since accept_evidence_review() is exactly what flips
+    fact_status to 'validated' -- filtering it out there would make every accepted row
+    permanently invisible to this endpoint, including through its own "accepted" filter.
+    """
+    review_status = "accepted" if status == "accepted" else ("rejected" if status == "rejected" else "review")
+    clause = "evidence_kind='market_application' AND review_status=?"
+    if status == "pending":
+        clause += " AND fact_status!='validated'"
+    return rows(
+        MARKET_DB,
+        f"""SELECT id,actor_name,fact_status,bucket,market,component,operation,industrial_stage,
+                  source_url,source_title,source_date,quote,is_verbatim,relation_strength,relation_evidence,field_confidence,
+                  extraction_mode,created_at,last_seen_at
+           FROM evidence
+           WHERE {clause}
+           ORDER BY last_seen_at DESC""",
+        (review_status,),
+    )
+
+
+@app.post("/api/market/review/{evidence_id}/accept")
+def accept_market_review(evidence_id: int):
+    """Valide un fait partiel/proposé par l'IA : il rejoint la matrice marché (/api/market)
+    dès cet appel, avec fact_status='validated'."""
+    try:
+        return accept_evidence_review(evidence_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/market/review/{evidence_id}/reject")
+def reject_market_review(evidence_id: int):
+    """Marque le fait comme relu-et-refusé ; il garde son fact_status d'origine (traçabilité)
+    mais ne réapparaît plus dans la file de revue ni dans la matrice marché."""
+    try:
+        reject_evidence_review(evidence_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"id": evidence_id, "status": "rejected"}
+
+
 @app.get("/api/offers")
 def offers():
+    """Offres/capacités concurrentes validées (voir db.py: table `offers`), avec le nombre de
+    preuves et de langues distinctes qui les confirment."""
     return rows(
         MARKET_DB,
         """SELECT o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,
@@ -731,7 +860,7 @@ def offer_proofs(offer_id: int):
     return rows(
         MARKET_DB,
         """SELECT o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.industrial_stage,
-                  os.source_url,os.source_title,os.quote,os.language,os.block_heading,os.extraction_mode,os.field_confidence
+                  os.source_url,os.source_title,os.source_date,os.quote,os.is_verbatim,os.language,os.block_heading,os.extraction_mode,os.field_confidence
            FROM offers o JOIN offer_sources os ON os.offer_id=o.id
            WHERE o.id=? AND o.review_status='accepted'
            ORDER BY os.created_at DESC""",
@@ -776,6 +905,9 @@ def technology_signal_proofs(signal_id: int):
     return proofs
 
 
+# Cette fonction tourne dans le thread de fond de `executor` (pas dans le thread FastAPI qui
+# répond aux requêtes) : c'est elle qui appelle réellement scrape_actors/scrape_market/
+# scrape_technology, potentiellement pendant plusieurs minutes, sans bloquer l'API.
 def _run_job(kind: str) -> None:
     try:
         try:
@@ -791,7 +923,12 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "monthly"]):
+    """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
+
+    Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
+    l'avancement, puisque le job continue de tourner après la réponse de ce endpoint.
+    """
     with job_lock:
         if any(job["status"] == "running" for job in jobs.values()):
             raise HTTPException(status_code=409, detail="Une collecte est déjà en cours.")
@@ -801,11 +938,15 @@ def start_scrape(kind: Literal["actors", "market", "technology", "monthly"]):
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "monthly"]):
+    """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 
 
 if __name__ == "__main__":
+    # Lancement en local (hors Docker) : `python app.py`. init_databases() est appelé deux
+    # fois au total dans ce cas précis (ici, puis à nouveau par `lifespan` au démarrage
+    # d'uvicorn) -- sans conséquence puisque la fonction est idempotente.
     init_databases()
     threading.Timer(1.4, lambda: webbrowser.open("http://127.0.0.1:8765")).start()
     uvicorn.run(app, host="127.0.0.1", port=8765)

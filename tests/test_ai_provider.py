@@ -123,9 +123,13 @@ class AiCandidatesKnownLabelTests(unittest.TestCase):
         # duck-typed fake (like Ollama itself) falls into the "ollama" branch.
         self.assertEqual("ollama:fake-model", candidates[0]["mode"])
 
-    def test_known_label_rejected_when_not_independently_present_in_the_section(self):
-        # The AI's own wording resolves to known labels, but the block text doesn't actually
-        # support "Stents" independently -- the deterministic cross-check must still reject it.
+    def test_known_label_accepted_for_review_even_when_not_independently_confirmed(self):
+        # Chantier 2 item 3 (invert the AI gate): the AI's own wording resolves to known
+        # labels ("Stents"), but the block text doesn't actually support it independently via
+        # the deterministic local-section lexicon. Under the old gate this silently dropped the
+        # fact -- the audit's whole complaint (71 proposals -> 1 validated, because the AI could
+        # only ever agree with the rules, never surface something they missed). Now it's queued
+        # for human review instead: fact_status='review', never auto-published.
         block = ContentBlock(
             heading="Medical devices",
             h2="Medical",
@@ -138,6 +142,29 @@ class AiCandidatesKnownLabelTests(unittest.TestCase):
             "confidence": 0.9,
         }])
         candidates = _ai_candidates("Example", "https://example.test/medical", "Applications", [block], fake)
+        self.assertEqual(1, len(candidates))
+        self.assertEqual("market_application", candidates[0]["kind"])
+        self.assertEqual("review", candidates[0]["fact_status"])
+        self.assertEqual("Stents", candidates[0]["component"])
+
+    def test_excluded_blocks_never_reach_the_ai(self):
+        # Chantier 2 item 3: exclude_indices lets scrape_market() keep the AI focused on blocks
+        # the deterministic lexicon rejected this pass, instead of re-processing ground it
+        # already covered.
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            text="Femtosecond laser surface texturing of medical stents for production customers.",
+            path="main > article",
+        )
+        fake = FakeAiClient([{
+            "block_index": 0, "market": "Médical", "component": "Stents", "operation": "Texturation",
+            "quote": "Femtosecond laser surface texturing of medical stents for production customers.",
+            "confidence": 0.9,
+        }])
+        candidates = _ai_candidates(
+            "Example", "https://example.test/medical", "Applications", [block], fake, exclude_indices={0},
+        )
         self.assertEqual([], candidates)
 
 

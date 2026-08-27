@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 import db as dbmod
 import scrapers
 from db import connect, scalar
-from hybrid import ContentBlock, classify_source, parse_document
+from hybrid import ContentBlock, _pdf_metadata_date, classify_source, parse_document
 from scrapers import (
     APPLICATION_ARCHITECTURES,
     PROCESS_TECHNOLOGIES,
@@ -97,13 +97,21 @@ class HybridExtractionTests(unittest.TestCase):
         self.assertEqual(("service", "service", "service", "service"), (german, german_alt, italian, spanish))
 
     def test_incomplete_market_evidence_remains_in_review(self):
+        # Component ("Implants") and operation ("Texturation") are both present, but no market
+        # term appears anywhere in the block and the URL is a generic "/applications/" hub (not
+        # specific enough for _url_market_hint to supply one) -- chantier 2 item 2 accepts this
+        # as a partial fact pending human review instead of discarding it outright.
         block = ContentBlock(
             heading="Titanium implants",
             text="Femtosecond laser surface texturing of titanium implants in qualified production.",
             path="main > article.card",
         )
         candidate = _candidate("MANUTECH USD", "https://www.manutech-usd.fr/applications/", "Applications", block)
-        self.assertIsNone(candidate)
+        self.assertIsNotNone(candidate)
+        self.assertEqual("partial", candidate["fact_status"])
+        self.assertIsNone(candidate["market"])
+        self.assertEqual("Implants", candidate["component"])
+        self.assertEqual("Texturation", candidate["operation"])
 
     def test_tgv_requires_a_glass_or_via_context(self):
         self.assertIsNone(_match_label("The TGV train operates a high speed transport service.", PROCESS_TECHNOLOGIES))
@@ -191,6 +199,49 @@ class HybridExtractionTests(unittest.TestCase):
             count = scalar(actors_db, """SELECT COUNT(*) FROM site_profiles p JOIN actors a ON a.id=p.actor_id
                                           WHERE a.priority=1 AND p.strategy='adaptive'""")
         self.assertEqual(4, count)
+
+
+class PublishedDateExtractionTests(unittest.TestCase):
+    """Chantier 4 (fiabiliser la preuve) : source_date doit se remplir dès que la page en
+    expose une, sans jamais en inventer une quand elle n'en expose pas."""
+
+    def test_article_published_time_meta_tag_wins(self):
+        html = """<html><head><title>News</title>
+            <meta property="article:published_time" content="2024-03-15T10:00:00+01:00"></head>
+            <body><main><h1>News</h1><p>Femtosecond laser news for industrial customers today.</p></main></body></html>"""
+        document = parse_document(html, "https://example.test/news/laser-award")
+        self.assertEqual("2024-03-15", document.published_date)
+
+    def test_json_ld_date_published_is_read_when_no_meta_tag(self):
+        html = """<html><head><title>Blog</title>
+            <script type="application/ld+json">{"@type":"Article","datePublished":"2023-07-01","headline":"x"}</script>
+            </head><body><main><h1>Blog</h1><p>Laser texturing capability update for our customers.</p></main></body></html>"""
+        document = parse_document(html, "https://example.test/blog/update")
+        self.assertEqual("2023-07-01", document.published_date)
+
+    def test_url_date_pattern_is_the_last_resort(self):
+        html = """<html><head><title>Article</title></head>
+            <body><main><h1>Article</h1><p>Femtosecond laser processing news for the industry.</p></main></body></html>"""
+        document = parse_document(html, "https://example.test/2022/11/03/laser-news")
+        self.assertEqual("2022-11-03", document.published_date)
+
+    def test_no_date_anywhere_leaves_it_none_rather_than_guessing(self):
+        html = """<html><head><title>Page</title></head>
+            <body><main><h1>Page</h1><p>Femtosecond laser processing for industrial customers.</p></main></body></html>"""
+        document = parse_document(html, "https://example.test/applications/medical")
+        self.assertIsNone(document.published_date)
+
+    def test_implausible_year_is_rejected_not_returned(self):
+        html = """<html><head><title>Page</title>
+            <meta property="article:published_time" content="1899-01-01"></head>
+            <body><main><h1>Page</h1><p>Femtosecond laser processing for industrial customers.</p></main></body></html>"""
+        document = parse_document(html, "https://example.test/page")
+        self.assertIsNone(document.published_date)
+
+    def test_pdf_metadata_creation_date_is_parsed(self):
+        self.assertEqual("2023-06-15", _pdf_metadata_date({"CreationDate": "D:20230615120000+02'00'"}))
+        self.assertIsNone(_pdf_metadata_date({}))
+        self.assertIsNone(_pdf_metadata_date({"CreationDate": "not a pdf date"}))
 
 
 if __name__ == "__main__":

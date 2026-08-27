@@ -24,6 +24,7 @@ import time
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -150,6 +151,10 @@ class ParsedDocument:
     quality_score: float = 0.0
     noise_ratio: float = 0.0
     oversized_blocks: int = 0
+    # Chantier 4 (fiabiliser la preuve) : date de publication de la page, quand elle est
+    # déterminable (voir _extract_published_date) -- None si la page n'en expose aucune,
+    # auquel cas l'appelant retombe sur la date d'observation (scrapers.scrape_market).
+    published_date: str | None = None
 
 
 
@@ -1016,6 +1021,66 @@ def _heading_fallback(root: Tag) -> list[ContentBlock]:
     return blocks[:60]
 
 
+# Une date ISO (YYYY-MM-DD), éventuellement suivie d'une heure/timezone qu'on ignore --
+# _extract_published_date n'a besoin que du jour, jamais de l'heure de publication.
+_ISO_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+_URL_DATE_RE = re.compile(r"/(19|20)(\d{2})/(\d{2})/(\d{2})(?:/|$)")
+
+
+def _plausible_iso_date(value: str) -> str | None:
+    match = _ISO_DATE_RE.search(value or "")
+    if not match:
+        return None
+    date_text = match.group(1)
+    try:
+        year = int(date_text[:4])
+    except ValueError:
+        return None
+    # A page from before the web existed or dated in the future is a parsing artefact
+    # (garbled meta tag, template placeholder), not a real publication date.
+    if 1995 <= year <= datetime.now(timezone.utc).year + 1:
+        return date_text
+    return None
+
+
+def _extract_published_date(soup: BeautifulSoup, url: str) -> str | None:
+    """Date de publication d'une page (chantier 4), dans cet ordre de préférence :
+    1. <meta property="article:published_time"> / name="date"/"publish-date" / itemprop.
+    2. JSON-LD "datePublished" (recherché par regex sur le texte brut du <script> plutôt que
+       json.loads : le JSON-LD réel est souvent imbriqué/légèrement invalide, et on ne veut
+       qu'une sous-chaîne, pas une structure complète).
+    3. Un motif /YYYY/MM/DD/ visible dans l'URL (fréquent sur les articles de blog/actualités).
+    Renvoie None si rien de plausible n'est trouvé -- l'appelant retombe alors sur la date
+    d'observation plutôt que d'inventer une date.
+    """
+    for selector, attr in (
+        ('meta[property="article:published_time"]', "content"),
+        ('meta[name="date"]', "content"),
+        ('meta[name="publish-date"]', "content"),
+        ('meta[name="publication-date"]', "content"),
+        ('meta[itemprop="datePublished"]', "content"),
+        ('time[datetime]', "datetime"),
+    ):
+        tag = soup.select_one(selector)
+        if tag:
+            found = _plausible_iso_date(_attr_str(tag, attr))
+            if found:
+                return found
+
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"})[:5]:
+        match = re.search(r'"datePublished"\s*:\s*"([^"]+)"', script.get_text() or "")
+        if match:
+            found = _plausible_iso_date(match.group(1))
+            if found:
+                return found
+
+    url_match = _URL_DATE_RE.search(urlparse(url).path)
+    if url_match:
+        year, month, day = f"{url_match.group(1)}{url_match.group(2)}", url_match.group(3), url_match.group(4)
+        return _plausible_iso_date(f"{year}-{month}-{day}")
+    return None
+
+
 def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = None) -> ParsedDocument:
     """Deterministically discover links and extract independent, hierarchy-aware content blocks.
 
@@ -1042,6 +1107,10 @@ def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = No
     profile = profile or DEFAULT_SITE_PROFILE
     soup = BeautifulSoup(html, "html.parser")
     title = _clean(soup.title.get_text(" ", strip=True)) if soup.title else ""
+    # Computed before any DOM mutation below: published_date only ever reads <head> meta tags
+    # and <script type="application/ld+json">, neither of which _remove_noise_zones touches,
+    # but there's no reason to depend on that staying true.
+    published_date = _extract_published_date(soup, base_url)
     # Order matters: links must be classified while <nav>/<header> are still in the tree, since
     # _meaningful_links tells navigation from content links by walking up to those very tags.
     links = _meaningful_links(soup, base_url, profile=profile)
@@ -1183,6 +1252,7 @@ def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = No
         quality_score=float(metrics["quality_score"]),
         noise_ratio=float(metrics["noise_ratio"]),
         oversized_blocks=int(metrics["oversized_blocks"]),
+        published_date=published_date,
     )
 
 
@@ -1216,6 +1286,18 @@ def _pdf_paragraphs(page_text: str) -> list[str]:
     return paragraphs
 
 
+_PDF_DATE_RE = re.compile(r"D:(\d{4})(\d{2})(\d{2})")
+
+
+def _pdf_metadata_date(metadata: dict[str, Any]) -> str | None:
+    """Date de création du PDF (chantier 4), depuis /CreationDate au format PDF standard
+    "D:YYYYMMDDHHmmSS+HH'MM'" -- on ne garde que la partie date, jamais l'heure/timezone."""
+    match = _PDF_DATE_RE.match(str(metadata.get("CreationDate") or ""))
+    if not match:
+        return None
+    return _plausible_iso_date(f"{match.group(1)}-{match.group(2)}-{match.group(3)}")
+
+
 def parse_pdf_document(data: bytes, base_url: str, profile: dict[str, Any] | None = None) -> ParsedDocument:
     """Équivalent PDF de parse_document() : pas de DOM ni de liens sortants à découvrir, on
     extrait le texte page par page (pdfplumber) et on le découpe en paragraphes, chacun
@@ -1233,9 +1315,12 @@ def parse_pdf_document(data: bytes, base_url: str, profile: dict[str, Any] | Non
     max_chars = int(profile.get("editorial_units", {}).get("max_chars", 3500))
 
     blocks: list[ContentBlock] = []
+    published_date: str | None = None
     with pdfplumber.open(io.BytesIO(data)) as pdf:
-        metadata_title = _clean(str((pdf.metadata or {}).get("Title") or ""))
+        metadata = pdf.metadata or {}
+        metadata_title = _clean(str(metadata.get("Title") or ""))
         title = metadata_title or unquote(base_url.rsplit("/", 1)[-1])
+        published_date = _pdf_metadata_date(metadata)
         for page_index, page in enumerate(pdf.pages[:max_pages]):
             page_text = page.extract_text() or ""
             for paragraph_index, paragraph in enumerate(_pdf_paragraphs(page_text)):
@@ -1265,6 +1350,7 @@ def parse_pdf_document(data: bytes, base_url: str, profile: dict[str, Any] | Non
         quality_score=60.0 if blocks else 0.0,
         noise_ratio=0.0,
         oversized_blocks=sum(1 for block in blocks if len(block.text) >= max_chars),
+        published_date=published_date,
     )
 
 

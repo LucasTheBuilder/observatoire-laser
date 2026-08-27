@@ -134,7 +134,8 @@ class DynamicCrawlIntegrationTests(unittest.TestCase):
                     active INTEGER DEFAULT 1, content_hash TEXT, last_http_status INTEGER, last_checked_at TEXT,
                     last_changed_at TEXT, page_type TEXT, source_score INTEGER DEFAULT 0, discovery_depth INTEGER DEFAULT 0,
                     discovery_context TEXT, discovery_reason TEXT, parent_url TEXT, extraction_mode TEXT,
-                    structure_hash TEXT, last_title TEXT, last_error TEXT, ambiguous INTEGER DEFAULT 0, blocks_json TEXT
+                    structure_hash TEXT, last_title TEXT, last_error TEXT, ambiguous INTEGER DEFAULT 0, blocks_json TEXT,
+                    published_date TEXT, market_extracted_hash TEXT
                 );
                 CREATE TABLE collection_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, finished_at TEXT, status TEXT,
@@ -203,7 +204,8 @@ class DynamicCrawlIntegrationTests(unittest.TestCase):
                     active INTEGER DEFAULT 1, content_hash TEXT, last_http_status INTEGER, last_checked_at TEXT,
                     last_changed_at TEXT, page_type TEXT, source_score INTEGER DEFAULT 0, discovery_depth INTEGER DEFAULT 0,
                     discovery_context TEXT, discovery_reason TEXT, parent_url TEXT, extraction_mode TEXT,
-                    structure_hash TEXT, last_title TEXT, last_error TEXT, ambiguous INTEGER DEFAULT 0, blocks_json TEXT
+                    structure_hash TEXT, last_title TEXT, last_error TEXT, ambiguous INTEGER DEFAULT 0, blocks_json TEXT,
+                    published_date TEXT, market_extracted_hash TEXT
                 );
                 CREATE TABLE collection_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, finished_at TEXT, status TEXT,

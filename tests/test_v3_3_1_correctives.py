@@ -111,7 +111,9 @@ class MarketInferenceGuardTests(unittest.TestCase):
         # term is ALSO present in the text (see _candidate's "inferred_market in
         # explicit_markets" check); it must never manufacture a market fact from a component
         # alone, or "stent" would silently prove a Medical-market claim with no textual
-        # evidence of "medical" anywhere on the page (audit P1: no market inference).
+        # evidence of "medical" anywhere on the page (audit P1: no market inference). Chantier 2
+        # item 2 now keeps this as a partial fact (component+operation present) instead of
+        # discarding it outright, but the guard still holds: market stays None, never guessed.
         block = ContentBlock(
             heading="Precision components",
             h1="Precision components",
@@ -121,7 +123,10 @@ class MarketInferenceGuardTests(unittest.TestCase):
             text="Our femtosecond laser drilling process produces precision stents for demanding manufacturing programs.",
         )
         fact = _candidate("ACME", "https://example.test/components", "Precision components", block)
-        self.assertIsNone(fact)
+        self.assertIsNotNone(fact)
+        self.assertEqual("partial", fact["fact_status"])
+        self.assertIsNone(fact["market"])
+        self.assertEqual("Stents", fact["component"])
 
 
 class LocalSynonymMaturityTests(unittest.TestCase):

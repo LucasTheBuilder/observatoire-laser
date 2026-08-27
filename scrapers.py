@@ -37,7 +37,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from urllib import robotparser
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree
 
 import httpx
@@ -353,6 +353,35 @@ COMPONENTS: Lexicon = {
     # compound phrases only.
     "Composants d'affichage": {"any_of": ("display panel", "microdisplay", "micro-display", "display glass", "cover glass display")},
     "Moules et outillage de précision": {"any_of": ("mold", "molds", "moule", "moules", "injection mold", "tooling insert", "outillage de précision")},
+    # Chantier 2 item 5 : le lexique composants était le premier facteur de perte de l'audit
+    # (missing_component = 332/386 blocs laser rejetés sur un run). Entrées ajoutées ci-dessous,
+    # choisies pour couvrir des familles de composants déjà bien établies dans l'industrie du
+    # micro-usinage laser ultra-rapide mais absentes du lexique initial (médical implantable,
+    # semi-conducteurs, énergie, optique de précision, horlogerie) plutôt que de fabriquer une
+    # terminologie -- ce sont des catégories génériques, pas des affirmations sur un acteur.
+    "Boîtiers de dispositifs implantables": {"any_of": ("pacemaker housing", "pacemaker can", "icd housing", "implantable device housing", "boîtier de pacemaker")},
+    "Marqueurs radio-opaques": {"any_of": ("radiopaque marker", "radiopaque markers", "marqueur radio-opaque")},
+    "Micro-aiguilles": {"any_of": ("microneedle", "microneedles", "micro-aiguille", "micro-aiguilles")},
+    "Lentilles de contact": {"any_of": ("contact lens", "contact lenses", "lentille de contact")},
+    "Composants d'audioprothèses": {"any_of": ("hearing aid component", "hearing aid shell", "audioprothèse")},
+    "Vias traversants (TSV)": {"any_of": ("through-silicon via", "through silicon via", "via traversant"), "regex": (r"\btsv\b",)},
+    "Photomasques": {"any_of": ("photomask", "photomasks", "masque photolithographique")},
+    "Puces RFID": {"regex": (r"\brfid\b",)},
+    "Capteurs d'image": {"any_of": ("image sensor", "cmos sensor", "ccd sensor", "capteur d'image")},
+    "Séparateurs de batteries": {"any_of": ("battery separator", "separator film", "séparateur de batterie")},
+    "Cellules photovoltaïques": {"any_of": ("solar cell", "solar cells", "photovoltaic cell", "cellule photovoltaïque")},
+    "Plaques bipolaires": {"any_of": ("bipolar plate", "bipolar plates", "plaque bipolaire")},
+    "Membranes électrolytiques": {"any_of": ("electrolyte membrane", "membrane electrode assembly", "membrane électrolytique")},
+    "Réseaux de diffraction": {"any_of": ("diffraction grating", "diffraction gratings", "réseau de diffraction")},
+    "Micro-lentilles": {"any_of": ("microlens", "microlenses", "micro-lentille", "micro-lentilles", "lens array", "microlens array")},
+    "Miroirs de précision": {"any_of": ("precision mirror", "precision mirrors", "miroir de précision")},
+    "Éléments optiques diffractifs (DOE)": {"any_of": ("diffractive optical element", "diffractive optical elements"), "regex": (r"\bdoe\b",), "requires_any": ("laser", "optic", "optique", "diffract")},
+    "Composants horlogers": {"any_of": ("watch movement", "watch component", "composant horloger", "mouvement horloger")},
+    "Boîtiers de montres": {"any_of": ("watch case", "watch casing", "boîtier de montre")},
+    "Cadrans de montres": {"any_of": ("watch dial", "watch dials", "cadran de montre")},
+    "Résonateurs": {"any_of": ("resonator", "resonators", "résonateur", "résonateurs"), "requires_any": ("laser", "photonic", "optical", "optique", "quantum", "microwave")},
+    "Boucliers thermiques": {"any_of": ("heat shield", "heat shields", "bouclier thermique")},
+    "Puces photoniques": {"any_of": ("photonic chip", "photonic chips", "puce photonique")},
 }
 
 # Opérations/procédés laser appliqués au composant (3e dimension "core" -- un fait marché
@@ -900,6 +929,7 @@ def _relation_evidence(
     block: ContentBlock,
     structured_blocks: list[ContentBlock] | None = None,
     diagnostics: dict[str, int] | None = None,
+    page_market: str | None = None,
 ) -> tuple[str | None, str]:
     """Validate Market ↔ Component ↔ Operation without cross-context recombination.
 
@@ -909,6 +939,11 @@ def _relation_evidence(
     carrying an explicit negation/contrast cue (see NEGATION_CUES) is skipped even when it
     would otherwise satisfy the lexical relation, since the sentence is denying or contrasting
     the claim rather than making it (e.g. "unlike laser cutting, we use...").
+
+    ``page_market`` (chantier 2 item 1, see _url_market_hint) is tried last, only once steps
+    1-4 have all failed to find an in-block market: it lets an unambiguous page-level market
+    (from the URL/breadcrumb, e.g. "/applications/medical/") stand in for a market that would
+    otherwise never appear in the block's own text.
     """
     sentences = _sentences(block.text)
     if not sentences:
@@ -982,6 +1017,18 @@ def _relation_evidence(
             else:
                 return "structured", combined[:1400]
 
+    # 5) Page-level market: last resort, only once nothing above supplied a market at all.
+    # Mirrors step 2 (component+operation bound in one sentence) but the market comes from
+    # the page itself rather than a heading, so it is deliberately the weakest signal here.
+    if page_market:
+        for sentence in sentences:
+            _, component, operation = _core_labels(sentence)
+            if component and operation and not _relation_window_is_ambiguous(sentence):
+                if _is_negated(sentence):
+                    _inc_diagnostic(diagnostics, "relation_negated_rejected")
+                    continue
+                return "page_context", sentence[:900]
+
     return None, ""
 
 def _laser_context(title: str, block: ContentBlock, section_context: str | None = None) -> str:
@@ -998,6 +1045,51 @@ def _infer_market(component: str | None, architecture: str | None) -> str | None
     return None
 
 
+def _url_market_hint(url: str, title: str = "") -> str | None:
+    """Marché "ambiant" porté par l'URL/le titre d'une page (chantier 2 item 1) : une page
+    ``/applications/medical/`` porte le marché « Médical » pour tous ses blocs, même quand le
+    mot n'apparaît nulle part dans le texte du bloc lui-même -- aujourd'hui la seule source du
+    marché.
+
+    Ne renvoie une valeur que si l'URL/le titre ne portent qu'UN SEUL marché sans ambiguïté :
+    une page hub générique ("/applications/") ou listant plusieurs marchés dans son fil
+    d'Ariane ne doit jamais imposer un marché arbitraire à tous ses blocs.
+    """
+    parsed = urlparse(url)
+    path_words = unquote(parsed.path).replace("-", " ").replace("_", " ").replace("/", " ")
+    text = f"{path_words} {title}"
+    labels = {label for label, _ in _match_all_labels(text, MARKETS)}
+    return next(iter(labels)) if len(labels) == 1 else None
+
+
+def _partial_candidate_dims(
+    block: ContentBlock, section: str, page_market: str | None,
+) -> tuple[str | None, str | None, str | None, str] | None:
+    """Filet de repêchage pour les faits à 2 dimensions sur 3 (chantier 2 item 2) : quand
+    _relation_evidence() ne trouve pas de relation complète market+component+operation, un
+    bloc qui porte encore au moins 2 des 3 dimensions (section locale, marché de la page en
+    dernier recours) n'est plus jeté -- il devient un fait ``fact_status='partial'`` en file de
+    revue humaine au lieu de contribuer aux 374 rejets ``relation_too_weak`` par run de l'audit.
+
+    Refuse toujours les blocs multi-contextes ou dont la fenêtre est ambiguë (plusieurs marchés/
+    composants distincts) : un fait partiel doit rester un fait, pas une supposition bruitée.
+    Refuse aussi les zones "publication"/"news"/"project" (voir _section_role), pour la même
+    raison que _relation_evidence leur interdit déjà de nourrir une relation structurée : une
+    bibliographie ou un fil d'actualités n'est pas une déclaration d'application commerciale.
+    """
+    if (
+        _is_multi_context_block(block)
+        or _relation_window_is_ambiguous(section)
+        or _section_role(block) in {"publication", "news", "project"}
+    ):
+        return None
+    market, component, operation = _core_labels(section)
+    market = market or page_market
+    if sum(value is not None for value in (market, component, operation)) != 2:
+        return None
+    return market, component, operation, section
+
+
 def _is_noise_block(block: ContentBlock) -> bool:
     direct = " ".join(filter(None, (block.heading, block.text, block.media_context)))
     norm = _normalize_text(direct)
@@ -1009,20 +1101,27 @@ def _is_noise_block(block: ContentBlock) -> bool:
 
 def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode: str = "block-rules",
                context_text: str | None = None, structured_blocks: list[ContentBlock] | None = None,
-               diagnostics: dict[str, int] | None = None) -> dict | None:
-    """Tente de transformer UN bloc de contenu en UN "fait marché" complet (ou renvoie None).
+               diagnostics: dict[str, int] | None = None, page_market: str | None = None,
+               source_date: str | None = None) -> dict | None:
+    """Tente de transformer UN bloc de contenu en UN "fait marché" complet ou partiel (ou
+    renvoie None).
 
     Pipeline, dans l'ordre (chaque étape peut arrêter net et renvoyer None) :
     1. Rejeter les blocs de bruit (menu, mentions légales...) -- _is_noise_block.
     2. Exiger un contexte laser ultra-rapide (_laser_match) : sans ça, pas de fait du tout.
-    3. Valider une "relation" locale entre marché/composant/opération (_relation_evidence) --
-       c'est ici que la fenêtre de texte réellement retenue comme preuve est choisie.
-    4. Re-résoudre market/component/operation à partir de CETTE fenêtre validée (pas de la page
+    3. Valider une "relation" locale entre marché/composant/opération (_relation_evidence),
+       y compris le marché "ambiant" porté par l'URL de la page (``page_market``, chantier 2
+       item 1) quand rien de local n'en fournit un -- c'est ici que la fenêtre de texte
+       réellement retenue comme preuve est choisie.
+    4. Si aucune relation complète n'est trouvée, tenter un fait à 2 dimensions sur 3
+       (_partial_candidate_dims, chantier 2 item 2) plutôt que de jeter le bloc.
+    5. Re-résoudre market/component/operation à partir de CETTE fenêtre validée (pas de la page
        entière), pour que le fait ne mélange jamais des infos venues d'ailleurs sur la page.
-    5. Ajouter les dimensions complémentaires (procédé, matériau, performance...) et calculer
+    6. Ajouter les dimensions complémentaires (procédé, matériau, performance...) et calculer
        la maturité industrielle, puis un score de confiance.
-    6. Construire le dict candidat final avec sa citation et ses clés de déduplication.
-    Create a market application only when the three core dimensions form a local relation."""
+    7. Construire le dict candidat final avec sa citation et ses clés de déduplication.
+    Create a market application only when the three core dimensions form a local relation,
+    or a partial one when only two do."""
     _inc_diagnostic(diagnostics, "blocks_examined")
     if _is_noise_block(block):
         _inc_diagnostic(diagnostics, "noise_block")
@@ -1050,26 +1149,44 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
     if supplied_neighbors and len(safe_neighbors) < len(supplied_neighbors):
         _inc_diagnostic(diagnostics, "cross_group_rejected", len(supplied_neighbors) - len(safe_neighbors))
 
-    relation_strength, relation_text = _relation_evidence(block, safe_neighbors, diagnostics)
-    if not relation_strength:
-        if _is_multi_context_block(block):
-            _inc_diagnostic(diagnostics, "multi_context_rejected")
-        _inc_diagnostic(diagnostics, "relation_too_weak")
-        return None
-
-    # Core dimensions are resolved from the validated relation window, not from the whole page.
-    market, market_hits = _match_label_details(relation_text, MARKETS)
-    component, component_hits = _match_label_details(relation_text, COMPONENTS)
-    operation, operation_hits = _match_label_details(relation_text, OPERATIONS)
-    if component:
-        inferred_market = _infer_market(component, None)
-        explicit_markets = {label for label, _ in _match_all_labels(relation_text, MARKETS)}
-        if inferred_market and inferred_market in explicit_markets:
-            market = inferred_market
-            market_hits = _match_label_details(relation_text, MARKETS)[1]
-    if not (market and component and operation):
-        _inc_diagnostic(diagnostics, "incomplete_relation_core")
-        return None
+    relation_strength, relation_text = _relation_evidence(block, safe_neighbors, diagnostics, page_market=page_market)
+    is_partial = False
+    market: str | None
+    component: str | None
+    operation: str | None
+    market_hits: list[str] = []
+    component_hits: list[str] = []
+    operation_hits: list[str] = []
+    if relation_strength:
+        # Core dimensions are resolved from the validated relation window, not from the whole
+        # page -- except "page_context", whose window intentionally never contains a market
+        # word (that's the whole point): the page-level hint stands in for it directly.
+        if relation_strength == "page_context" and page_market:
+            market, market_hits = page_market, []
+        else:
+            market, market_hits = _match_label_details(relation_text, MARKETS)
+        component, component_hits = _match_label_details(relation_text, COMPONENTS)
+        operation, operation_hits = _match_label_details(relation_text, OPERATIONS)
+        if component:
+            inferred_market = _infer_market(component, None)
+            explicit_markets = {label for label, _ in _match_all_labels(relation_text, MARKETS)}
+            if inferred_market and inferred_market in explicit_markets:
+                market = inferred_market
+                market_hits = _match_label_details(relation_text, MARKETS)[1]
+        if not (market and component and operation):
+            _inc_diagnostic(diagnostics, "incomplete_relation_core")
+            return None
+    else:
+        partial = _partial_candidate_dims(block, section, page_market)
+        if not partial:
+            if _is_multi_context_block(block):
+                _inc_diagnostic(diagnostics, "multi_context_rejected")
+            _inc_diagnostic(diagnostics, "relation_too_weak")
+            return None
+        market, component, operation, relation_text = partial
+        relation_strength = "partial"
+        is_partial = True
+        _inc_diagnostic(diagnostics, "relation_partial_accepted")
 
     # Complementary dimensions may use the local section, but they can never substitute a core one.
     process, _ = _match_label_details(section, PROCESS_TECHNOLOGIES)
@@ -1078,16 +1195,17 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
     performance, _ = _match_label_details(section, PERFORMANCE_TERMS)
 
     maturity_class, maturity = _detect_maturity(relation_text + " " + section)
-    bucket = "existing" if maturity_class == "existing" else "radar"
+    bucket = "existing" if maturity_class == "existing" else ("pending" if is_partial else "radar")
     if maturity_class == "unknown":
         _inc_diagnostic(diagnostics, "maturity_unknown")
     direct_laser = _laser_match(relation_text)
-    confidence = 0.78 if relation_strength == "direct" else (0.74 if relation_strength == "structured" else 0.70)
+    confidence_by_strength = {"direct": 0.78, "structured": 0.74, "contextual": 0.70, "page_context": 0.66, "partial": 0.55}
+    confidence = confidence_by_strength.get(relation_strength, 0.70)
     confidence += 0.05 if direct_laser else 0.0
     confidence += 0.02 * sum(value is not None for value in (process, architecture, material, performance))
     if maturity_class != "unknown":
         confidence += 0.04
-    confidence = max(0.70, min(0.98, confidence))
+    confidence = max(0.45 if is_partial else 0.70, min(0.98, confidence))
 
     # Quote the relation itself. This makes the proof shown in the UI auditable and prevents a
     # high-scoring but unrelated sentence elsewhere in the section from being displayed.
@@ -1127,11 +1245,15 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
         "performance": performance,
         "maturity": maturity,
         "maturity_class": maturity_class,
-        "fact_status": "validated",
+        "fact_status": "partial" if is_partial else "validated",
         "stage": " | ".join(stage_parts)[:240],
         "url": url,
         "title": title,
         "quote": quote,
+        # Chantier 4 : toujours vrai ici -- `quote` est systématiquement extrait de
+        # relation_text/section, un sous-texte réel du bloc, jamais reformulé.
+        "is_verbatim": True,
+        "source_date": source_date,
         "group": group,
         "fact_key": group,
         "application_key": app_key,
@@ -1150,7 +1272,7 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
     return result
 
 def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock, *, page_type: str,
-                      mode: str = "block-rules") -> list[dict]:
+                      mode: str = "block-rules", source_date: str | None = None) -> list[dict]:
     """Comme _candidate(), mais pour une "offre" (capacité/prestation) : plus permissif, car il
     n'exige PAS un triplet marché/composant/opération complet -- une simple opération ou un
     procédé laser détecté sur une page de type service/capability/technology/product suffit à
@@ -1218,6 +1340,8 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
             "url": url,
             "title": title,
             "quote": quote,
+            "is_verbatim": True,
+            "source_date": source_date,
             "fact_key": fact_key,
             "fingerprint": hashlib.sha256(fact_key.encode()).hexdigest(),
             "source_fingerprint": hashlib.sha256(f"{fact_key}|{url}|{quote}".encode()).hexdigest(),
@@ -1296,21 +1420,32 @@ def _vocabulary_candidate(
 
 def _ai_candidates(
     actor_name: str, url: str, title: str, blocks: list[ContentBlock], ollama: AiClient,
-    diagnostics: dict[str, int] | None = None,
+    diagnostics: dict[str, int] | None = None, exclude_indices: set[int] | None = None,
+    source_date: str | None = None,
 ) -> list[dict]:
-    """Conservative AI fallback for market applications, with an open-vocabulary escape hatch.
+    """AI fallback for market applications the deterministic lexicon rejected, with an
+    open-vocabulary escape hatch (chantier 2 item 3).
 
-    The AI may resolve wording, but it cannot invent or substitute Market / Component /
-    Operation on the strict path: when its answer for all three normalizes to a known label,
-    that label must also be independently supported by the deterministic local-section
-    lexicon, exactly as before. When at least one of the three doesn't match any known label,
-    the fact isn't discarded outright -- it's queued in ``vocabulary_candidates`` for human
-    review instead, carrying the model's actual proposed wording (not just "unresolved").
+    ``exclude_indices`` (block indices _candidate() already turned into a validated/partial
+    fact this pass) keeps the model focused on blocks the lexicon found nothing in -- that is
+    where it can actually add value, instead of re-processing ground the rules already
+    covered. When the AI's answer for all three core dimensions normalizes to a KNOWN label,
+    it is queued for human review as-is: it no longer has to also be independently confirmed
+    by the deterministic local-section lexicon (that requirement meant the AI could only ever
+    agree with the rules, never surface something the rules missed -- see the audit's
+    ``ai_known_label_not_independently_confirmed`` telemetry, 71 proposals -> 1 validated). The
+    verbatim-quote requirement and the confidence floor below are the safeguards that replace
+    it. When at least one of the three doesn't match any known label, the fact is queued in
+    ``vocabulary_candidates`` instead, carrying the model's actual proposed wording. Either way
+    nothing from this function is ever auto-published: every candidate it returns carries
+    ``fact_status='review'``, gated behind human validation (evidence.review_status='review').
     Complementary dimensions (process/architecture/material/performance/maturity) stay
     restricted to the known lexicons in both cases.
     """
     relevant: list[tuple[int, ContentBlock, str]] = []
     for i, block in enumerate(blocks):
+        if exclude_indices and i in exclude_indices:
+            continue
         if _is_noise_block(block):
             continue
         direct, section = _context_for_block(title, blocks, i)
@@ -1410,17 +1545,21 @@ def _ai_candidates(
                 _inc_diagnostic(diagnostics, "ai_fact_nothing_proposed")
             continue
 
-        # Known-label path: the AI's wording resolving to a known label is not enough on its
-        # own -- that label must also be independently present via the deterministic
-        # local-section lexicon, exactly as before this open-vocabulary escape hatch existed.
+        # Known-label path (chantier 2 item 3): the AI's wording resolving to a known label on
+        # its own IS enough -- the verbatim-quote check above and the confidence floor are the
+        # safeguards, not agreement with the deterministic local-section lexicon. Requiring
+        # that agreement made the AI a pure confirmation echo of the rules (see the function
+        # docstring); this diagnostic split just keeps visibility into how often the AI's
+        # answer would have matched the rules anyway vs. genuinely surfaced something new.
         deterministic_core = {
             "market": _match_label(section, MARKETS),
             "component": _match_label(section, COMPONENTS),
             "operation": _match_label(section, OPERATIONS),
         }
         if any(deterministic_core[key] != resolved[key] for key in resolved):
-            _inc_diagnostic(diagnostics, "ai_known_label_not_independently_confirmed")
-            continue
+            _inc_diagnostic(diagnostics, "ai_fact_independent_of_lexicon")
+        else:
+            _inc_diagnostic(diagnostics, "ai_fact_lexicon_confirmed")
         _inc_diagnostic(diagnostics, "ai_fact_validated")
 
         maturity = _validate_ai_value(fact.get("maturity"), set(maturity_to_bucket))
@@ -1456,6 +1595,10 @@ def _ai_candidates(
             "url": url,
             "title": title,
             "quote": quote[:700],
+            # Chantier 4 : toujours vrai -- `quote` doit déjà être une sous-chaîne exacte du
+            # bloc (voir "ai_fact_quote_not_verbatim" plus haut), jamais une reformulation.
+            "is_verbatim": True,
+            "source_date": source_date,
             "group": fact_key,
             "fact_key": fact_key,
             "application_key": app_key,
@@ -1728,11 +1871,13 @@ def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
                             """UPDATE actor_sources SET content_hash=?,last_http_status=?,last_checked_at=?,last_title=?,
                                       page_type=?,source_score=?,extraction_mode=?,structure_hash=?,blocks_json=?,last_error=NULL,
                                       ambiguous=?,discovery_depth=?,parent_url=COALESCE(parent_url,?),discovery_reason=COALESCE(discovery_reason,?),
+                                      published_date=?,
                                       last_changed_at=CASE WHEN ? THEN ? ELSE last_changed_at END WHERE id=?""",
                             (
                                 digest, response.status_code, stamp, document.title, fetched_type, fetched_score,
                                 document.extraction_method, document.structure_hash, blocks_json, int(not document.blocks),
-                                depth, item.get("parent_url"), item.get("reason"), int(is_changed), stamp, source_id,
+                                depth, item.get("parent_url"), item.get("reason"), document.published_date,
+                                int(is_changed), stamp, source_id,
                             ),
                         )
 
@@ -1859,7 +2004,14 @@ def _source_family(page_type: str | None) -> str:
     return "other"
 
 
-def _select_market_sources(max_pages: int = 120) -> list[dict]:
+# Chantier 2 item 4 : la collecte marché plafonnait à 120 pages au total pour tous les
+# acteurs (3,4 pages/acteur/passe selon l'audit), un budget calibré pour un pilote plutôt
+# qu'un observatoire. scrape_market() calcule maintenant son budget par défaut comme
+# MARKET_PAGES_PER_ACTOR * nb d'acteurs actifs (ex: 10 x 35 = 350) au lieu d'une constante fixe.
+MARKET_PAGES_PER_ACTOR = 10
+
+
+def _select_market_sources(max_pages: int = 350) -> list[dict]:
     """Choisit, parmi TOUTES les pages déjà crawlées (actor_sources), lesquelles analyser pour
     en extraire des faits marché -- en 3 passes successives (voir `take()` plus bas) :
     1. Une page par (acteur, famille) pour tous les acteurs -- garantit une couverture large
@@ -1867,17 +2019,22 @@ def _select_market_sources(max_pages: int = 120) -> list[dict]:
     2. Pour les acteurs priority ou avec un SITE_OVERRIDE dédié, approfondit selon leurs
        market_source_quotas (ex: jusqu'à 6 pages "application_market" pour FEMTOprint).
     3. Remplit le budget restant par score décroissant, toutes familles confondues.
+
+    Une page dont le contenu n'a pas changé depuis sa dernière analyse marché (content_hash ==
+    market_extracted_hash, colonne mise à jour par scrape_market après coup) est exclue d'office
+    -- chantier 2 item 4 : "ne re-analyser que les pages dont le content_hash a changé".
     Coverage-balanced source selection: first one page/family/actor, then deepen priority actors."""
     with connect(ACTORS_DB) as db:
         rows = [dict(row) for row in db.execute(
             """SELECT a.id AS actor_id,a.name,a.priority,a.official_url,p.strategy,
                       s.id AS source_id,s.url,s.page_type,s.source_score,s.blocks_json,
-                      s.last_title,s.last_checked_at,s.extraction_mode
+                      s.last_title,s.last_checked_at,s.extraction_mode,s.content_hash,s.published_date
                FROM actor_sources s
                JOIN actors a ON a.id=s.actor_id
                LEFT JOIN site_profiles p ON p.actor_id=a.id
                WHERE s.active=1 AND COALESCE(s.page_type,'')!='ignore'
                  AND (s.last_http_status IS NULL OR s.last_http_status BETWEEN 200 AND 399)
+                 AND (s.content_hash IS NULL OR s.market_extracted_hash IS NULL OR s.content_hash!=s.market_extracted_hash)
                ORDER BY a.priority DESC,a.name,s.source_score DESC,s.id"""
         ).fetchall()]
 
@@ -1994,6 +2151,11 @@ def _ensure_market_fact_status_column(db) -> None:
         db.execute("ALTER TABLE evidence ADD COLUMN last_seen_at TEXT")
     if "application_key" not in columns:
         db.execute("ALTER TABLE evidence ADD COLUMN application_key TEXT")
+    if "is_verbatim" not in columns:
+        db.execute("ALTER TABLE evidence ADD COLUMN is_verbatim INTEGER NOT NULL DEFAULT 1")
+    source_columns = {row[1] for row in db.execute("PRAGMA table_info(evidence_sources)").fetchall()}
+    if "is_verbatim" not in source_columns:
+        db.execute("ALTER TABLE evidence_sources ADD COLUMN is_verbatim INTEGER NOT NULL DEFAULT 1")
     db.execute(
         """CREATE TABLE IF NOT EXISTS evidence_bucket_transitions (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2045,12 +2207,14 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
             )
         if float(candidate.get("confidence", 0)) > old_confidence:
             db.execute(
-                """UPDATE evidence SET industrial_stage=?,source_url=?,source_title=?,quote=?,field_confidence=?,
+                """UPDATE evidence SET industrial_stage=?,source_url=?,source_title=?,source_date=COALESCE(?,source_date),
+                          quote=?,is_verbatim=?,field_confidence=?,
                           laser_process=COALESCE(?,laser_process),material=COALESCE(?,material),performance=COALESCE(?,performance),
                           maturity_level=COALESCE(?,maturity_level),relation_strength=COALESCE(?,relation_strength),source_role=COALESCE(?,source_role),
                           bucket=?,fact_status=?,review_status=?,updated_at=? WHERE id=?""",
                 (
-                    candidate["stage"], candidate["url"], candidate["title"], candidate["quote"], candidate["confidence"],
+                    candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
+                    candidate["quote"], int(candidate.get("is_verbatim", True)), candidate["confidence"],
                     candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("maturity"),
                     candidate.get("relation_strength"), candidate.get("source_role"), effective_bucket,
                     candidate.get("fact_status", "validated"), "accepted" if candidate.get("fact_status") == "validated" else "review",
@@ -2062,13 +2226,15 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
         review_status = "accepted" if fact_status == "validated" else "review"
         evidence_id = db.execute(
             """INSERT INTO evidence(
-                   actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,quote,source_group,
+                   actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,source_date,
+                   quote,is_verbatim,source_group,
                    fingerprint,fact_key,application_key,evidence_kind,language,review_status,created_at,updated_at,block_heading,block_path,
                    extraction_mode,field_confidence,laser_process,material,performance,maturity_level,relation_strength,relation_evidence,source_role,fact_status
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 candidate["actor"], candidate["bucket"], candidate["market"], candidate["component"], candidate["operation"],
-                candidate["stage"], candidate["url"], candidate["title"], candidate["quote"], fact_key,
+                candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
+                candidate["quote"], int(candidate.get("is_verbatim", True)), fact_key,
                 candidate["fingerprint"], fact_key, app_key, language_from_url(candidate["url"]), review_status, stamp, stamp,
                 candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
                 candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("maturity"),
@@ -2088,11 +2254,12 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
     before = db.total_changes
     db.execute(
         """INSERT OR IGNORE INTO evidence_sources(
-               evidence_id,source_url,source_title,quote,language,block_heading,block_path,extraction_mode,field_confidence,relation_strength,relation_evidence,source_role,
+               evidence_id,source_url,source_title,source_date,quote,is_verbatim,language,block_heading,block_path,extraction_mode,field_confidence,relation_strength,relation_evidence,source_role,
                fingerprint,created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            evidence_id, candidate["url"], candidate["title"], candidate["quote"], language_from_url(candidate["url"]),
+            evidence_id, candidate["url"], candidate["title"], candidate.get("source_date"), candidate["quote"],
+            int(candidate.get("is_verbatim", True)), language_from_url(candidate["url"]),
             candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
             candidate.get("relation_strength"), candidate.get("relation_evidence"), candidate.get("source_role"),
             candidate["source_fingerprint"], stamp,
@@ -2113,10 +2280,12 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
         offer_id = int(row["id"])
         if float(candidate.get("confidence", 0)) > float(row["field_confidence"] or 0):
             db.execute(
-                """UPDATE offers SET industrial_stage=?,source_url=?,source_title=?,quote=?,field_confidence=?,
+                """UPDATE offers SET industrial_stage=?,source_url=?,source_title=?,source_date=COALESCE(?,source_date),
+                          quote=?,is_verbatim=?,field_confidence=?,
                           material=COALESCE(?,material),performance=COALESCE(?,performance),updated_at=? WHERE id=?""",
                 (
-                    candidate["stage"], candidate["url"], candidate["title"], candidate["quote"], candidate["confidence"],
+                    candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
+                    candidate["quote"], int(candidate.get("is_verbatim", True)), candidate["confidence"],
                     candidate.get("material"), candidate.get("performance"), stamp, offer_id,
                 ),
             )
@@ -2124,12 +2293,13 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
         offer_id = db.execute(
             """INSERT INTO offers(
                    actor_name,offer_type,capability,operation,laser_process,material,performance,industrial_stage,page_type,
-                   source_url,source_title,quote,fact_key,fingerprint,review_status,field_confidence,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
+                   source_url,source_title,source_date,quote,is_verbatim,fact_key,fingerprint,review_status,field_confidence,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
             (
                 candidate["actor"], candidate["offer_type"], candidate["capability"], candidate.get("operation"), candidate.get("process"),
                 candidate.get("material"), candidate.get("performance"), candidate["stage"], candidate["page_type"], candidate["url"],
-                candidate["title"], candidate["quote"], candidate["fact_key"], candidate["fingerprint"], candidate["confidence"], stamp, stamp,
+                candidate["title"], candidate.get("source_date"), candidate["quote"], int(candidate.get("is_verbatim", True)),
+                candidate["fact_key"], candidate["fingerprint"], candidate["confidence"], stamp, stamp,
             ),
         ).lastrowid
         fact_added = 1
@@ -2139,10 +2309,11 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
     before = db.total_changes
     db.execute(
         """INSERT OR IGNORE INTO offer_sources(
-               offer_id,source_url,source_title,quote,language,block_heading,block_path,extraction_mode,field_confidence,fingerprint,created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+               offer_id,source_url,source_title,source_date,quote,is_verbatim,language,block_heading,block_path,extraction_mode,field_confidence,fingerprint,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            offer_id, candidate["url"], candidate["title"], candidate["quote"], language_from_url(candidate["url"]),
+            offer_id, candidate["url"], candidate["title"], candidate.get("source_date"), candidate["quote"],
+            int(candidate.get("is_verbatim", True)), language_from_url(candidate["url"]),
             candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"], candidate["source_fingerprint"], stamp,
         ),
     )
@@ -2177,27 +2348,42 @@ def _upsert_vocabulary_candidate(db, candidate: dict) -> int:
     return 1
 
 
-def scrape_market(max_pages: int = 120, actor_names: list[str] | None = None) -> dict:
+def scrape_market(max_pages: int | None = None, actor_names: list[str] | None = None) -> dict:
     """Run the market extraction pass.
+
+    ``max_pages``, when omitted, is resolved to ``MARKET_PAGES_PER_ACTOR`` times the number of
+    active actors (chantier 2 item 4) instead of a fixed constant, so the budget scales with
+    the roster instead of quietly starving it as more actors are added.
 
     ``actor_names``, when given, restricts the run to those actors (matched against
     ``source["name"]``) -- meant for trying a prompt/provider change on 2-3 actors before
     opening it to the full roster, without touching the selection/coverage logic itself.
 
-    Déroulé, pour chaque page sélectionnée (_select_market_sources) :
+    Déroulé, pour chaque page sélectionnée (_select_market_sources, qui exclut déjà les pages
+    inchangées depuis leur dernière analyse) :
     1. Récupère ses blocs de contenu -- depuis le cache (_stored_blocks) si récent, sinon en
        re-téléchargeant la page.
-    2. Pour chaque bloc : tente _candidate() (fait marché déterministe) et _offer_candidates()
-       (capacité concurrente déterministe).
-    3. Si le profil de l'acteur est "adaptive", complète avec _ai_candidates() (repli IA).
-    4. Déduplique les candidats de la page (_dedupe_candidates), puis les écrit en base via
-       _upsert_market_candidate / _upsert_offer_candidate / _upsert_vocabulary_candidate.
+    2. Calcule le marché "ambiant" porté par l'URL/le titre de la page (_url_market_hint,
+       chantier 2 item 1), passé à _candidate() pour les blocs qui n'en portent aucun localement.
+    3. Pour chaque bloc : tente _candidate() (fait marché déterministe, complet ou partiel --
+       chantier 2 item 2) et _offer_candidates() (capacité concurrente déterministe).
+    4. Si le profil de l'acteur est "adaptive", complète avec _ai_candidates() (repli IA) sur
+       les seuls blocs que le lexique déterministe n'a pas su transformer en fait ce passage
+       (chantier 2 item 3) -- jamais publié directement, toujours fact_status='review'.
+    5. Déduplique les candidats de la page (_dedupe_candidates), puis les écrit en base via
+       _upsert_market_candidate / _upsert_offer_candidate / _upsert_vocabulary_candidate, et
+       marque la page comme analysée à son content_hash actuel (market_extracted_hash) pour
+       qu'un run suivant ne la ré-analyse pas tant qu'elle n'a pas changé.
     Les compteurs (`diagnostics`) et jetons IA consommés sont journalisés dans collection_runs
     pour pouvoir diagnostiquer une collecte a posteriori sans avoir à la relancer.
     """
     _load_custom_lexicon_entries()
     with connect(MARKET_DB) as db:
         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
+    if max_pages is None:
+        with connect(ACTORS_DB) as db:
+            actor_count = int(db.execute("SELECT COUNT(*) FROM actors WHERE active=1").fetchone()[0])
+        max_pages = MARKET_PAGES_PER_ACTOR * max(1, actor_count)
     sources = _select_market_sources(max_pages=max_pages)
     if actor_names:
         wanted = set(actor_names)
@@ -2215,37 +2401,55 @@ def scrape_market(max_pages: int = 120, actor_names: list[str] | None = None) ->
                     source_url = source["url"]
                     source_title = source.get("last_title") or ""
                     page_type = normalize_page_type(source.get("page_type"))
+                    published_date = source.get("published_date")
                     diagnostics["stored_pages_reused"] += 1
                 else:
                     response = _fetch(client, source["url"])
+                    resolved_url = str(response.url)
                     site_profile = get_site_profile({"name": source["name"], "official_url": source["official_url"]})
-                    document = parse_document(response.text, str(response.url), profile=site_profile)
+                    if is_pdf_response(response.headers.get("content-type", ""), resolved_url):
+                        document = parse_pdf_document(response.content, resolved_url, profile=site_profile)
+                    else:
+                        document = parse_document(response.text, resolved_url, profile=site_profile)
                     blocks = document.blocks
-                    source_url = str(response.url)
+                    source_url = resolved_url
                     source_title = document.title
                     page_type = document.page_type
+                    published_date = document.published_date
                     diagnostics["network_pages_fetched"] += 1
+
+                # Chantier 4 : date de publication de la page si connue, sinon date d'observation
+                # (jamais NULL -- un fait sans aucune date ne peut ni vieillir ni se comparer).
+                source_date = published_date or utc_now()[:10]
+                page_market = _url_market_hint(source_url, source_title)
 
                 market_candidates: list[dict] = []
                 offer_candidates: list[dict] = []
+                covered_indices: set[int] = set()
 
                 for index, block in enumerate(blocks):
                     _, section = _context_for_block(source_title, blocks, index)
                     structured = _structured_neighbors(blocks, index)
                     candidate = _candidate(
                         source["name"], source_url, source_title, block, context_text=section,
-                        structured_blocks=structured, diagnostics=diagnostics,
+                        structured_blocks=structured, diagnostics=diagnostics, page_market=page_market,
+                        source_date=source_date,
                     )
                     if candidate:
                         market_candidates.append(candidate)
+                        covered_indices.add(index)
                     offer_candidates.extend(
-                        _offer_candidates(source["name"], source_url, source_title, block, page_type=page_type)
+                        _offer_candidates(source["name"], source_url, source_title, block, page_type=page_type, source_date=source_date)
                     )
 
-                # AI remains a conservative secondary route for complete market facts only.
+                # AI now focuses on blocks the deterministic lexicon rejected this pass, not the
+                # ones it already resolved -- see _ai_candidates' docstring (chantier 2 item 3).
                 vocabulary_candidates: list[dict] = []
                 if source.get("strategy") == "adaptive":
-                    for candidate in _ai_candidates(source["name"], source_url, source_title, blocks, ollama, diagnostics):
+                    for candidate in _ai_candidates(
+                        source["name"], source_url, source_title, blocks, ollama, diagnostics,
+                        exclude_indices=covered_indices, source_date=source_date,
+                    ):
                         if candidate.get("kind") == "vocabulary_candidate":
                             vocabulary_candidates.append(candidate)
                         else:
@@ -2255,6 +2459,16 @@ def scrape_market(max_pages: int = 120, actor_names: list[str] | None = None) ->
                 offer_candidates = _dedupe_candidates(offer_candidates)
                 vocabulary_candidates = _dedupe_candidates(vocabulary_candidates)
                 scanned += 1
+
+                # Mark this page as analysed at its current content_hash regardless of outcome
+                # (even zero candidates is a completed analysis) so the next run's unchanged-hash
+                # filter in _select_market_sources skips it until the page actually changes.
+                with connect(ACTORS_DB) as actors_db:
+                    actors_db.execute(
+                        "UPDATE actor_sources SET market_extracted_hash=? WHERE id=?",
+                        (source.get("content_hash"), source["source_id"]),
+                    )
+
                 if not market_candidates and not offer_candidates and not vocabulary_candidates:
                     rejected += 1
                     continue

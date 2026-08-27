@@ -180,6 +180,12 @@ class LocalRelationTests(unittest.TestCase):
                 self.assertIn(expected, labels)
 
     def test_page_title_cannot_supply_market(self):
+        # h1 ("Laser processing") is page-wide and deliberately excluded from market resolution
+        # (see _relation_evidence step 2's comment), and _candidate() is called directly here
+        # without a page_market (that's scrape_market()'s job, via _url_market_hint -- see
+        # PageMarketHintTests) -- so market must stay unresolved either way. Component
+        # ("Stents") and operation ("Microdécoupe") are still present, so chantier 2 item 2
+        # keeps this as a partial fact rather than discarding it, but never with a guessed market.
         block = ContentBlock(
             heading="Process",
             h1="Laser processing",
@@ -189,7 +195,9 @@ class LocalRelationTests(unittest.TestCase):
             text="Femtosecond laser cutting of stents is performed on a pilot line.",
         )
         fact = _candidate("Example", "https://example.test/medical", "Medical applications", block)
-        self.assertIsNone(fact)
+        self.assertIsNotNone(fact)
+        self.assertEqual("partial", fact["fact_status"])
+        self.assertIsNone(fact["market"])
 
 
 class MarketResetTests(unittest.TestCase):

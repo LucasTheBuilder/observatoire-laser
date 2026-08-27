@@ -1,3 +1,28 @@
+"""Couche de persistance de l'Observatoire : schéma SQLite, migrations et fonctions CRUD.
+
+Ce fichier ne fait AUCUN appel réseau (contrairement à scrapers.py) : c'est uniquement la
+couche base de données. Il gère trois fichiers SQLite séparés (chacun avec sa propre
+connexion/transaction, voir connect()) :
+
+- ACTORS_DB (actors.db) : la liste des acteurs suivis (entreprises/labos concurrents ou
+  partenaires), leurs pages web connues (actor_sources) et l'état du profil de crawl de
+  chacun (site_profiles) -- alimenté par scrapers.scrape_actors().
+- MARKET_DB (market.db) : les "faits marché" extraits du contenu des sites (evidence : quelle
+  entreprise fait quoi, pour quel marché/composant/opération), les offres/capacités
+  concurrentes (offers), et les preuves sourcées qui les justifient (evidence_sources,
+  offer_sources) -- alimenté par scrapers.scrape_market().
+- TECH_DB (technology.db) : les publications/documents scientifiques collectés (documents) et
+  les signaux de maturité technologique transverses (technology_signals) -- alimenté par
+  scrapers.scrape_technology().
+
+init_databases() crée (ou met à jour, via des migrations additives) le schéma des trois
+bases à chaque démarrage de l'application (voir app.py: lifespan). Le reste du fichier fournit
+des fonctions utilitaires : connexion/transaction (connect), clés d'identité déterministes
+pour dédupliquer les faits (market_fact_key, application_key, offer_fact_key,
+technology_signal_key), sauvegardes (backup_all_databases), et des opérations CRUD sur les
+acteurs (create_actor, update_actor_classification, delete_actor, ...).
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -21,6 +46,12 @@ TECH_DB = DATA_DIR / "technology.db"
 BACKUP_RETENTION_COUNT = int(os.getenv("BACKUP_RETENTION_COUNT", "14"))
 
 
+# Liste "en dur" des acteurs suivis dès le premier démarrage : (nom, pays, rôle, priority,
+# official_url). `priority=1` marque les acteurs jugés les plus importants (crawl plus
+# profond/plus large, voir site_profiles.crawl_budget). init_databases() insère cette liste
+# à chaque démarrage via un UPSERT (ON CONFLICT DO UPDATE), donc la modifier ici et redémarrer
+# l'appli met à jour les acteurs existants sans dupliquer de lignes. Des acteurs additionnels
+# peuvent aussi être ajoutés depuis l'UI via create_actor(), sans toucher à ce fichier.
 ACTORS = [
     ("ALPHANOV", "France", "Centre technologique - procédés laser & micro-usinage", 1, "https://www.alphanov.com"),
     ("MANUTECH USD", "France", "Plateforme technologique femtoseconde - texturation/fonctionnalisation", 1, "https://www.manutech-usd.fr"),
@@ -44,6 +75,8 @@ ACTORS = [
     ("LightPulse Laser Precision", "Allemagne", "Développement / échantillonnage & micro-usinage USP", 0, "https://www.light-pulse.de/en-gb/"),
 ]
 
+# Quelques URLs de pages connues, injectées d'office dans actor_sources au démarrage (avant
+# même le premier crawl) pour garantir que ces pages "à forte valeur" seront visitées.
 SEED_SOURCES = [
     ("ALPHANOV", "https://www.alphanov.com/en/collaborative-projects/femtocell-pilot-line-next-generation-gen4-batteries", "application"),
     ("HEF", "https://hef.group/en/glacier-project-femtosecond-laser-and-glass-cutting/", "application"),
@@ -68,6 +101,7 @@ SEED_EVIDENCE: list[dict[str, Any]] = []
 
 
 def utc_now() -> str:
+    """Horodatage ISO 8601 en UTC, à la seconde près -- utilisé partout comme created_at/updated_at."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -102,12 +136,17 @@ def _add_columns(db: sqlite3.Connection, table: str, columns: dict[str, str]) ->
 
 
 def _slug(value: str | None) -> str:
+    """Normalise une chaîne en un "slug" ASCII minuscule et sans accents (ex: "Électrodes" ->
+    "electrodes"). Utilisé comme brique de base des clés déterministes (market_fact_key,
+    application_key, ...) pour que deux libellés qui ne diffèrent que par la casse/les accents
+    produisent la même clé -- donc la même ligne en base au lieu de deux lignes dupliquées."""
     text = unicodedata.normalize("NFKD", value or "")
     text = "".join(char for char in text if not unicodedata.combining(char))
     return re.sub(r"[^a-z0-9]+", "-", text.casefold()).strip("-") or "non-identifie"
 
 
 def _normalize_page_type_value(value: str | None) -> str:
+    """Ramène un type de page au singulier canonique (ex: "applications" -> "application")."""
     raw = (value or "other").strip().casefold().replace(" ", "_")
     aliases = {
         "applications": "application", "projects": "project", "products": "product",
@@ -145,12 +184,26 @@ def language_from_url(url: str | None) -> str | None:
     return None
 
 
-def market_fact_key(actor: str, bucket: str, market: str, component: str, operation: str) -> str:
-    """Language-independent canonical key for one market application fact."""
+# Ces quatre fonctions "*_key" sont le cœur du mécanisme anti-duplication de l'app : elles
+# transforment les champs métier d'un fait (acteur, marché, composant...) en une chaîne
+# stable ("actor|bucket|market|component|operation") qui sert de clé UNIQUE en base
+# (voir evidence_fact_key_uq, evidence_application_key_uq, offers.fact_key). Que le même fait
+# soit observé une fois ou cent fois (dans une langue ou une autre, sur une page ou une autre),
+# il produit toujours la même clé et vient donc mettre à jour la même ligne au lieu d'en créer
+# une nouvelle -- c'est cette valeur qu'on cherche avec `WHERE fact_key=?` / `WHERE
+# application_key=?` dans scrapers._upsert_market_candidate / _upsert_offer_candidate.
+def market_fact_key(actor: str, bucket: str, market: str | None, component: str | None, operation: str | None) -> str:
+    """Language-independent canonical key for one market application fact.
+
+    market/component/operation accept None because a "partial" fact (see scrapers._candidate,
+    chantier 2 item 2) may have only 2 of the 3 core dimensions -- _slug(None) falls back to a
+    stable "non-identifie" placeholder, so two partial facts still dedupe correctly as long as
+    the dimensions they DO share are identical.
+    """
     return "|".join(_slug(value) for value in (actor, bucket, market, component, operation))
 
 
-def application_key(actor: str, market: str, component: str, operation: str) -> str:
+def application_key(actor: str, market: str | None, component: str | None, operation: str | None) -> str:
     """Language- and maturity-independent identity for one market application.
 
     Unlike ``market_fact_key``, this deliberately excludes the bucket, so an application that
@@ -160,10 +213,15 @@ def application_key(actor: str, market: str, component: str, operation: str) -> 
     return "|".join(_slug(value) for value in (actor, market, component, operation))
 
 
+# Ordre de maturité croissante : sert à savoir si un nouveau "bucket" observé pour un fait
+# représente une progression (ex: radar -> existing) ou une régression qu'il ne faut pas
+# appliquer automatiquement (voir scrapers._upsert_market_candidate: `upgrades_bucket`).
 BUCKET_RANK = {"existing": 2, "radar": 1, "pending": 0, "rejected": -1}
 
 
 def offer_fact_key(actor: str, offer_type: str, capability: str, operation: str | None, laser_process: str | None) -> str:
+    """Même principe que market_fact_key, mais pour une "offre" (offers) -- une capacité/
+    prestation d'un acteur qui n'est pas forcément rattachée à un marché/composant précis."""
     return "|".join(_slug(value) for value in (actor, offer_type, capability, operation or "", laser_process or ""))
 
 
@@ -336,10 +394,22 @@ def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: s
 
 
 def init_databases() -> None:
+    """Crée/actualise le schéma des 3 bases (appelée à chaque démarrage, voir app.py: lifespan).
+
+    Idempotente et additive : toutes les instructions sont `CREATE TABLE IF NOT EXISTS` /
+    `CREATE INDEX IF NOT EXISTS`, et les colonnes ajoutées après coup passent par
+    _add_columns() qui ne fait rien si la colonne existe déjà -- donc relancer cette fonction
+    sur une base qui a déjà des données ne perd jamais rien, elle ne fait que compléter le
+    schéma manquant. La fonction est découpée en 3 blocs `with connect(...)`, un par fichier
+    SQLite (ACTORS_DB, puis MARKET_DB, puis TECH_DB), chacun créant ses tables puis lançant
+    ses migrations de données (normalisation, dédoublonnage, backfill de colonnes).
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # --- Base 1/3 : ACTORS_DB (acteurs suivis, leurs pages sources, leur profil de crawl) ---
     with connect(ACTORS_DB) as db:
         db.executescript(
             """
+            -- Un acteur suivi (concurrent, centre technologique, référence interne...).
             CREATE TABLE IF NOT EXISTS actors (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
@@ -352,6 +422,7 @@ def init_databases() -> None:
                 last_status TEXT NOT NULL DEFAULT 'never',
                 updated_at TEXT NOT NULL
             );
+            -- Une relation (partenaire/fournisseur/client) entre deux acteurs, pour /api/network.
             CREATE TABLE IF NOT EXISTS actor_relations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
@@ -363,6 +434,7 @@ def init_databases() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS actor_relations_actor_idx ON actor_relations(actor_id);
+            -- Un fait ponctuel sourcé sur un acteur : certification obtenue ou différenciateur.
             CREATE TABLE IF NOT EXISTS actor_facts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
@@ -373,6 +445,7 @@ def init_databases() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS actor_facts_actor_idx ON actor_facts(actor_id);
+            -- Un événement daté sourcé sur un acteur (ex: acquisition, ouverture de site).
             CREATE TABLE IF NOT EXISTS actor_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
@@ -384,6 +457,36 @@ def init_databases() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS actor_events_actor_idx ON actor_events(actor_id);
+            -- Socle firmographique (chantier 3/5) : ce que l'acteur EST en tant qu'entreprise
+            -- (année de création, forme juridique, tranche d'effectif), par opposition à ce
+            -- qu'il FAIT (marché, technologie), déjà couvert par evidence/offers. Alimenté par
+            -- firmographics.collect_french_registry() -- voir ce module pour la portée exacte
+            -- (France uniquement, liste d'alias SIREN vérifiés à la main, pas de matching par
+            -- nom automatique) et ce qui reste volontairement NULL (revenue_eur, parent_group,
+            -- sites_json, cleanroom_iso_class, laser_systems_count : aucune source branchée
+            -- pour l'instant, colonnes réservées plutôt que fabriquées).
+            CREATE TABLE IF NOT EXISTS actor_profile (
+                actor_id INTEGER PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,
+                founded_year INTEGER,
+                legal_form_code TEXT,
+                headcount_bracket_code TEXT,
+                revenue_eur REAL,
+                parent_group TEXT,
+                sites_json TEXT,
+                cleanroom_iso_class TEXT,
+                laser_systems_count INTEGER,
+                registry_id TEXT,
+                registry_name TEXT,
+                registry_active INTEGER,
+                source_url TEXT,
+                as_of_date TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            -- Une page web connue pour un acteur : URL, dernier statut HTTP, hash de contenu
+            -- (pour détecter les changements), type de page détecté, score de priorité de
+            -- crawl... C'est la table centrale que scrapers.scrape_actors() alimente au fil du
+            -- crawl (une ligne par URL découverte/visitée).
             CREATE TABLE IF NOT EXISTS actor_sources (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
@@ -395,6 +498,8 @@ def init_databases() -> None:
                 last_checked_at TEXT,
                 last_changed_at TEXT
             );
+            -- Historique des lancements de collecte (une ligne par clic sur "Lancer le crawl
+            -- acteurs" -- voir app.py: start_scrape / _run_job).
             CREATE TABLE IF NOT EXISTS collection_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT NOT NULL,
@@ -405,6 +510,9 @@ def init_databases() -> None:
                 errors INTEGER NOT NULL DEFAULT 0,
                 message TEXT
             );
+            -- État du profil de crawl "adaptatif" d'un acteur (1 ligne par acteur) : stratégie
+            -- retenue (adaptive = avec IA de secours, generic = purement déterministe), état de
+            -- couverture des types de page stratégiques, dernière erreur éventuelle.
             CREATE TABLE IF NOT EXISTS site_profiles (
                 actor_id INTEGER PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,
                 strategy TEXT NOT NULL CHECK(strategy IN ('adaptive','generic')),
@@ -477,6 +585,17 @@ def init_databases() -> None:
             "last_error": "TEXT",
             "ambiguous": "INTEGER NOT NULL DEFAULT 0",
             "blocks_json": "TEXT",
+            # content_hash au moment de la DERNIERE extraction marché (scrapers.scrape_market),
+            # distinct de content_hash lui-même (qui reflète le dernier CRAWL, scrape_actors).
+            # Une page dont content_hash==market_extracted_hash n'a pas changé depuis sa
+            # dernière analyse marché et peut être sautée (voir _select_market_sources,
+            # chantier 2 item 4 : "ne re-analyser que les pages dont le content_hash a changé").
+            "market_extracted_hash": "TEXT",
+            # Date de publication de la page (chantier 4), extraite au moment du crawl (voir
+            # hybrid._extract_published_date) -- stockée ici pour que scrape_market() puisse la
+            # lire sans re-télécharger/re-parser le HTML, qu'elle utilise ou non les blocs
+            # mis en cache (_stored_blocks).
+            "published_date": "TEXT",
         })
         _add_columns(db, "site_profiles", {
             "coverage_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -523,6 +642,11 @@ def init_databases() -> None:
     with connect(MARKET_DB) as db:
         db.executescript(
             """
+            -- Un "fait marché" canonique : tel acteur adresse tel marché, avec tel composant,
+            -- via telle opération laser, à tel niveau de maturité industrielle (bucket).
+            -- Une ligne = un fait unique (déduplication via fact_key/application_key, voir
+            -- market_fact_key/application_key plus haut) ; les citations/preuves qui le
+            -- confirment sont dans evidence_sources, pas dupliquées ici.
             CREATE TABLE IF NOT EXISTS evidence (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 actor_name TEXT NOT NULL,
@@ -576,6 +700,9 @@ def init_databases() -> None:
         })
         db.executescript(
             """
+            -- Une preuve individuelle (URL + citation exacte) à l'appui d'une ligne evidence.
+            -- Plusieurs preuves peuvent citer le même fait (plusieurs langues, plusieurs pages) --
+            -- c'est ce qui alimente le compteur "proofs"/"languages" affiché dans l'UI.
             CREATE TABLE IF NOT EXISTS evidence_sources (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 evidence_id INTEGER NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
@@ -593,6 +720,9 @@ def init_databases() -> None:
             );
             CREATE INDEX IF NOT EXISTS evidence_sources_fact_idx ON evidence_sources(evidence_id);
 
+            -- Une capacité/offre d'un acteur (ex: "service de micro-usinage laser") qui n'est
+            -- PAS forcément rattachée à un marché ou un composant précis -- contrairement à
+            -- evidence, qui exige les trois dimensions marché/composant/opération.
             CREATE TABLE IF NOT EXISTS offers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 actor_name TEXT NOT NULL,
@@ -631,6 +761,8 @@ def init_databases() -> None:
             );
             CREATE INDEX IF NOT EXISTS offer_sources_fact_idx ON offer_sources(offer_id);
 
+            -- Historique : à quelle date un fait evidence a changé de bucket de maturité
+            -- (ex: radar -> existing), pour pouvoir tracer sa progression dans le temps.
             CREATE TABLE IF NOT EXISTS evidence_bucket_transitions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 evidence_id INTEGER NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
@@ -641,6 +773,10 @@ def init_databases() -> None:
             CREATE INDEX IF NOT EXISTS evidence_bucket_transitions_evidence_idx
                 ON evidence_bucket_transitions(evidence_id);
 
+            -- File d'attente de relecture humaine : un libellé proposé par l'IA (marché/
+            -- composant/opération) qui ne correspond à aucune entrée connue des lexiques de
+            -- scrapers.py. Un analyste valide ou rejette via /api/vocabulary-candidates
+            -- (voir accept_vocabulary_candidate/reject_vocabulary_candidate ci-dessous).
             CREATE TABLE IF NOT EXISTS vocabulary_candidates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 actor_name TEXT NOT NULL,
@@ -658,6 +794,9 @@ def init_databases() -> None:
             CREATE INDEX IF NOT EXISTS vocabulary_candidates_status_idx
                 ON vocabulary_candidates(review_status, created_at);
 
+            -- Libellés promus depuis vocabulary_candidates : rechargés en mémoire au démarrage
+            -- de chaque collecte marché (voir scrapers._load_custom_lexicon_entries) pour
+            -- enrichir les lexiques MARKETS/COMPONENTS/OPERATIONS sans redéployer le code.
             CREATE TABLE IF NOT EXISTS custom_lexicon_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 dimension TEXT NOT NULL CHECK(dimension IN ('market','component','operation')),
@@ -671,11 +810,26 @@ def init_databases() -> None:
         )
         _add_columns(db, "offers", {
             "last_seen_at": "TEXT",
+            # Chantier 4 (fiabiliser la preuve) : is_verbatim distingue une citation exacte
+            # (le scraper garantit déjà `quote in block.text`, voir scrapers._candidate) d'une
+            # reformulation -- jusqu'ici les deux cohabitaient dans `quote` sans distinction
+            # visible. source_date reçoit la date de publication de la page (voir
+            # hybrid._extract_published_date), à défaut la date d'observation.
+            "is_verbatim": "INTEGER NOT NULL DEFAULT 1",
+            "source_date": "TEXT",
         })
         _add_columns(db, "evidence_sources", {
             "relation_strength": "TEXT",
             "relation_evidence": "TEXT",
             "source_role": "TEXT",
+            "is_verbatim": "INTEGER NOT NULL DEFAULT 1",
+        })
+        _add_columns(db, "evidence", {
+            "is_verbatim": "INTEGER NOT NULL DEFAULT 1",
+        })
+        _add_columns(db, "offer_sources", {
+            "is_verbatim": "INTEGER NOT NULL DEFAULT 1",
+            "source_date": "TEXT",
         })
         _add_columns(db, "collection_runs", {
             "offers_added": "INTEGER NOT NULL DEFAULT 0",
@@ -690,6 +844,18 @@ def init_databases() -> None:
         db.execute("UPDATE evidence SET fact_status=CASE WHEN review_status='accepted' THEN 'validated' WHEN review_status='rejected' THEN 'rejected' ELSE 'review' END WHERE fact_status IS NULL OR fact_status='' OR fact_status='review'")
         db.execute("UPDATE evidence SET last_seen_at=COALESCE(last_seen_at,updated_at,created_at)")
         db.execute("UPDATE offers SET last_seen_at=COALESCE(last_seen_at,updated_at,created_at)")
+        # Chantier 4 : rows written by the scraper always set extraction_mode ("block-rules",
+        # "anthropic:...", "ollama:..." -- see scrapers._candidate/_offer_candidates/
+        # _ai_candidates) and are always genuinely verbatim (the pipeline enforces
+        # `quote in block.text`); extraction_mode IS NULL is exactly the audit's own signal for
+        # a manually-entered/seeded row (the 40 "pre_batch2"/"pre_deepenrich" groups etc.),
+        # whose `quote` is often a paraphrase, not an exact excerpt. One-time backfill: harmless
+        # to re-run since is_verbatim only ever moves 1->0 here, never back. `offers` has no
+        # extraction_mode column at all (unlike evidence/*_sources) -- every offer row has
+        # always come from the scraper, so its DEFAULT 1 is already correct with no backfill.
+        db.execute("UPDATE evidence SET is_verbatim=0 WHERE extraction_mode IS NULL")
+        db.execute("UPDATE evidence_sources SET is_verbatim=0 WHERE extraction_mode IS NULL")
+        db.execute("UPDATE offer_sources SET is_verbatim=0 WHERE extraction_mode IS NULL")
         # Both migrations run on every startup, not just once: they are idempotent (a row that
         # already carries its canonical key is only re-derived, never duplicated) and this keeps
         # the evidence table self-healing if a row is ever inserted or edited outside the normal
@@ -726,6 +892,7 @@ def init_databases() -> None:
     with connect(TECH_DB) as db:
         db.executescript(
             """
+            -- Une publication scientifique collectée via Crossref (voir scrapers.scrape_technology).
             CREATE TABLE IF NOT EXISTS documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 actor_name TEXT,
@@ -749,6 +916,9 @@ def init_databases() -> None:
                 errors INTEGER NOT NULL DEFAULT 0,
                 message TEXT
             );
+            -- Un signal de "maturité science -> industrie" pour un axe technologique donné
+            -- (ex: SLE, LIPSS...), potentiellement partagé entre plusieurs acteurs d'un même
+            -- projet collaboratif -- voir db.technology_signal_key.
             CREATE TABLE IF NOT EXISTS technology_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 axis TEXT NOT NULL,
@@ -866,6 +1036,9 @@ def reset_market_database(*, backup: bool = True) -> Path | None:
     return backup_path
 
 
+# Deux petits raccourcis génériques utilisés par app.py pour lire les bases sans ouvrir de
+# connexion à la main à chaque endpoint : `rows` pour un SELECT qui renvoie plusieurs lignes
+# (converties en dicts JSON-sérialisables), `scalar` pour une seule valeur (ex: un COUNT(*)).
 def rows(path: Path, query: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
     with connect(path) as db:
         return [dict(row) for row in db.execute(query, tuple(params)).fetchall()]
@@ -1167,3 +1340,45 @@ def reject_vocabulary_candidate(candidate_id: int) -> None:
         ).rowcount
     if not updated:
         raise ValueError(f"Vocabulary candidate {candidate_id} not found")
+
+
+# Même principe que accept_vocabulary_candidate/reject_vocabulary_candidate, mais pour les
+# faits `evidence` en attente de relecture humaine (fact_status='review' pour un fait proposé
+# par l'IA, 'partial' pour un fait à 2 dimensions sur 3 -- voir scrapers._candidate et
+# scrapers._ai_candidates, chantier 2 items 2 et 3). Avant ce couple de fonctions, ces faits
+# atterrissaient bien en base (jamais jetés) mais n'avaient aucun moyen d'en sortir : ni
+# promotion vers la matrice marché validée, ni rejet explicite.
+def accept_evidence_review(evidence_id: int) -> dict[str, Any]:
+    """Promote one review/partial evidence row to 'validated' after a human check.
+
+    Raises ValueError if the row doesn't exist or was already validated (fact_status
+    'validated' facts go through the normal collection pipeline, not this manual queue).
+    """
+    with connect(MARKET_DB) as db:
+        row = db.execute("SELECT id,fact_status FROM evidence WHERE id=?", (evidence_id,)).fetchone()
+        if not row:
+            raise ValueError(f"Evidence {evidence_id} not found")
+        if row["fact_status"] == "validated":
+            raise ValueError(f"Evidence {evidence_id} is already validated")
+        db.execute(
+            "UPDATE evidence SET fact_status='validated',review_status='accepted',updated_at=? WHERE id=?",
+            (utc_now(), evidence_id),
+        )
+    return {"id": evidence_id, "fact_status": "validated"}
+
+
+def reject_evidence_review(evidence_id: int) -> None:
+    """Mark a review/partial evidence row reviewed-and-declined. Raises ValueError if unknown.
+
+    fact_status is left untouched (still 'review'/'partial', for an audit trail of what was
+    proposed) -- review_status='rejected' alone is enough to drop it from both the validated
+    market matrix (which filters on fact_status='validated') and the pending-review queue
+    (which filters on review_status='review').
+    """
+    with connect(MARKET_DB) as db:
+        updated = db.execute(
+            "UPDATE evidence SET review_status='rejected',updated_at=? WHERE id=? AND fact_status!='validated'",
+            (utc_now(), evidence_id),
+        ).rowcount
+    if not updated:
+        raise ValueError(f"Evidence {evidence_id} not found or already validated")
