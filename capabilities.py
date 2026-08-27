@@ -249,14 +249,20 @@ def _extract_cleanroom_class(block_texts: list[str]) -> str | None:
 
 
 def _upsert_actor_fact(db, actor_id: int, dimension: str, value: str, source_url: str) -> int:
-    """Comme db.add_actor_fact, mais idempotent (dédoublonne sur actor_id+dimension+value) --
-    add_actor_fact est le point d'entrée manuel/API, celui-ci sert un collecteur qui repasse
-    sur les mêmes pages à chaque run et ne doit jamais réinsérer le même fait."""
-    existing = db.execute(
-        "SELECT id FROM actor_facts WHERE actor_id=? AND dimension=? AND value=?",
-        (actor_id, dimension, value),
-    ).fetchone()
-    if existing:
+    """Comme db.add_actor_fact, mais idempotent -- add_actor_fact est le point d'entrée
+    manuel/API, celui-ci sert un collecteur qui repasse sur les mêmes pages à chaque run et ne
+    doit jamais réinsérer le même fait. Le dédoublonnage est en SOUS-CHAÎNE (pas juste égalité
+    exacte) : en production, plusieurs acteurs avaient déjà une entrée saisie à la main avant ce
+    collecteur (ex: "ISO 9001:2015", "DIN EN ISO 13485:2016") -- un match exact contre notre
+    libellé canonique ("ISO 9001") les aurait ratées et créé un doublon visible dans la fiche.
+    Une entrée existante qui contient déjà notre libellé, dans n'importe quelle casse, est
+    considérée comme couvrant le même fait."""
+    existing_values = [
+        row["value"] for row in db.execute(
+            "SELECT value FROM actor_facts WHERE actor_id=? AND dimension=?", (actor_id, dimension),
+        ).fetchall()
+    ]
+    if any(value.casefold() in existing.casefold() for existing in existing_values):
         return 0
     db.execute(
         "INSERT INTO actor_facts(actor_id,dimension,value,source_url,review_status,created_at) VALUES(?,?,?,?,'verified',?)",

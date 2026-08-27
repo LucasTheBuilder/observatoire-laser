@@ -263,6 +263,32 @@ class CollectCapabilitySpecsTests(unittest.TestCase):
                 ).fetchone()
             self.assertEqual("Salle blanche ISO 6", row["value"])
 
+    def test_preexisting_manually_worded_certification_is_not_duplicated(self):
+        # Real production case: an actor already had "ISO 9001:2015" entered by hand before
+        # this collector existed. Our canonical "ISO 9001" must recognize that as the same
+        # fact instead of adding a second, redundant entry to the fiche.
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+
+            def run():
+                self._seed(actors_db, "LLT Applikation", "about", "Certified ISO 9001 quality management.")
+                actor_id = dbmod.rows(actors_db, "SELECT id FROM actors WHERE name='LLT Applikation'")[0]["id"]
+                with dbmod.connect(actors_db) as db:
+                    db.execute(
+                        "INSERT INTO actor_facts(actor_id,dimension,value,source_url,created_at) VALUES(?,?,?,?,?)",
+                        (actor_id, "certification", "DIN EN ISO 9001:2015", "https://manual.example/entered-by-hand", dbmod.utc_now()),
+                    )
+                return collect_capability_specs()
+
+            result = self._run(actors_db, run)
+            self.assertEqual(0, result["certifications_added"])
+            with dbmod.connect(actors_db) as db:
+                count = db.execute(
+                    """SELECT COUNT(*) FROM actor_facts f JOIN actors a ON a.id=f.actor_id
+                       WHERE a.name='LLT Applikation' AND f.dimension='certification'"""
+                ).fetchone()[0]
+            self.assertEqual(1, count)
+
     def test_second_run_does_not_duplicate_certification_facts(self):
         with tempfile.TemporaryDirectory() as tmp:
             actors_db = Path(tmp) / "actors.db"
