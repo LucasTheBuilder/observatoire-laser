@@ -18,6 +18,7 @@ Organisation des endpoints (tous préfixés /api/, sauf `/` qui sert index.html)
 - /api/vocabulary-candidates* : file de relecture humaine des libellés proposés par l'IA.
 - /api/offers*, /api/technology-signals* : offres concurrentes et signaux technologiques.
 - /api/documents : publications/brevets/projets collectés récemment (page "Technologies futures").
+- /api/page-versions/{source_id} : historique des versions archivées d'une page (chantier 6).
 - /api/scrape/{kind} : démarre/consulte une collecte (actors/market/technology/cordis/
   firmographics/openalex/press/capabilities/monthly).
 """
@@ -104,6 +105,60 @@ def _coverage_level(source_count: int) -> str:
     if source_count >= 1:
         return "partial"
     return "weak"
+
+
+# Chantier 6 (historiser et scorer) : "score de complétude par acteur (nb de dimensions
+# renseignées / nb de dimensions attendues, pondéré par la fraîcheur)" -- l'audit citait
+# Pulsar Photonics (acteur priority, 164 URLs découvertes) comme n'ayant AUCUN fait marché
+# sans que rien ne le signale. Chaque dimension est un booléen calculé live à partir d'une
+# table déjà existante (jamais stocké), donc ce score ne peut jamais dériver des faits réels.
+COMPLETENESS_DIMENSIONS: list[tuple[str, str]] = [
+    ("market_facts", "Faits marché confirmés"),
+    ("value_chain", "Chaîne de valeur"),
+    ("capabilities_demonstrated", "Capacités démontrées"),
+    ("firmographics", "Profil firmographique"),
+    ("capability_spec", "Capacités chiffrées"),
+    ("facts", "Certifications / différenciateurs"),
+    ("documents", "Publications / brevets / projets"),
+]
+
+
+def _freshness_factor(last_scraped_at: str | None) -> float:
+    """Un acteur jamais crawlé, ou crawlé il y a longtemps, ne mérite pas la même confiance
+    dans son score de complétude qu'un acteur revu récemment -- les seuils sont un choix
+    éditorial documenté, pas une mesure, au même titre que _coverage_level ci-dessus."""
+    if not last_scraped_at:
+        return 0.3
+    try:
+        scraped = datetime.fromisoformat(last_scraped_at)
+    except ValueError:
+        return 0.3
+    if scraped.tzinfo is None:
+        scraped = scraped.replace(tzinfo=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - scraped.astimezone(timezone.utc)).days
+    if age_days <= 30:
+        return 1.0
+    if age_days <= 90:
+        return 0.85
+    if age_days <= 180:
+        return 0.6
+    return 0.35
+
+
+def _completeness(present: dict[str, bool], last_scraped_at: str | None) -> dict[str, Any]:
+    total = len(COMPLETENESS_DIMENSIONS)
+    have = sum(1 for key, _label in COMPLETENESS_DIMENSIONS if present.get(key))
+    freshness = _freshness_factor(last_scraped_at)
+    score = round((have / total) * freshness, 2)
+    missing = [label for key, label in COMPLETENESS_DIMENSIONS if not present.get(key)]
+    return {
+        "completeness_score": score,
+        "completeness_present": have,
+        "completeness_total": total,
+        "completeness_freshness": freshness,
+        "completeness_missing": missing,
+    }
+
 
 # Un seul worker : les collectes (scrape_actors/scrape_market/scrape_technology) sont
 # longues et intensives en réseau/IA, donc on les sérialise plutôt que de les paralléliser --
@@ -413,7 +468,9 @@ def list_actors():
     """Liste complète des acteurs avec, pour chacun, des champs calculés (jamais stockés
     directement) à partir de market.db : `evidence_confirmed` (un C1/C2 a-t-il vraiment une
     preuve en base ?), `value_chain_stages` (à quels stades de maturité il a été observé),
-    `coverage_level` (bonne/partielle/faible, selon le nb de sources distinctes)."""
+    `coverage_level` (bonne/partielle/faible, selon le nb de sources distinctes),
+    `completeness_score` (chantier 6 : nb de dimensions renseignées / attendues, pondéré par
+    la fraîcheur du dernier crawl -- voir _completeness ci-dessus)."""
     # Includes paused (active=0) actors too, with the flag exposed, so the UI can offer a
     # "reactivate" action -- filtering them out here would make pausing one-way.
     actors = rows(ACTORS_DB, """SELECT a.id,a.name,a.country,a.role,a.priority,a.official_url,a.active,a.last_scraped_at,a.last_status,
@@ -458,6 +515,16 @@ def list_actors():
         + rows(MARKET_DB, "SELECT e.actor_name,es.source_url FROM evidence_sources es JOIN evidence e ON e.id=es.evidence_id WHERE e.fact_status='validated'")
     ):
         sources_by_actor.setdefault(row["actor_name"], set()).add(row["source_url"])
+    # Chantier 6 completeness dimensions not already covered by a set above: evidence (market
+    # facts, as opposed to offers = capabilities) and documents (technology.db, chantier 3).
+    evidence_actors = {
+        row["actor_name"]
+        for row in rows(MARKET_DB, "SELECT DISTINCT actor_name FROM evidence WHERE fact_status='validated'")
+    }
+    document_actors = {
+        row["actor_name"]
+        for row in rows(TECH_DB, "SELECT DISTINCT actor_name FROM documents WHERE actor_name IS NOT NULL")
+    }
     facts_by_actor: dict[int, list[dict[str, Any]]] = {}
     for row in rows(ACTORS_DB, "SELECT actor_id,dimension,value,source_url FROM actor_facts ORDER BY dimension,id"):
         facts_by_actor.setdefault(row["actor_id"], []).append(row)
@@ -476,7 +543,29 @@ def list_actors():
         actor["coverage_level"] = _coverage_level(len(sources_by_actor.get(actor["name"], set())))
         actor["facts"] = facts_by_actor.get(actor["id"], [])
         actor["events"] = events_by_actor.get(actor["id"], [])
+        actor.update(_completeness({
+            "market_facts": actor["name"] in evidence_actors,
+            "value_chain": bool(actor["value_chain_stages"]),
+            "capabilities_demonstrated": actor["name"] in confirmed_actors,
+            "firmographics": actor["founded_year"] is not None,
+            "capability_spec": actor["capability_source_url"] is not None,
+            "facts": bool(actor["facts"]),
+            "documents": actor["name"] in document_actors,
+        }, actor["last_scraped_at"]))
     return actors
+
+
+@app.get("/api/page-versions/{source_id}")
+def page_versions(source_id: int):
+    """Historique des versions archivées d'une page (chantier 6, db.page_versions) : l'ancien
+    contenu à chaque changement de content_hash détecté, le plus récent en premier. blocks_json
+    n'est pas renvoyé ici (pas encore de vue diff dans le front) -- seulement de quoi savoir
+    QUAND une page a changé et sous quel titre."""
+    return rows(
+        ACTORS_DB,
+        "SELECT id,content_hash,title,captured_at,archived_at FROM page_versions WHERE source_id=? ORDER BY id DESC",
+        (source_id,),
+    )
 
 
 @app.get("/api/actors/duplicates")

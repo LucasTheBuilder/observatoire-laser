@@ -782,6 +782,25 @@ function cardSummaryLine(a) {
   return text.length > 300 ? `${text.slice(0, 299)}…` : text;
 }
 
+// Chantier 6 : "score de complétude par acteur ... c'est ce qui pilote l'effort de collecte,
+// aujourd'hui rien ne signale qu'un acteur priority avec des dizaines d'URLs découvertes a
+// zéro fait marché" -- ce badge est délibérément sur la CARTE (pas seulement dans la fiche),
+// pour être visible d'un coup d'oeil sur la liste complète des acteurs.
+function completenessLevel(score) {
+  if (score >= 0.6) return "good";
+  if (score >= 0.3) return "partial";
+  return "weak";
+}
+
+function completenessBadge(a) {
+  const pct = Math.round((a.completeness_score || 0) * 100);
+  const level = completenessLevel(a.completeness_score || 0);
+  const title = (a.completeness_missing || []).length
+    ? `Manque : ${a.completeness_missing.join(", ")}`
+    : "Complet sur toutes les dimensions suivies";
+  return `<span class="completeness-badge lvl-${level}" title="${esc(title)}">${pct}% complet</span>`;
+}
+
 function actorCard(a) {
   const paused = !a.active;
   const classBadge = a.competitive_class
@@ -789,7 +808,7 @@ function actorCard(a) {
     : "";
   const typeLabel = ACTOR_TYPE_LABELS[a.actor_type] ? `<p class="actor-type-label">${esc(ACTOR_TYPE_LABELS[a.actor_type])}</p>` : "";
   return `<article class="actor-card ${a.priority?'priority':''}" ${paused?'style="opacity:.55"':''}>
-    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>★ Prioritaire</span>':''}</div></div>
+    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>★ Prioritaire</span>':''}${completenessBadge(a)}</div></div>
     <h3 class="actor-name-link" data-actor-detail="${a.id}">${esc(a.name)}</h3>${typeLabel}<p class="actor-summary-line">${esc(cardSummaryLine(a))}</p>
     <div class="actor-card-actions">
       <button class="actor-detail-link" data-actor-detail="${a.id}">Voir la fiche →</button>
@@ -900,6 +919,7 @@ function actorDetailContent(a) {
       <h4>Preuves</h4>
       <p>${proofsTotal} preuve(s) issues de nos collectes${a.evidence_confirmed === false ? ' — <span class="evidence-warning">⚠ non confirmé par nos preuves</span>' : ""}</p>
       <p class="coverage-note">Couverture documentaire : <b>${COVERAGE_LABELS[a.coverage_level] || "Non documenté dans la base"}</b>. ${COVERAGE_HINTS[a.coverage_level] || ""}</p>
+      <p class="coverage-note">Complétude de la fiche : <b>${Math.round((a.completeness_score || 0) * 100)}%</b> (${a.completeness_present}/${a.completeness_total} dimensions, pondéré par la fraîcheur du dernier crawl).${(a.completeness_missing || []).length ? ` Manque : ${a.completeness_missing.map(esc).join(", ")}.` : " Toutes les dimensions suivies sont renseignées."}</p>
     </div>
 
     <div class="detail-block admin-block">

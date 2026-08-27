@@ -87,6 +87,10 @@ TIMEOUT = httpx.Timeout(18.0, connect=8.0)
 # built to absorb bursty traffic; override via env vars if a faster/slower pace is needed.
 CRAWL_DELAY_SECONDS = float(os.getenv("CRAWL_DELAY_SECONDS", "0.5"))
 CRAWL_MAX_RETRIES = int(os.getenv("CRAWL_MAX_RETRIES", "2"))
+
+# Chantier 6 : nb de versions archivées (db.page_versions) conservées par page -- borne la
+# croissance de l'historique au fil des recrawls mensuels répétés, plutôt que de tout garder.
+PAGE_VERSIONS_RETENTION = 5
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 ROBOTS_CACHE_TTL_SECONDS = 6 * 3600
 
@@ -1853,7 +1857,10 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                     digest = hashlib.sha256("|".join(block.fingerprint for block in document.blocks).encode()).hexdigest()
 
                     with connect(ACTORS_DB) as db:
-                        previous = db.execute("SELECT content_hash FROM actor_sources WHERE id=?", (source_id,)).fetchone()
+                        previous = db.execute(
+                            "SELECT content_hash,blocks_json,last_title,last_checked_at FROM actor_sources WHERE id=?",
+                            (source_id,),
+                        ).fetchone()
                     previous_hash = previous["content_hash"] if previous else None
                     is_changed = bool(previous_hash and previous_hash != digest)
                     blocks_json = json.dumps([block_payload(block) for block in document.blocks[:40]], ensure_ascii=False)
@@ -1869,6 +1876,20 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                     visited_by_type[fetched_type] += 1
 
                     with connect(ACTORS_DB) as db:
+                        if is_changed:
+                            # Archive the version about to be overwritten below -- see
+                            # PAGE_VERSIONS_RETENTION and db.page_versions' docstring.
+                            db.execute(
+                                """INSERT INTO page_versions(source_id,content_hash,blocks_json,title,captured_at,archived_at)
+                                   VALUES(?,?,?,?,?,?)""",
+                                (source_id, previous_hash, previous["blocks_json"], previous["last_title"], previous["last_checked_at"], stamp),
+                            )
+                            db.execute(
+                                """DELETE FROM page_versions WHERE source_id=? AND id NOT IN (
+                                       SELECT id FROM page_versions WHERE source_id=? ORDER BY id DESC LIMIT ?
+                                   )""",
+                                (source_id, source_id, PAGE_VERSIONS_RETENTION),
+                            )
                         db.execute(
                             """UPDATE actor_sources SET content_hash=?,last_http_status=?,last_checked_at=?,last_title=?,
                                       page_type=?,source_score=?,extraction_mode=?,structure_hash=?,blocks_json=?,last_error=NULL,

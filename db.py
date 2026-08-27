@@ -591,6 +591,24 @@ def init_databases() -> None:
                 last_checked_at TEXT,
                 last_changed_at TEXT
             );
+            -- Historique des versions d'une page (chantier 6 : "le content_hash détecte déjà
+            -- le changement, il suffit de conserver l'avant"). Une ligne par changement de
+            -- contenu détecté -- voir scrapers.scrape_actors, juste avant que la ligne
+            -- actor_sources correspondante ne soit écrasée par la nouvelle version : c'est
+            -- l'ancien (content_hash,blocks_json,title) qui est archivé ici, jamais le nouveau
+            -- (déjà dans actor_sources, pas besoin d'un double). Retention bornée par
+            -- scrapers.PAGE_VERSIONS_RETENTION, pour que l'historique ne grossisse pas sans
+            -- limite au fil des recrawls mensuels.
+            CREATE TABLE IF NOT EXISTS page_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL REFERENCES actor_sources(id) ON DELETE CASCADE,
+                content_hash TEXT,
+                blocks_json TEXT,
+                title TEXT,
+                captured_at TEXT,
+                archived_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS page_versions_source_idx ON page_versions(source_id);
             -- Historique des lancements de collecte (une ligne par clic sur "Lancer le crawl
             -- acteurs" -- voir app.py: start_scrape / _run_job).
             CREATE TABLE IF NOT EXISTS collection_runs (
