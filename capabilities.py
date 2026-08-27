@@ -1,25 +1,50 @@
-"""Capacités chiffrées (chantier 5 de l'audit collecte) : ce que l'acteur SAIT FAIRE en
+"""Capacités chiffrées (chantier 5) et certifications/salle blanche (§3.2, segment
+prestataires industriels / job-shops) de l'audit collecte : ce que l'acteur SAIT FAIRE en
 chiffres (finesse de gravure, tolérance, format de pièce, cadence, longueurs d'onde, durée
-d'impulsion, matériaux qualifiés, taille de série) -- par opposition à ce qu'il EST
-(firmographics.py) ou à ce qu'il DÉMONTRE par marché (evidence/offers). Remplit
-``capability_spec``.
+d'impulsion, matériaux qualifiés, taille de série) et ce qu'il DÉTIENT comme accréditation
+(normes ISO, classe de salle blanche) -- par opposition à ce qu'il EST (firmographics.py) ou à
+ce qu'il DÉMONTRE par marché (evidence/offers). Remplit ``capability_spec`` et, pour les
+certifications/salle blanche, ``actor_facts``.
+
+L'audit groupe ces deux familles dans la même phrase ("Extraire systématiquement : normes ISO,
+classe de salle blanche, nombre et type de systèmes laser, taille de lot mini/maxi, tolérances
+annoncées, matériaux qualifiés") parce que ce sont les mêmes pages qui les portent -- ce module
+les extrait donc dans la même passe plutôt que de re-télécharger deux fois les mêmes URLs.
 
 Aucune nouvelle collecte web : ce module relit les pages déjà crawlées et classées
-product/equipment/capability par scrapers.scrape_actors() (blocks_json en cache dans
-actor_sources, ou re-téléchargées à la volée si le cache est absent -- jamais recrawlées en
-profondeur, ce module ne découvre aucune nouvelle URL). C'est exactement la source que l'audit
-appelle "datasheets PDF, débloquées par le chantier 1" pour ce groupe d'acteurs.
+product/equipment/capability/service/about par scrapers.scrape_actors() (blocks_json en cache
+dans actor_sources, ou re-téléchargées à la volée si le cache est absent -- jamais recrawlées
+en profondeur, ce module ne découvre aucune nouvelle URL). service/about sont inclus en plus du
+trio initial du chantier 5 : une certification ISO ou une classe de salle blanche se déclare
+typiquement sur une page "Qualité"/"À propos"/"Services", rarement sur une fiche produit --
+contrairement aux specs numériques (chantier 5), dont le contexte de gating (mots-clés dans le
+même bloc) reste tout aussi fiable quel que soit le type de page d'origine.
 
 Extraction déterministe uniquement (regex bornées par une unité ET, pour les champs les plus
 ambigus, un mot de contexte dans le même bloc éditorial) -- jamais d'IA, même logique que
-db.classify_evidence_type. Une ligne par acteur ; chaque champ numérique retient la MEILLEURE
-valeur trouvée sur l'ensemble de ses pages product/equipment/capability :
+db.classify_evidence_type. Une ligne capability_spec par acteur ; chaque champ numérique
+retient la MEILLEURE valeur trouvée sur l'ensemble de ses pages :
   - min pour min_feature_size_um, tolerance_um, pulse_duration_fs (plus petit = plus fin/rapide)
   - max pour max_part_size_mm, throughput_units_per_h (plus grand = plus capable)
 ``wavelengths_nm``/``materials_qualified`` sont des listes JSON (toutes les valeurs distinctes
 trouvées, pas une seule). ``batch_size_range`` est stocké comme la citation brute du passage
 matché (pas reformulé) -- même principe que evidence.quote_verbatim : une plage de lot est trop
 spécifique au contexte de la phrase pour être normalisée sans risque de trahir la source.
+
+Certifications (``actor_facts``, dimension='certification') : un code reconnu (ISO 9001, ISO
+13485, ISO 14001, AS9100, IATF 16949, ITAR, Nadcap, ISO/IEC 17025) matché littéralement --
+contrairement à db._CERTIFICATION_RE (utilisé pour classify_evidence_type, où un simple signal
+"il y a un code ISO quelque part" suffit), chaque code est vérifié individuellement pour ne
+jamais enregistrer un code non pertinent (ex: ISO 8601, un format de date, ne matche aucun de
+ces motifs). Classe de salle blanche (``actor_facts``, dimension='differentiator', par cohérence
+avec le reste des différenciateurs déjà stockés là -- pas de nouvelle colonne/CHECK à migrer) :
+ISO 14644 (ISO 1-9) ou Federal Standard 209E (Class 1 à 100000), acceptée seulement si un mot de
+contexte ("cleanroom"/"salle blanche"/...) apparaît dans le même bloc -- un "ISO 7" isolé n'est
+pas une classe de salle blanche. Écrit dans actor_profile.cleanroom_iso_class délibérément PAS
+choisi : cette colonne partage un source_url/as_of_date unique par acteur avec firmographics.py
+(chantier 5), et lui faire porter une deuxième source créerait exactement le risque de
+mauvaise attribution que la décision du chantier 4/5 (pas de provenance par-champ) a refusé de
+résoudre -- actor_facts, où chaque ligne a déjà son propre source_url, n'a pas ce problème.
 
 Hors scope, honnêtement absent plutôt que deviné : une "référence client nommée" comme preuve de
 capacité (même exclusion que db.classify_evidence_type, pour la même raison -- pas de
@@ -41,7 +66,7 @@ from hybrid import is_pdf_response, parse_document, parse_pdf_document
 from scrapers import HEADERS, MATERIALS, TIMEOUT, _fetch, _match_all_labels, _stored_blocks
 from site_profiles import get_site_profile
 
-CAPABILITY_PAGE_TYPES = ("product", "equipment", "capability")
+CAPABILITY_PAGE_TYPES = ("product", "equipment", "capability", "service", "about")
 # Bounds capacity of work per actor -- current data (81 product + 60 equipment + 16 capability
 # pages across 34 actors) never gets close to this, it only guards against one actor's page
 # count growing unchecked as the crawl deepens over time.
@@ -84,6 +109,29 @@ _WAVELENGTH_MIN_NM = 200
 _WAVELENGTH_MAX_NM = 2200
 _PULSE_MIN_FS = 5
 _PULSE_MAX_FS = 100_000
+
+# §3.2 : "Certification et capacité industrielle sont les deux critères d'achat de ce segment
+# ... 9 certifications en base." Chaque code est un motif dédié (pas une regex générique type
+# "ISO \d+") pour ne jamais enregistrer un numéro ISO non pertinent (ISO 8601 est un format de
+# date, pas une certification) comme preuve de conformité.
+_CERTIFICATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ISO 9001", re.compile(r"\biso\s?9001\b", re.IGNORECASE)),
+    ("ISO 13485", re.compile(r"\biso\s?13485\b", re.IGNORECASE)),
+    ("ISO 14001", re.compile(r"\biso\s?14001\b", re.IGNORECASE)),
+    ("AS9100", re.compile(r"\bas\s?9100\b", re.IGNORECASE)),
+    ("IATF 16949", re.compile(r"\biatf\s?16949\b", re.IGNORECASE)),
+    ("ITAR", re.compile(r"\bitar\b", re.IGNORECASE)),
+    ("Nadcap", re.compile(r"\bnadcap\b", re.IGNORECASE)),
+    ("ISO/IEC 17025", re.compile(r"\biso\s?(?:/\s?iec\s?)?17025\b", re.IGNORECASE)),
+)
+
+# Classe de salle blanche : ISO 14644 (ISO 1 à 9, la norme actuelle) ou Federal Standard 209E
+# (Class 1 à 100000, retiré officiellement mais toujours utilisé dans l'industrie). Un chiffre
+# seul est sans signification -- accepté uniquement si un mot de ce contexte apparaît dans le
+# même bloc (même principe que _FEATURE_SIZE_CONTEXT/_PART_SIZE_CONTEXT ci-dessus).
+_CLEANROOM_CONTEXT = ("cleanroom", "clean room", "clean-room", "salle blanche", "classe de propreté")
+_CLEANROOM_ISO_CLASS_RE = re.compile(r"\biso\s*(?:class\s*)?([1-9])\b", re.IGNORECASE)
+_CLEANROOM_FED_CLASS_RE = re.compile(r"\bclass\s*(100000|10000|1000|100|10|1)\b", re.IGNORECASE)
 
 
 def _parse_number(raw: str) -> float | None:
@@ -173,6 +221,50 @@ def _extract_capabilities(block_texts: list[str]) -> dict[str, Any]:
     }
 
 
+def _extract_certifications(block_texts: list[str]) -> list[str]:
+    found: set[str] = set()
+    for text in block_texts:
+        for label, pattern in _CERTIFICATION_PATTERNS:
+            if pattern.search(text):
+                found.add(label)
+    return sorted(found)
+
+
+def _extract_cleanroom_class(block_texts: list[str]) -> str | None:
+    """Norme ISO 14644 préférée si trouvée (c'est la norme en vigueur) ; sinon Federal Standard
+    209E. Les deux échelles ne sont pas convertibles l'une en l'autre -- pas de mélange, on
+    retient la meilleure classe (le plus petit chiffre) au sein de l'échelle trouvée."""
+    iso_values: list[int] = []
+    fed_values: list[int] = []
+    for text in block_texts:
+        if not _contains_any(text, _CLEANROOM_CONTEXT):
+            continue
+        iso_values.extend(int(match.group(1)) for match in _CLEANROOM_ISO_CLASS_RE.finditer(text))
+        fed_values.extend(int(match.group(1)) for match in _CLEANROOM_FED_CLASS_RE.finditer(text))
+    if iso_values:
+        return f"ISO {min(iso_values)}"
+    if fed_values:
+        return f"Class {min(fed_values)}"
+    return None
+
+
+def _upsert_actor_fact(db, actor_id: int, dimension: str, value: str, source_url: str) -> int:
+    """Comme db.add_actor_fact, mais idempotent (dédoublonne sur actor_id+dimension+value) --
+    add_actor_fact est le point d'entrée manuel/API, celui-ci sert un collecteur qui repasse
+    sur les mêmes pages à chaque run et ne doit jamais réinsérer le même fait."""
+    existing = db.execute(
+        "SELECT id FROM actor_facts WHERE actor_id=? AND dimension=? AND value=?",
+        (actor_id, dimension, value),
+    ).fetchone()
+    if existing:
+        return 0
+    db.execute(
+        "INSERT INTO actor_facts(actor_id,dimension,value,source_url,review_status,created_at) VALUES(?,?,?,?,'verified',?)",
+        (actor_id, dimension, value, source_url, utc_now()),
+    )
+    return 1
+
+
 def _upsert_capability_spec(db, actor_id: int, fields: dict[str, Any], source_url: str) -> int:
     """Une ligne par acteur, comme firmographics._upsert_actor_profile -- un rafraîchissement
     remplace l'enveloppe précédente plutôt que de l'ignorer."""
@@ -206,7 +298,8 @@ def _upsert_capability_spec(db, actor_id: int, fields: dict[str, Any], source_ur
 
 
 def collect_capability_specs() -> dict:
-    """Point d'entrée (voir app.py: collectors["capabilities"])."""
+    """Point d'entrée (voir app.py: collectors["capabilities"]) -- remplit capability_spec ET,
+    dans la même passe de pages, actor_facts (certifications, classe de salle blanche)."""
     with connect(ACTORS_DB) as db:
         rows = [dict(row) for row in db.execute(
             f"""SELECT a.id AS actor_id,a.name,a.official_url,
@@ -228,6 +321,7 @@ def collect_capability_specs() -> dict:
         actor_meta.setdefault(actor_id, row)
 
     actors_scanned = pages_analyzed = pages_fetched = profiles_added = profiles_updated = errors = 0
+    certifications_added = cleanroom_facts_added = 0
     with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=TIMEOUT) as client:
         for actor_id, sources in by_actor.items():
             meta = actor_meta[actor_id]
@@ -260,12 +354,21 @@ def collect_capability_specs() -> dict:
             if not block_texts or primary_source_url is None:
                 continue
             fields = _extract_capabilities(block_texts)
-            if not any(fields.values()):
+            certifications = _extract_certifications(block_texts)
+            cleanroom_class = _extract_cleanroom_class(block_texts)
+            if not any(fields.values()) and not certifications and not cleanroom_class:
                 continue
             with connect(ACTORS_DB) as db:
-                created = _upsert_capability_spec(db, actor_id, fields, primary_source_url)
-            profiles_added += created
-            profiles_updated += int(not created)
+                if any(fields.values()):
+                    created = _upsert_capability_spec(db, actor_id, fields, primary_source_url)
+                    profiles_added += created
+                    profiles_updated += int(not created)
+                for label in certifications:
+                    certifications_added += _upsert_actor_fact(db, actor_id, "certification", label, primary_source_url)
+                if cleanroom_class:
+                    cleanroom_facts_added += _upsert_actor_fact(
+                        db, actor_id, "differentiator", f"Salle blanche {cleanroom_class}", primary_source_url,
+                    )
 
     return {
         "actors_with_pages": len(by_actor),
@@ -274,5 +377,7 @@ def collect_capability_specs() -> dict:
         "pages_fetched": pages_fetched,
         "profiles_added": profiles_added,
         "profiles_updated": profiles_updated,
+        "certifications_added": certifications_added,
+        "cleanroom_facts_added": cleanroom_facts_added,
         "errors": errors,
     }

@@ -21,7 +21,13 @@ sys.path.insert(0, str(ROOT))
 
 import capabilities
 import db as dbmod
-from capabilities import _extract_capabilities, _parse_number, collect_capability_specs
+from capabilities import (
+    _extract_capabilities,
+    _extract_certifications,
+    _extract_cleanroom_class,
+    _parse_number,
+    collect_capability_specs,
+)
 
 
 def _block(text: str, heading: str = "") -> dict:
@@ -90,6 +96,44 @@ class ExtractCapabilitiesTests(unittest.TestCase):
         self.assertIsNone(fields["batch_size_range"])
         self.assertEqual([], fields["wavelengths_nm"])
         self.assertEqual([], fields["materials_qualified"])
+
+
+class ExtractCertificationsTests(unittest.TestCase):
+    def test_recognized_codes_are_matched_regardless_of_spacing(self):
+        found = _extract_certifications(["Our quality system is certified ISO9001 and ISO 13485 for medical devices."])
+        self.assertEqual(["ISO 13485", "ISO 9001"], found)
+
+    def test_aerospace_and_export_control_codes(self):
+        found = _extract_certifications(["AS9100 certified, Nadcap accredited for special processes, ITAR registered."])
+        self.assertEqual(["AS9100", "ITAR", "Nadcap"], found)
+
+    def test_unrelated_iso_number_is_not_a_certification(self):
+        # ISO 8601 is a date format, not a quality/industry certification -- must never match.
+        found = _extract_certifications(["Dates on this page follow ISO 8601."])
+        self.assertEqual([], found)
+
+
+class ExtractCleanroomClassTests(unittest.TestCase):
+    def test_iso_class_requires_cleanroom_context(self):
+        with_context = _extract_cleanroom_class(["Machining is performed in an ISO 7 cleanroom."])
+        without_context = _extract_cleanroom_class(["Section ISO 7 of the quality manual covers calibration."])
+        self.assertEqual("ISO 7", with_context)
+        self.assertIsNone(without_context)
+
+    def test_iso_class_prefers_the_best_finest_across_blocks(self):
+        result = _extract_cleanroom_class(["Standard cleanroom: ISO 8.", "Premium line operates in an ISO 5 cleanroom."])
+        self.assertEqual("ISO 5", result)
+
+    def test_federal_standard_209e_class_fallback(self):
+        result = _extract_cleanroom_class(["Assembly takes place in a Class 10000 clean room."])
+        self.assertEqual("Class 10000", result)
+
+    def test_iso_scale_preferred_over_federal_when_both_present(self):
+        result = _extract_cleanroom_class(["Legacy Class 1000 clean room, now rated ISO 6 cleanroom."])
+        self.assertEqual("ISO 6", result)
+
+    def test_no_cleanroom_context_at_all_yields_none(self):
+        self.assertIsNone(_extract_cleanroom_class(["General manufacturing floor, no special classification."]))
 
 
 class CollectCapabilitySpecsTests(unittest.TestCase):
@@ -180,6 +224,63 @@ class CollectCapabilitySpecsTests(unittest.TestCase):
             self.assertEqual(1, second["profiles_updated"])
             with dbmod.connect(actors_db) as db:
                 count = db.execute("SELECT COUNT(*) FROM capability_spec").fetchone()[0]
+            self.assertEqual(1, count)
+
+    def test_certification_found_on_about_page_is_written_to_actor_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+
+            def run():
+                self._seed(actors_db, "Micreon", "about", "Our facility is certified ISO 9001 and ISO 13485.")
+                return collect_capability_specs()
+
+            result = self._run(actors_db, run)
+            self.assertEqual(2, result["certifications_added"])
+            with dbmod.connect(actors_db) as db:
+                values = {
+                    row["value"]
+                    for row in db.execute(
+                        """SELECT value FROM actor_facts f JOIN actors a ON a.id=f.actor_id
+                           WHERE a.name='Micreon' AND f.dimension='certification'"""
+                    ).fetchall()
+                }
+            self.assertEqual({"ISO 9001", "ISO 13485"}, values)
+
+    def test_cleanroom_class_found_on_service_page_is_written_as_differentiator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+
+            def run():
+                self._seed(actors_db, "Yalosys AG", "service", "Precision machining is performed in an ISO 6 cleanroom.")
+                return collect_capability_specs()
+
+            result = self._run(actors_db, run)
+            self.assertEqual(1, result["cleanroom_facts_added"])
+            with dbmod.connect(actors_db) as db:
+                row = db.execute(
+                    """SELECT value FROM actor_facts f JOIN actors a ON a.id=f.actor_id
+                       WHERE a.name='Yalosys AG' AND f.dimension='differentiator'"""
+                ).fetchone()
+            self.assertEqual("Salle blanche ISO 6", row["value"])
+
+    def test_second_run_does_not_duplicate_certification_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+
+            def run():
+                self._seed(actors_db, "OpTek Systems", "about", "Certified ISO 9001 facility.")
+                first = collect_capability_specs()
+                second = collect_capability_specs()
+                return first, second
+
+            first, second = self._run(actors_db, run)
+            self.assertEqual(1, first["certifications_added"])
+            self.assertEqual(0, second["certifications_added"])
+            with dbmod.connect(actors_db) as db:
+                count = db.execute(
+                    """SELECT COUNT(*) FROM actor_facts f JOIN actors a ON a.id=f.actor_id
+                       WHERE a.name='OpTek Systems' AND f.dimension='certification'"""
+                ).fetchone()[0]
             self.assertEqual(1, count)
 
 

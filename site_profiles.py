@@ -48,7 +48,12 @@ DEFAULT_SITE_PROFILE: dict[str, Any] = {
         # one generic page -- a target of 1 satisfies the boost after the first hit and lets the
         # rest of a rich site (e.g. one page per vertical) starve for budget indefinitely.
         "application": 6,
-        "case_study": 1,
+        # §3.2 de l'audit (prestataires industriels) : "case_study n'a que 6 pages sur 3 000
+        # dans toute la base -- la famille la plus riche en preuves d'exécution, et la moins
+        # couverte". Un target de 1 suffisait à satisfaire le boost dès la première page
+        # trouvée puis laissait le reste de la section (plusieurs études de cas par site,
+        # comme "application") mourir de faim -- même raisonnement que ci-dessus.
+        "case_study": 4,
         "market": 1,
         "project": 1,
         "news": 1,
@@ -78,7 +83,11 @@ DEFAULT_SITE_PROFILE: dict[str, Any] = {
     # plus une page a de chances de contenir de l'info métier utile, plus son boost est élevé.
     "page_type_boosts": {
         "application": 12,
-        "case_study": 12,
+        # §3.2 : "à remonter fortement dans page_type_boosts et coverage_targets" -- passé
+        # au-dessus de service/capability (16) plutôt qu'à égalité avec application (12),
+        # pour que le crawler choisisse une étude de cas non encore vue avant d'approfondir
+        # une famille déjà bien couverte.
+        "case_study": 20,
         "project": 8,
         "news": 3,
         "service": 16,
@@ -202,7 +211,9 @@ SITE_OVERRIDES: dict[str, dict[str, Any]] = {
             "capability": 1,
             "technology": 2,
             "application": 1,
-            "case_study": 1,
+            # case_study intentionally omitted: this override predates the §3.2 default bump
+            # to 4 -- it was a straight copy of the (then-default) value 1, not a deliberate
+            # cap, so it now inherits the higher default instead of silently overriding it back down.
             "market": 1,
             "project": 1,
             "news": 1,
