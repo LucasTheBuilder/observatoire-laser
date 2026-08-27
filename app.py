@@ -18,7 +18,7 @@ Organisation des endpoints (tous préfixés /api/, sauf `/` qui sert index.html)
 - /api/vocabulary-candidates* : file de relecture humaine des libellés proposés par l'IA.
 - /api/offers*, /api/technology-signals* : offres concurrentes et signaux technologiques.
 - /api/scrape/{kind} : démarre/consulte une collecte (actors/market/technology/cordis/
-  firmographics/openalex/monthly).
+  firmographics/openalex/press/monthly).
 """
 
 from __future__ import annotations
@@ -70,6 +70,7 @@ from db import (
 from firmographics import collect_french_registry
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from openalex import collect_openalex_publications
+from press import collect_press_mentions
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -117,14 +118,15 @@ jobs: dict[str, dict[str, Any]] = {
     "cordis": {"status": "idle", "result": None, "error": None},
     "firmographics": {"status": "idle", "result": None, "error": None},
     "openalex": {"status": "idle", "result": None, "error": None},
+    "press": {"status": "idle", "result": None, "error": None},
     "monthly": {"status": "idle", "result": None, "error": None},
 }
 
 
 def _collect_monthly() -> dict:
-    """Run the six collectors in dependency order for a one-click monthly refresh."""
+    """Run the seven collectors in dependency order for a one-click monthly refresh."""
     # Ordre important : market/technology s'appuient sur les pages découvertes par actors.
-    # cordis/firmographics/openalex n'ont aucune dépendance sur le crawl web (sources
+    # cordis/firmographics/openalex/press n'ont aucune dépendance sur le crawl web (sources
     # indépendantes, chantiers 3 et 5).
     return {
         "actors": scrape_actors(),
@@ -133,6 +135,7 @@ def _collect_monthly() -> dict:
         "cordis": collect_cordis(),
         "firmographics": collect_french_registry(),
         "openalex": collect_openalex_publications(),
+        "press": collect_press_mentions(),
     }
 
 
@@ -143,6 +146,7 @@ collectors: dict[str, Callable[[], dict]] = {
     "cordis": collect_cordis,
     "firmographics": collect_french_registry,
     "openalex": collect_openalex_publications,
+    "press": collect_press_mentions,
     "monthly": _collect_monthly,
 }
 
@@ -927,7 +931,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -942,7 +946,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 
