@@ -5,6 +5,7 @@ const state = {
   market: null,
   offers: [],
   technologySignals: [],
+  documents: [],
   actors: [],
   profiles: [],
   vocabulary: [],
@@ -709,6 +710,47 @@ function renderTechIntel() {
   wireActions();
 }
 
+// --- Technologies futures: recently collected documents (publications, patents, projects) --
+
+const DOC_TYPE_LABELS = {publication: "Publication", patent: "Brevet", project: "Projet", other: "Autre"};
+
+function docDateLabel(value) {
+  if (!value) return "Date inconnue";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Date inconnue";
+  return new Intl.DateTimeFormat("fr-FR", {dateStyle: "medium"}).format(date);
+}
+
+function documentRow(d) {
+  const typeLabel = DOC_TYPE_LABELS[d.document_type] || d.document_type;
+  const abstract = d.abstract ? `${d.abstract.slice(0, 220)}${d.abstract.length > 220 ? "…" : ""}` : "";
+  return `<div class="doc-row">
+    <span class="doc-type-badge ${esc(d.document_type)}">${esc(typeLabel)}</span>
+    <div class="doc-main">
+      <a href="${esc(d.source_url)}" target="_blank" rel="noopener"><strong>${esc(d.title)}</strong></a>
+      ${abstract ? `<p class="doc-abstract">${esc(abstract)}</p>` : ""}
+      ${d.doi ? `<span class="operation">DOI : ${esc(d.doi)}</span>` : ""}
+    </div>
+    <span>${esc(d.actor_name || "Non attribué")}</span>
+    <span>${esc(docDateLabel(d.published_at || d.created_at))}</span>
+  </div>`;
+}
+
+function renderFutureTech() {
+  const docs = state.documents || [];
+  content.innerHTML = header(
+    "Intelligence",
+    "Technologies futures",
+    "Publications, brevets, projets et autres documents collectés récemment.",
+  ) + (docs.length
+    ? `<div class="doc-table">
+        <div class="doc-head"><span>Type</span><span>Document</span><span>Acteur</span><span>Date</span></div>
+        ${docs.map(documentRow).join("")}
+      </div>`
+    : `<div class="empty">Aucun document collecté pour le moment.</div>`);
+  wireActions();
+}
+
 async function showTechnologySignalProofs(signalId) {
   const proofs = await api(`/api/technology-signals/${signalId}/proofs`);
   if (!proofs.length) {
@@ -1225,6 +1267,7 @@ function render(){
   if(state.view==="market") renderMarket();
   if(state.view==="offers") renderOffers();
   if(state.view==="techintel") renderTechIntel();
+  if(state.view==="futuretech") renderFutureTech();
   if(state.view==="actors") renderActors();
   if(state.view==="vocabulary") renderVocabulary();
   if(state.view==="collections") renderCollections();
@@ -1369,12 +1412,13 @@ document.querySelector(".dialog-close").addEventListener("click",()=>dialog.clos
 dialog.addEventListener("click",e=>{if(e.target===dialog)dialog.close()});
 
 async function refresh(){
-  [state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.actors,state.profiles,state.vocabulary,state.network,state.duplicates,state.pipelineFunnel]=await Promise.all([
+  [state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.documents,state.actors,state.profiles,state.vocabulary,state.network,state.duplicates,state.pipelineFunnel]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
     api("/api/market"),
     api("/api/offers"),
     api("/api/technology-signals"),
+    api("/api/documents"),
     api("/api/actors"),
     api("/api/profiles"),
     api("/api/vocabulary-candidates"),

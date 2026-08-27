@@ -17,6 +17,7 @@ Organisation des endpoints (tous préfixés /api/, sauf `/` qui sert index.html)
   (fact_status='partial'/'review') avant qu'ils ne rejoignent /api/market.
 - /api/vocabulary-candidates* : file de relecture humaine des libellés proposés par l'IA.
 - /api/offers*, /api/technology-signals* : offres concurrentes et signaux technologiques.
+- /api/documents : publications/brevets/projets collectés récemment (page "Technologies futures").
 - /api/scrape/{kind} : démarre/consulte une collecte (actors/market/technology/cordis/
   firmographics/openalex/press/monthly).
 """
@@ -911,6 +912,25 @@ def technology_signal_proofs(signal_id: int):
     for proof in proofs:
         proof["actor_names"] = json.loads(proof["actor_names"]) if proof["actor_names"] else []
     return proofs
+
+
+@app.get("/api/documents")
+def documents(document_type: Literal["publication", "patent", "project", "other"] | None = None, limit: int = Query(default=200, ge=1, le=500)):
+    """Documents collectés récemment (publications OpenAlex/Crossref aujourd'hui ; brevets et
+    projets réservés pour de futures sources -- voir openalex.py/cordis.py). Triés par date de
+    publication quand elle est connue, sinon date d'observation, les plus récents d'abord --
+    c'est ce qui alimente la page "Technologies futures" du front."""
+    clause = "document_type=?" if document_type else "1=1"
+    params: tuple = (document_type, limit) if document_type else (limit,)
+    return rows(
+        TECH_DB,
+        f"""SELECT id,actor_name,document_type,title,source_url,published_at,doi,abstract,created_at
+           FROM documents
+           WHERE {clause}
+           ORDER BY COALESCE(published_at,created_at) DESC
+           LIMIT ?""",
+        params,
+    )
 
 
 # Cette fonction tourne dans le thread de fond de `executor` (pas dans le thread FastAPI qui
