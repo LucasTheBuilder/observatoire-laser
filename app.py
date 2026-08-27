@@ -19,7 +19,7 @@ Organisation des endpoints (tous préfixés /api/, sauf `/` qui sert index.html)
 - /api/offers*, /api/technology-signals* : offres concurrentes et signaux technologiques.
 - /api/documents : publications/brevets/projets collectés récemment (page "Technologies futures").
 - /api/scrape/{kind} : démarre/consulte une collecte (actors/market/technology/cordis/
-  firmographics/openalex/press/monthly).
+  firmographics/openalex/press/capabilities/monthly).
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from capabilities import collect_capability_specs
 from cordis import collect_cordis
 from db import (
     ACTORS_DB,
@@ -120,15 +121,16 @@ jobs: dict[str, dict[str, Any]] = {
     "firmographics": {"status": "idle", "result": None, "error": None},
     "openalex": {"status": "idle", "result": None, "error": None},
     "press": {"status": "idle", "result": None, "error": None},
+    "capabilities": {"status": "idle", "result": None, "error": None},
     "monthly": {"status": "idle", "result": None, "error": None},
 }
 
 
 def _collect_monthly() -> dict:
-    """Run the seven collectors in dependency order for a one-click monthly refresh."""
-    # Ordre important : market/technology s'appuient sur les pages découvertes par actors.
-    # cordis/firmographics/openalex/press n'ont aucune dépendance sur le crawl web (sources
-    # indépendantes, chantiers 3 et 5).
+    """Run the eight collectors in dependency order for a one-click monthly refresh."""
+    # Ordre important : market/technology/capabilities s'appuient sur les pages découvertes par
+    # actors. cordis/firmographics/openalex/press n'ont aucune dépendance sur le crawl web
+    # (sources indépendantes, chantiers 3 et 5).
     return {
         "actors": scrape_actors(),
         "market": scrape_market(),
@@ -137,6 +139,7 @@ def _collect_monthly() -> dict:
         "firmographics": collect_french_registry(),
         "openalex": collect_openalex_publications(),
         "press": collect_press_mentions(),
+        "capabilities": collect_capability_specs(),
     }
 
 
@@ -148,6 +151,7 @@ collectors: dict[str, Callable[[], dict]] = {
     "firmographics": collect_french_registry,
     "openalex": collect_openalex_publications,
     "press": collect_press_mentions,
+    "capabilities": collect_capability_specs,
     "monthly": _collect_monthly,
 }
 
@@ -417,9 +421,13 @@ def list_actors():
                                a.actor_type,a.business_models,a.strategic_summary,a.last_verified_at,
                                p.strategy,p.status AS profile_status,p.confidence,p.generated_by,p.needs_reprofile,p.health_score,
                                p.coverage_ready,p.coverage_discovered,
-                               f.founded_year,f.legal_form_code,f.headcount_bracket_code,f.registry_name,f.source_url AS registry_source_url
+                               f.founded_year,f.legal_form_code,f.headcount_bracket_code,f.registry_name,f.source_url AS registry_source_url,
+                               c.min_feature_size_um,c.tolerance_um,c.max_part_size_mm,c.throughput_units_per_h,
+                               c.wavelengths_nm,c.pulse_duration_fs,c.materials_qualified,c.batch_size_range,
+                               c.source_url AS capability_source_url
                                FROM actors a LEFT JOIN site_profiles p ON p.actor_id=a.id
                                LEFT JOIN actor_profile f ON f.actor_id=a.id
+                               LEFT JOIN capability_spec c ON c.actor_id=a.id
                                ORDER BY a.active DESC,a.priority DESC,a.name""")
     # Evidence gate (P0): a C1/C2 label is only an analyst's classification until our own
     # crawl has actually produced a capability/service claim for that actor -- otherwise it
@@ -458,6 +466,8 @@ def list_actors():
         events_by_actor.setdefault(row["actor_id"], []).append(row)
     for actor in actors:
         actor["business_models"] = json.loads(actor["business_models"]) if actor["business_models"] else []
+        actor["wavelengths_nm"] = json.loads(actor["wavelengths_nm"]) if actor["wavelengths_nm"] else []
+        actor["materials_qualified"] = json.loads(actor["materials_qualified"]) if actor["materials_qualified"] else []
         actor["evidence_confirmed"] = (
             actor["competitive_class"] not in ("C1", "C2") or actor["name"] in confirmed_actors
         )
@@ -951,7 +961,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "capabilities", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -966,7 +976,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "capabilities", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 

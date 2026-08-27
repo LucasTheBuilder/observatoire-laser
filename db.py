@@ -553,6 +553,29 @@ def init_databases() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            -- Enveloppe de capacités chiffrées (chantier 5), alimentée par
+            -- capabilities.collect_capability_specs() : extraction déterministe (regex +
+            -- lexique MATERIALS, pas d'IA) sur les pages product/equipment/capability déjà
+            -- crawlées. Une ligne par acteur ; chaque champ numérique retient la MEILLEURE
+            -- valeur trouvée (min pour min_feature_size_um/tolerance_um/pulse_duration_fs,
+            -- max pour max_part_size_mm/throughput_units_per_h) parmi toutes ses pages --
+            -- voir le docstring de capabilities.py pour le détail de chaque pattern et
+            -- pourquoi batch_size_range reste la citation brute plutôt qu'une valeur reformulée.
+            CREATE TABLE IF NOT EXISTS capability_spec (
+                actor_id INTEGER PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,
+                min_feature_size_um REAL,
+                tolerance_um REAL,
+                max_part_size_mm REAL,
+                throughput_units_per_h REAL,
+                wavelengths_nm TEXT,
+                pulse_duration_fs REAL,
+                materials_qualified TEXT,
+                batch_size_range TEXT,
+                source_url TEXT,
+                as_of_date TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             -- Une page web connue pour un acteur : URL, dernier statut HTTP, hash de contenu
             -- (pour détecter les changements), type de page détecté, score de priorité de
             -- crawl... C'est la table centrale que scrapers.scrape_actors() alimente au fil du

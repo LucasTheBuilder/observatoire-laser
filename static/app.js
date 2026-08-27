@@ -828,6 +828,29 @@ const COVERAGE_HINTS = {
 function differentiatorFacts(a) { return (a.facts || []).filter(f => f.dimension === "differentiator"); }
 function certificationFacts(a) { return (a.facts || []).filter(f => f.dimension === "certification"); }
 
+// Chantier 5 : firmographics.py (founded_year/legal_form_code/headcount_bracket_code) et
+// capabilities.py (le reste) -- deux sources déterministes, jamais fabriquées, donc chaque
+// ligne n'apparaît que si le champ correspondant est réellement renseigné en base.
+function firmographicsRows(a) {
+  const rows = [];
+  if (a.founded_year) rows.push(["Création", String(a.founded_year)]);
+  if (a.legal_form_code) rows.push(["Forme juridique (code INSEE)", a.legal_form_code]);
+  if (a.headcount_bracket_code) rows.push(["Effectif (tranche INSEE)", a.headcount_bracket_code]);
+  return rows;
+}
+
+function capabilitySpecRows(a) {
+  const rows = [];
+  if (a.min_feature_size_um != null) rows.push(["Finesse min. démontrée", `${a.min_feature_size_um} µm`]);
+  if (a.tolerance_um != null) rows.push(["Tolérance", `± ${a.tolerance_um} µm`]);
+  if (a.max_part_size_mm != null) rows.push(["Taille de pièce max.", `${a.max_part_size_mm} mm`]);
+  if (a.throughput_units_per_h != null) rows.push(["Cadence", `${a.throughput_units_per_h} pièces/h`]);
+  if (a.pulse_duration_fs != null) rows.push(["Durée d'impulsion min.", `${a.pulse_duration_fs} fs`]);
+  if ((a.wavelengths_nm || []).length) rows.push(["Longueurs d'onde", a.wavelengths_nm.map(w => `${w} nm`).join(", ")]);
+  if (a.batch_size_range) rows.push(["Taille de série", a.batch_size_range]);
+  return rows;
+}
+
 function factLine(f) {
   return `<li>${esc(f.value)}${f.source_url ? ` <a href="${esc(f.source_url)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`;
 }
@@ -860,6 +883,10 @@ function actorDetailContent(a) {
     ${capabilities.length ? `<div class="detail-block"><h4>Capacités démontrées</h4><div class="subtheme-chips">${capabilities.map(c => `<span class="subtheme-chip">${esc(c)}</span>`).join("")}</div></div>` : ""}
 
     ${markets.length ? `<div class="detail-block"><h4>Marchés</h4><div class="subtheme-chips">${markets.map(m => `<span class="subtheme-chip">${esc(m)}</span>`).join("")}</div></div>` : ""}
+
+    ${firmographicsRows(a).length ? `<div class="detail-block"><h4>Identité entreprise</h4><ul class="fact-list">${firmographicsRows(a).map(([label, val]) => `<li><b>${esc(label)}</b> : ${esc(val)}</li>`).join("")}</ul>${a.registry_source_url ? `<a href="${esc(a.registry_source_url)}" target="_blank" rel="noopener" class="signal-link">Source registre ↗</a>` : ""}</div>` : ""}
+
+    ${capabilitySpecRows(a).length || (a.materials_qualified || []).length ? `<div class="detail-block"><h4>Capacités chiffrées</h4>${capabilitySpecRows(a).length ? `<ul class="fact-list">${capabilitySpecRows(a).map(([label, val]) => `<li><b>${esc(label)}</b> : ${esc(val)}</li>`).join("")}</ul>` : ""}${(a.materials_qualified || []).length ? `<div class="subtheme-chips">${a.materials_qualified.map(m => `<span class="subtheme-chip">${esc(m)}</span>`).join("")}</div>` : ""}${a.capability_source_url ? `<a href="${esc(a.capability_source_url)}" target="_blank" rel="noopener" class="signal-link">Source ↗</a>` : ""}</div>` : ""}
 
     ${differentiatorFacts(a).length ? `<div class="detail-block"><h4>Différenciateurs</h4><ul class="fact-list">${differentiatorFacts(a).map(f => factLine(f)).join("")}</ul></div>` : ""}
 
