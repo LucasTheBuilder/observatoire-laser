@@ -1727,7 +1727,7 @@ def _source_coverage(actor_id: int, profile: dict | None = None) -> dict[str, di
     return coverage
 
 
-def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
+def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str] | None = None) -> dict:
     """Crawle chaque acteur actif l'un après l'autre. Pour chaque acteur :
     1. Charge son profil de crawl (site_profiles.get_site_profile) et son budget de pages.
     2. Insère ses seed_paths comme sources de départ (en plus de sa page d'accueil).
@@ -1739,10 +1739,17 @@ def scrape_actors(max_pages_per_actor: int | None = None) -> dict:
        ou la file elle-même.
     5. À la fin, construit un profil de site (hybrid.build_profile), décide de la stratégie
        adaptive/generic (adaptive_decision) et écrit tout l'état dans site_profiles.
+
+    ``actor_names``, when given, restricts the run to those actors (same convention as
+    scrape_market's own filter) -- meant for a one-off targeted crawl (e.g. an actor that was
+    added after the last full run and never crawled) without paying for a full-roster pass.
     Deterministic dynamic crawler with per-site profiles and a priority queue."""
     with connect(ACTORS_DB) as db:
         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
         actors = db.execute("SELECT * FROM actors WHERE active=1 ORDER BY priority DESC,name").fetchall()
+    if actor_names:
+        wanted = set(actor_names)
+        actors = [row for row in actors if row["name"] in wanted]
 
     scanned = changed = errors = discovered = profiled = fallback = 0
     ollama = get_ai_client()

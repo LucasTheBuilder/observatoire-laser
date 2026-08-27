@@ -303,6 +303,66 @@ class MarketSourceSelectionTests(unittest.TestCase):
             self.assertLessEqual(counts.get("Generic Co", 0), 2)
 
 
+class TargetedActorCrawlTests(unittest.TestCase):
+    """scrape_actors(actor_names=...) : correction du périmètre -- crawler un acteur précis
+    (ex: ajouté après le dernier run complet et jamais visité) sans payer une passe complète."""
+
+    class FakeResponse:
+        def __init__(self, url: str):
+            self.url = url
+            self.text = """<html><head><title>Home</title></head><body><main><h1>Home</h1>
+                <p>Femtosecond laser processing services for industrial customers worldwide.</p>
+                </main></body></html>"""
+            self.content = self.text.encode("utf-8")
+            self.status_code = 200
+            self.headers: dict[str, str] = {}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, **kwargs):
+            return TargetedActorCrawlTests.FakeResponse(url)
+
+    def test_actor_names_filter_only_crawls_the_named_actors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+            with (
+                patch.object(dbmod, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+                patch.object(dbmod, "TECH_DB", Path(tmp) / "technology.db"),
+            ):
+                dbmod.init_databases()
+                with dbmod.connect(actors_db) as db:
+                    db.execute("DELETE FROM actors")
+                dbmod.create_actor("Target Actor", "Espagne", "Test", "https://example.test/", priority=False)
+                dbmod.create_actor("Other Actor", "Espagne", "Test", "https://other.example/", priority=False)
+
+            with (
+                patch.object(scrapers, "ACTORS_DB", actors_db),
+                patch.object(scrapers.httpx, "Client", self.FakeClient),
+                patch.object(scrapers.OllamaClient, "available", return_value=False),
+            ):
+                result = scrapers.scrape_actors(actor_names=["Target Actor"])
+
+            with dbmod.connect(actors_db) as db:
+                rows = {row["name"]: row["last_status"] for row in db.execute("SELECT name,last_status FROM actors")}
+
+            self.assertEqual(1, result["profiled"])
+            self.assertEqual("ok", rows["Target Actor"])
+            # Untouched: never selected by the actor_names filter in the first place.
+            self.assertEqual("never", rows["Other Actor"])
+
+
 class ProfileTests(unittest.TestCase):
     def test_generic_plus_override(self):
         priority = get_site_profile({"name": "ALPHANOV", "official_url": "https://www.alphanov.com"})
