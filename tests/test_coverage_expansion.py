@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 import app as appmod
 import db as dbmod
+import scoring
 from scrapers import _load_custom_lexicon_entries
 
 
@@ -324,6 +325,11 @@ class ActorFichesEnrichmentTests(unittest.TestCase):
                 patch.object(appmod, "ACTORS_DB", actors_db),
                 patch.object(appmod, "MARKET_DB", market_db),
                 patch.object(appmod, "TECH_DB", tech_db),
+                # scoring.py (audit Horizon 2 #14) imports its own ACTORS_DB/MARKET_DB copies at
+                # module level, same pattern as app.py/scrapers.py -- list_actors() now calls
+                # into it, so it needs patching here too, not just appmod's.
+                patch.object(scoring, "ACTORS_DB", actors_db),
+                patch.object(scoring, "MARKET_DB", market_db),
             ):
                 actors = appmod.list_actors()
 

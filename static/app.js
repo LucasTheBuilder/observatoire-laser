@@ -13,11 +13,19 @@ const state = {
   network: {nodes: [], edges: []},
   duplicates: [],
   pipelineFunnel: {discovered: 0, fetched: 0, parsed: 0, evidence: 0, validated: 0},
+  // Score d'attractivité par marché (audit Horizon 2 #14, voir scoring.py) -- chargé en bloc
+  // avec le reste (petite liste, un par marché connu), contrairement aux séries temporelles.
+  marketScores: [],
   query: "",
   offerQuery: "",
   offerDrill: {family: null, level2: null, level3: null},
   marketDrill: null,
   actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
+  // Séries temporelles (audit Horizon 2 #12) : chargées à la demande (pas dans refresh()) --
+  // 85+ clés possibles (acteurs+marchés+axes), un fetch par clé au clic évite un chargement
+  // initial disproportionné. keys/points restent en cache tant que la dimension/clé ne change
+  // pas, et sont resynchronisés après toute collecte terminée (voir poll()).
+  trends: {dimension: "signal", key: "__global__", keys: [], points: [], loading: false},
 };
 
 const content = document.querySelector("#content");
@@ -135,13 +143,31 @@ function groupByMarket(rows) {
   return [...map.entries()].sort((a, b) => b[1].total - a[1].total);
 }
 
+// Score d'attractivité marché (audit Horizon 2 #14, voir scoring.py:
+// compute_market_attractiveness_scores) : traction prouvée + pipeline radar + acteurs actifs +
+// part de faits proches de la Production. Absent (pas de badge) pour un marché sans faits
+// validés -- jamais un score fabriqué à 0 pour "pas encore de données".
+function attractivenessLevel(score) {
+  if (score >= 55) return "good";
+  if (score >= 25) return "partial";
+  return "weak";
+}
+
+function attractivenessBadge(market) {
+  const entry = (state.marketScores || []).find(m => m.market === market);
+  if (!entry) return "";
+  const level = attractivenessLevel(entry.attractiveness_score);
+  const title = `Attractivité : ${entry.existing} fait(s) existant(s), ${entry.radar} radar, ${entry.actors_count} acteur(s) actif(s), ${Math.round(entry.production_share * 100)}% en stade Production/Industrialisation.`;
+  return `<span class="attractiveness-badge lvl-${level}" title="${esc(title)}">${Math.round(entry.attractiveness_score)} attractivité</span>`;
+}
+
 function marketFamilyCards(rows) {
   const groups = groupByMarket(rows);
   if (!groups.length) return `<div class="empty">Pas encore assez de faits pour une lecture par marché.</div>`;
   return `<div class="market-fam-grid">${groups.map(([market, bucket]) => {
     const chips = [...bucket.subthemes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
       .map(([label, count]) => `<span class="subtheme-chip">${esc(label)}<b>${count}</b></span>`).join("");
-    return `<button class="market-fam-card market-fam-card-link" data-drill-market="${esc(market)}"><header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${bucket.total} faits</b></div></header><div class="subtheme-chips">${chips}</div></button>`;
+    return `<button class="market-fam-card market-fam-card-link" data-drill-market="${esc(market)}"><header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${bucket.total} faits</b></div></header>${attractivenessBadge(market)}<div class="subtheme-chips">${chips}</div></button>`;
   }).join("")}</div>`;
 }
 
@@ -801,6 +827,28 @@ function completenessLevel(score) {
   return "weak";
 }
 
+// Scores séparés confiance/menace (audit Horizon 2 #14, voir scoring.py) : distincts de la
+// complétude ci-dessus (qui ne mesure que la PRÉSENCE de données). confidence_score est None
+// tant qu'aucun fait n'a été collecté sur l'acteur -- pas de badge dans ce cas plutôt qu'un 0
+// qui dirait à tort "confiance nulle" au lieu de "rien à évaluer encore".
+function confidenceBadge(a) {
+  if (a.confidence_score == null) return "";
+  const level = completenessLevel(a.confidence_score / 100);
+  return `<span class="completeness-badge lvl-${level}" title="Fiabilité des données collectées : faits validés, citations verbatim, dates de publication confirmées.">${Math.round(a.confidence_score)} confiance</span>`;
+}
+
+function threatLevel(score) {
+  if (score >= 55) return "weak"; // reuses completeness-badge's red tone for "high threat"
+  if (score >= 25) return "partial";
+  return "good"; // reuses the green tone for "low threat" -- inverted semantics vs confidence
+}
+
+function threatBadge(a) {
+  if (a.is_reference) return "";
+  const level = threatLevel(a.threat_score || 0);
+  return `<span class="completeness-badge lvl-${level}" title="Classe concurrentielle, ampleur des faits démontrés, vélocité récente (60 derniers jours).">${Math.round(a.threat_score || 0)} menace</span>`;
+}
+
 function completenessBadge(a) {
   const pct = Math.round((a.completeness_score || 0) * 100);
   const level = completenessLevel(a.completeness_score || 0);
@@ -817,7 +865,7 @@ function actorCard(a) {
     : "";
   const typeLabel = ACTOR_TYPE_LABELS[a.actor_type] ? `<p class="actor-type-label">${esc(ACTOR_TYPE_LABELS[a.actor_type])}</p>` : "";
   return `<article class="actor-card ${a.priority?'priority':''}" ${paused?'style="opacity:.55"':''}>
-    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>★ Prioritaire</span>':''}${completenessBadge(a)}</div></div>
+    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>★ Prioritaire</span>':''}${completenessBadge(a)}${confidenceBadge(a)}${threatBadge(a)}</div></div>
     <h3 class="actor-name-link" data-actor-detail="${a.id}">${esc(a.name)}</h3>${typeLabel}<p class="actor-summary-line">${esc(cardSummaryLine(a))}</p>
     <div class="actor-card-actions">
       <button class="actor-detail-link" data-actor-detail="${a.id}">Voir la fiche →</button>
@@ -887,8 +935,22 @@ function factLine(f) {
   return `<li>${esc(f.value)}${f.source_url ? ` <a href="${esc(f.source_url)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`;
 }
 
+// Signaux structurés (audit Horizon 2 #13 : "Ajouter brevets, recrutements et investissements
+// comme signaux structurés") -- voir press.classify_press_event côté serveur. press_mention
+// (mention générique, sans mot-clé structurant détecté) n'a pas de badge : c'est le
+// comportement par défaut, pas un signal typé à mettre en avant.
+const EVENT_TYPE_BADGE_LABELS = {patent: "Brevet", investment: "Investissement", recruitment: "Recrutement", acquisition: "M&A"};
+const EVENT_TYPE_BADGE_COLORS = {patent: "#a8790b", investment: "#048f83", recruitment: "#6b4fb3", acquisition: "#c14a2f"};
+
+function eventTypeBadge(type) {
+  const label = EVENT_TYPE_BADGE_LABELS[type];
+  if (!label) return "";
+  const color = EVENT_TYPE_BADGE_COLORS[type] || "#5c7986";
+  return `<span class="event-type-badge" style="background:${color}1a;color:${color}">${esc(label)}</span> `;
+}
+
 function eventLine(e) {
-  return `<li>${e.event_date ? `<b>${esc(e.event_date)}</b> — ` : ""}${esc(e.description)}${e.source_url ? ` <a href="${esc(e.source_url)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`;
+  return `<li>${eventTypeBadge(e.event_type)}${e.event_date ? `<b>${esc(e.event_date)}</b> — ` : ""}${esc(e.description)}${e.source_url ? ` <a href="${esc(e.source_url)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`;
 }
 
 function actorDetailContent(a) {
@@ -933,6 +995,12 @@ function actorDetailContent(a) {
       <p>${proofsTotal} preuve(s) issues de nos collectes${a.evidence_confirmed === false ? ' — <span class="evidence-warning">⚠ non confirmé par nos preuves</span>' : ""}</p>
       <p class="coverage-note">Couverture documentaire : <b>${COVERAGE_LABELS[a.coverage_level] || "Non documenté dans la base"}</b>. ${COVERAGE_HINTS[a.coverage_level] || ""}</p>
       <p class="coverage-note">Complétude de la fiche : <b>${Math.round((a.completeness_score || 0) * 100)}%</b> (${a.completeness_present}/${a.completeness_total} dimensions, pondéré par la fraîcheur du dernier crawl).${(a.completeness_missing || []).length ? ` Manque : ${a.completeness_missing.map(esc).join(", ")}.` : " Toutes les dimensions suivies sont renseignées."}</p>
+    </div>
+
+    <div class="detail-block">
+      <h4>Scores séparés</h4>
+      <p class="coverage-note">Confiance dans les données : ${a.confidence_score == null ? "<b>Pas encore de fait collecté</b>" : `<b>${Math.round(a.confidence_score)}/100</b>`} — fiabilité des données déjà collectées (faits validés, citations verbatim, dates de publication confirmées), distincte de la complétude ci-dessus qui ne mesure que leur présence.</p>
+      ${!a.is_reference ? `<p class="coverage-note">Menace concurrentielle : <b>${Math.round(a.threat_score || 0)}/100</b> — classe concurrentielle, ampleur des faits démontrés, vélocité sur les 60 derniers jours.</p>` : ""}
     </div>
 
     <div class="detail-block admin-block">
@@ -1382,6 +1450,230 @@ function renderSettings() {
   </div>`;
 }
 
+// --- Séries temporelles (audit Horizon 2 #12 : "Construire séries temporelles par acteur,
+// marché, technologie, maturité et signal") -- voir timeseries.py côté serveur pour le calcul.
+// Chaque instantané reflète l'état constaté au moment de la capture (jamais un point
+// rétroactif fabriqué) : avec un seul mois de recul pour l'instant, les graphiques ci-dessous
+// sont volontairement conçus pour rester lisibles à 1 point (voir tsSparseNote/svgSeriesChart)
+// plutôt que de paraître cassés en attendant les prochains cycles de collecte.
+const TIMESERIES_DIMENSION_LABELS = {actor: "Acteur", market: "Marché", technology: "Technologie", maturity: "Maturité", signal: "Signal"};
+const TIMESERIES_DIMENSION_HINTS = {
+  actor: "Trajectoire documentaire d’un acteur : faits marché validés par bucket, offres, sources actives.",
+  market: "Distribution par bucket (existant/radar) et par stade industriel d’un marché, et nombre d’acteurs actifs dessus.",
+  technology: "Signaux technologiques par axe (existant/radar) ; « Toutes / global » regroupe les publications/brevets/projets.",
+  maturity: "Distribution des stades industriels (R&D → Production) et des buckets, globale ou par marché — la mesure « passage prototype → production » que l’audit réclamait.",
+  signal: "Vélocité : faits marché validés, offres, documents et signaux technologiques nouveaux chaque mois — la mesure la plus proche d’un « marché qui monte ».",
+};
+const STAGE_ORDER = ["R&D", "Prototype", "Pré-industrialisation", "Industrialisation", "Production", "Maturité industrielle non déterminée"];
+const STAGE_COLORS = {
+  "R&D": "#8b79c9", "Prototype": "#d8a13d", "Pré-industrialisation": "#4f8fd8",
+  "Industrialisation": "var(--chart-teal)", "Production": "var(--chart-coral)",
+  "Maturité industrielle non déterminée": "#b7c0c4",
+};
+const DOC_TYPE_ORDER = ["publication", "patent", "project", "other"];
+const DOC_TYPE_COLORS = {publication: "var(--chart-teal)", patent: "#a8790b", project: "#6b4fb3", other: "#5c7986"};
+// DOC_TYPE_LABELS (Publication/Brevet/Projet/Autre) est déjà déclaré plus haut pour la page
+// "Technologies futures" -- réutilisé tel quel ici, pas de doublon.
+const BUCKET_ORDER = ["existing", "radar"];
+const BUCKET_COLORS = {existing: "var(--chart-teal)", radar: "var(--chart-coral)"};
+const BUCKET_LABELS = {existing: "Existant", radar: "Radar"};
+
+function periodLabel(period) {
+  const [y, m] = String(period || "").split("-").map(Number);
+  if (!y || !m) return esc(period);
+  return new Intl.DateTimeFormat("fr-FR", {month: "short", year: "2-digit"}).format(new Date(y, m - 1, 1));
+}
+
+function tsLegend(series) {
+  if (!series.length) return "";
+  return `<div class="chart-legend">${series.map(s => `<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join("")}</div>`;
+}
+
+// Une ligne + points par série ; en-dessous de 2 points le tracé disparaît (rien à relier) mais
+// les points restent affichés avec leur valeur en infobulle -- jamais un graphique vide alors
+// que la donnée existe.
+function svgSeriesChart(points, series) {
+  const width = 760, height = 220, padL = 44, padR = 16, padT = 16, padB = 30;
+  const innerW = width - padL - padR, innerH = height - padT - padB;
+  const maxVal = Math.max(1, ...points.flatMap(p => series.map(s => Number(p[s.key]) || 0)));
+  const x = i => points.length > 1 ? padL + (innerW * i) / (points.length - 1) : padL + innerW / 2;
+  const y = v => padT + innerH - (innerH * v) / maxVal;
+  const gridLines = [0, 0.5, 1].map(f => `<line x1="${padL}" y1="${(padT + innerH * (1 - f)).toFixed(1)}" x2="${width - padR}" y2="${(padT + innerH * (1 - f)).toFixed(1)}" class="ts-grid"/><text x="${padL - 8}" y="${(padT + innerH * (1 - f) + 3).toFixed(1)}" text-anchor="end" class="ts-axis-label">${Math.round(maxVal * f)}</text>`).join("");
+  const xLabels = points.map((p, i) => `<text x="${x(i).toFixed(1)}" y="${height - 8}" text-anchor="middle" class="ts-axis-label">${esc(periodLabel(p.period))}</text>`).join("");
+  const lines = series.map(s => {
+    const path = points.length > 1 ? points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(Number(p[s.key]) || 0).toFixed(1)}`).join(" ") : "";
+    const dots = points.map((p, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(Number(p[s.key]) || 0).toFixed(1)}" r="3.5" fill="${s.color}"><title>${esc(s.label)} · ${esc(periodLabel(p.period))} : ${esc(String(p[s.key] ?? 0))}</title></circle>`).join("");
+    return (path ? `<path d="${path}" fill="none" stroke="${s.color}" stroke-width="2"/>` : "") + dots;
+  }).join("");
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" class="ts-chart" role="img" aria-label="Évolution dans le temps">${gridLines}${lines}${xLabels}</svg>`;
+}
+
+// Une barre empilée par période pour une distribution imbriquée (stage_distribution,
+// bucket_distribution, documents_by_type) -- fonctionne dès 1 seule période, contrairement à
+// svgSeriesChart qui a besoin d'un tracé.
+function svgStackedBarChart(points, field, order, colors) {
+  const width = 760, height = 220, padL = 16, padR = 16, padT = 16, padB = 30;
+  const innerW = width - padL - padR, innerH = height - padT - padB;
+  const totals = points.map(p => order.reduce((sum, k) => sum + (Number((p[field] || {})[k]) || 0), 0));
+  const maxTotal = Math.max(1, ...totals);
+  const barW = Math.min(56, (innerW / points.length) * 0.55);
+  const bars = points.map((p, i) => {
+    const cx = padL + (innerW * (i + 0.5)) / points.length;
+    let yCursor = padT + innerH;
+    const dist = p[field] || {};
+    const segments = order.filter(key => dist[key]).map(key => {
+      const value = Number(dist[key]) || 0;
+      const segH = maxTotal ? (innerH * value) / maxTotal : 0;
+      yCursor -= segH;
+      return `<rect x="${(cx - barW / 2).toFixed(1)}" y="${yCursor.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0, segH).toFixed(1)}" fill="${colors[key] || "#ccd6d9"}"><title>${esc(key)} · ${esc(periodLabel(p.period))} : ${value}</title></rect>`;
+    }).join("");
+    const label = `<text x="${cx.toFixed(1)}" y="${height - 8}" text-anchor="middle" class="ts-axis-label">${esc(periodLabel(p.period))}</text>`;
+    return segments + label;
+  }).join("");
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" class="ts-chart" role="img" aria-label="Distribution par période">${bars}</svg>`;
+}
+
+function tsKpiGrid(entries) {
+  return `<div class="ts-kpi-grid">${entries.map(([label, value]) => `<div class="ts-kpi"><strong>${esc(String(value))}</strong><span>${esc(label)}</span></div>`).join("")}</div>`;
+}
+
+function tsSparseNote(points) {
+  if (points.length >= 2) return "";
+  return `<p class="ts-note">Historique en construction (${points.length} point${points.length > 1 ? "s" : ""} pour l’instant) — un point réel s’ajoute à chaque cycle de collecte, jamais reconstruit rétroactivement.</p>`;
+}
+
+function renderTrendsBody(points) {
+  const dimension = state.trends.dimension, key = state.trends.key;
+  const latest = points[points.length - 1] || {};
+  if (dimension === "actor") {
+    const series = [
+      {key: "evidence_existing", label: "Faits existants", color: BUCKET_COLORS.existing},
+      {key: "evidence_radar", label: "Faits radar", color: BUCKET_COLORS.radar},
+      {key: "offers_count", label: "Offres", color: "#6b4fb3"},
+      {key: "sources_active", label: "Sources actives", color: "var(--lime)"},
+    ];
+    return tsSparseNote(points) + tsLegend(series) + svgSeriesChart(points, series) +
+      tsKpiGrid([
+        ["Classe concurrentielle", latest.competitive_class || "Non classé"],
+        ["Faits existants", latest.evidence_existing ?? 0], ["Faits radar", latest.evidence_radar ?? 0],
+        ["Offres", latest.offers_count ?? 0], ["Sources actives", latest.sources_active ?? 0],
+      ]);
+  }
+  if (dimension === "market") {
+    const series = [
+      {key: "existing", label: "Faits existants", color: BUCKET_COLORS.existing},
+      {key: "radar", label: "Faits radar", color: BUCKET_COLORS.radar},
+    ];
+    const stageOrder = STAGE_ORDER.filter(s => points.some(p => (p.stage_distribution || {})[s]));
+    return tsSparseNote(points) + tsLegend(series) + svgSeriesChart(points, series) +
+      tsKpiGrid([["Total faits validés", latest.total ?? 0], ["Acteurs actifs sur ce marché", latest.actors_count ?? 0]]) +
+      (stageOrder.length ? `<h3 class="ts-subheading">Stade industriel</h3>${tsLegend(stageOrder.map(s => ({label: s, color: STAGE_COLORS[s]})))}${svgStackedBarChart(points, "stage_distribution", stageOrder, STAGE_COLORS)}` : "");
+  }
+  if (dimension === "technology" && key === "__global__") {
+    const typeOrder = DOC_TYPE_ORDER.filter(t => points.some(p => (p.documents_by_type || {})[t]));
+    return tsSparseNote(points) +
+      tsKpiGrid([["Documents (tous types)", latest.documents_total ?? 0]]) +
+      (typeOrder.length ? `${tsLegend(typeOrder.map(t => ({label: DOC_TYPE_LABELS[t] || t, color: DOC_TYPE_COLORS[t] || "#ccd6d9"})))}${svgStackedBarChart(points, "documents_by_type", typeOrder, DOC_TYPE_COLORS)}` : `<div class="empty">Aucun document collecté pour l’instant.</div>`);
+  }
+  if (dimension === "technology") {
+    const series = [
+      {key: "signals_existing", label: "Signaux existants", color: BUCKET_COLORS.existing},
+      {key: "signals_radar", label: "Signaux radar", color: BUCKET_COLORS.radar},
+    ];
+    return tsSparseNote(points) + tsLegend(series) + svgSeriesChart(points, series) +
+      tsKpiGrid([["Signaux existants", latest.signals_existing ?? 0], ["Signaux radar", latest.signals_radar ?? 0]]);
+  }
+  if (dimension === "maturity") {
+    const stageOrder = STAGE_ORDER.filter(s => points.some(p => (p.stage_distribution || {})[s]));
+    return tsSparseNote(points) +
+      tsKpiGrid([["Total faits validés", latest.total ?? 0]]) +
+      (stageOrder.length ? `<h3 class="ts-subheading">Stade industriel (R&D → Production)</h3>${tsLegend(stageOrder.map(s => ({label: s, color: STAGE_COLORS[s]})))}${svgStackedBarChart(points, "stage_distribution", stageOrder, STAGE_COLORS)}` : "") +
+      `<h3 class="ts-subheading">Bucket (existant / radar)</h3>${tsLegend(BUCKET_ORDER.map(b => ({label: BUCKET_LABELS[b], color: BUCKET_COLORS[b]})))}${svgStackedBarChart(points, "bucket_distribution", BUCKET_ORDER, BUCKET_COLORS)}`;
+  }
+  // signal
+  const series = [
+    {key: "new_evidence", label: "Nouveaux faits marché", color: BUCKET_COLORS.existing},
+    {key: "new_offers", label: "Nouvelles offres", color: BUCKET_COLORS.radar},
+    {key: "new_documents", label: "Nouveaux documents", color: "#6b4fb3"},
+    {key: "new_technology_signals", label: "Nouveaux signaux techno", color: "var(--lime)"},
+  ];
+  return tsSparseNote(points) + tsLegend(series) + svgSeriesChart(points, series) +
+    tsKpiGrid([
+      ["Nouveaux faits marché ce mois", latest.new_evidence ?? 0], ["Nouvelles offres", latest.new_offers ?? 0],
+      ["Nouveaux documents", latest.new_documents ?? 0], ["Nouveaux signaux techno", latest.new_technology_signals ?? 0],
+    ]);
+}
+
+async function loadTrendsKeys(dimension) {
+  const {keys} = await api(`/api/timeseries/keys?dimension=${encodeURIComponent(dimension)}`);
+  return keys;
+}
+
+async function loadTrendsPoints(dimension, key) {
+  if (!key) return [];
+  try {
+    const data = await api(`/api/timeseries?dimension=${encodeURIComponent(dimension)}&key=${encodeURIComponent(key)}`);
+    return data.points;
+  } catch (_) {
+    return [];
+  }
+}
+
+async function setTrendsDimension(dimension) {
+  state.trends.dimension = dimension;
+  state.trends.loading = true;
+  renderTrends();
+  const keys = await loadTrendsKeys(dimension);
+  const preferred = keys.includes("__global__") ? "__global__" : keys[0];
+  state.trends.keys = keys;
+  state.trends.key = preferred || "";
+  state.trends.points = await loadTrendsPoints(dimension, preferred);
+  state.trends.loading = false;
+  renderTrends();
+}
+
+async function setTrendsKey(key) {
+  state.trends.key = key;
+  state.trends.loading = true;
+  renderTrends();
+  state.trends.points = await loadTrendsPoints(state.trends.dimension, key);
+  state.trends.loading = false;
+  renderTrends();
+}
+
+function renderTrends() {
+  const t = state.trends;
+  const dimensionOptions = Object.entries(TIMESERIES_DIMENSION_LABELS).map(([value, label]) => `<option value="${value}" ${t.dimension === value ? "selected" : ""}>${esc(label)}</option>`).join("");
+  const keyOptions = t.keys.map(k => `<option value="${esc(k)}" ${t.key === k ? "selected" : ""}>${k === "__global__" ? "Toutes / global" : esc(k)}</option>`).join("");
+  const body = t.loading
+    ? `<div class="empty"><span class="spinner"></span>Chargement…</div>`
+    : (!t.keys.length
+        ? `<div class="empty">Aucun instantané pour l’instant — lancez une collecte (Bases & collectes) ou cliquez « Capturer un instantané » pour en générer un.</div>`
+        : renderTrendsBody(t.points));
+  content.innerHTML = header(
+    "Historique",
+    "Séries temporelles",
+    "Un instantané réel par cycle de collecte — acteur, marché, technologie, maturité, signal. Jamais de point rétroactif fabriqué : l’historique se construit mois après mois.",
+    `<div class="header-actions"><button class="primary" data-run-trends-capture>↻ Capturer un instantané</button></div>`
+  ) +
+  `<section><div class="section-title"><div><span>∿</span><div><h2>${esc(TIMESERIES_DIMENSION_LABELS[t.dimension])}</h2><p>${esc(TIMESERIES_DIMENSION_HINTS[t.dimension])}</p></div></div></div>
+    <div class="ts-controls">
+      <div class="filter-group"><label>Dimension</label><select id="ts-dimension">${dimensionOptions}</select></div>
+      <div class="filter-group"><label>Clé</label><select id="ts-key" ${!t.keys.length ? "disabled" : ""}>${keyOptions}</select></div>
+    </div>
+    ${body}
+  </section>`;
+  document.querySelector("#ts-dimension")?.addEventListener("change", e => setTrendsDimension(e.target.value));
+  document.querySelector("#ts-key")?.addEventListener("change", e => setTrendsKey(e.target.value));
+  document.querySelector("[data-run-trends-capture]")?.addEventListener("click", async () => {
+    try {
+      await api("/api/timeseries/capture", {method: "POST"});
+      toast("Instantané capturé.");
+      await setTrendsDimension(state.trends.dimension);
+    } catch (error) { toast(error.message); }
+  });
+}
+
 function render(){
   if(state.view==="monthly") renderMonthly();
   if(state.view==="market") renderMarket();
@@ -1389,6 +1681,7 @@ function render(){
   if(state.view==="techintel") renderTechIntel();
   if(state.view==="futuretech") renderFutureTech();
   if(state.view==="actors") renderActors();
+  if(state.view==="trends") renderTrends();
   if(state.view==="vocabulary") renderVocabulary();
   if(state.view==="market-review") renderMarketReview();
   if(state.view==="collections") renderCollections();
@@ -1508,6 +1801,10 @@ async function poll(kind) {
       }
 
       await refresh();
+      // Un instantané réel a été capturé côté serveur à la fin de cette collecte (voir
+      // app._run_job) -- si la vue séries temporelles a déjà été visitée, la resynchroniser
+      // silencieusement plutôt que de laisser son cache devenir périmé jusqu'au prochain clic.
+      if (job.status === "completed" && state.trends.keys.length) await setTrendsDimension(state.trends.dimension);
       if (kind === "monthly" && job.status === "completed") {
         state.view = "monthly";
         document.querySelectorAll(".nav").forEach(n => n.classList.toggle("active", n.dataset.view === "monthly"));
@@ -1545,14 +1842,21 @@ document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click
   document.querySelectorAll(".nav").forEach(n=>n.classList.remove("active"));
   button.classList.add("active");
   state.view=button.dataset.view;
-  render();
+  // Séries temporelles : chargées à la demande (voir déclaration de state.trends), donc le
+  // premier passage sur cette vue déclenche le fetch au lieu d'un simple render() sur un
+  // cache encore vide -- les visites suivantes réutilisent ce qui est déjà chargé.
+  if(state.view==="trends" && !state.trends.keys.length && !state.trends.loading){
+    setTrendsDimension(state.trends.dimension);
+  } else {
+    render();
+  }
 }));
 
 document.querySelector(".dialog-close").addEventListener("click",()=>dialog.close());
 dialog.addEventListener("click",e=>{if(e.target===dialog)dialog.close()});
 
 async function refresh(){
-  [state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.documents,state.actors,state.profiles,state.vocabulary,state.marketReview,state.network,state.duplicates,state.pipelineFunnel]=await Promise.all([
+  [state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.documents,state.actors,state.profiles,state.vocabulary,state.marketReview,state.network,state.duplicates,state.pipelineFunnel,state.marketScores]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
     api("/api/market"),
@@ -1566,6 +1870,7 @@ async function refresh(){
     api("/api/network"),
     api("/api/actors/duplicates"),
     api("/api/pipeline-funnel"),
+    api("/api/market-scores"),
   ]);
   render();
 }

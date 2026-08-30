@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 import db as dbmod
 import press
-from press import _contains_whole_word, _normalize, _parse_feed, collect_press_mentions
+from press import _contains_whole_word, _normalize, _parse_feed, classify_press_event, collect_press_mentions
 
 SAMPLE_FEED = b"""<?xml version="1.0"?>
 <rss version="2.0"><channel>
@@ -41,6 +41,42 @@ SAMPLE_FEED = b"""<?xml version="1.0"?>
   <pubDate>19 Aug 2026 04:00:00 GMT</pubDate>
 </item>
 </channel></rss>"""
+
+
+SIGNAL_FEED = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<title>Sample Feed</title>
+<item>
+  <title>ALPHANOV files new patent for femtosecond beam shaping</title>
+  <link>https://example.test/news/alphanov-patent</link>
+  <description>ALPHANOV announced a new patent covering its beam shaping process.</description>
+  <pubDate>24 Aug 2026 04:00:00 GMT</pubDate>
+</item>
+</channel></rss>"""
+
+
+class ClassifyPressEventTests(unittest.TestCase):
+    def test_patent_keyword_is_classified_as_patent(self):
+        self.assertEqual("patent", classify_press_event("Company files new patent", ""))
+        self.assertEqual("patent", classify_press_event("Une société dépose un brevet", ""))
+
+    def test_investment_keyword_is_classified_as_investment(self):
+        self.assertEqual("investment", classify_press_event("Startup closes Series B funding round", ""))
+        self.assertEqual("investment", classify_press_event("Une PME annonce une levée de fonds", ""))
+
+    def test_recruitment_keyword_is_classified_as_recruitment(self):
+        self.assertEqual("recruitment", classify_press_event("Company is hiring laser engineers", ""))
+        self.assertEqual("recruitment", classify_press_event("La société recrute un ingénieur laser", ""))
+
+    def test_no_keyword_falls_back_to_press_mention(self):
+        self.assertEqual("press_mention", classify_press_event("Company unveils new laser platform", ""))
+
+    def test_patent_and_investment_are_checked_before_the_frequent_recruitment_false_positive(self):
+        # A patent announcement that also happens to mention hiring in passing must still be
+        # typed as the rarer, more decision-relevant 'patent' signal -- not swallowed by the
+        # much more common 'recruitment' false positive (see SIGNAL_KEYWORDS's ordering note).
+        text = "Company files new patent, and by the way we are hiring too"
+        self.assertEqual("patent", classify_press_event(text, ""))
 
 
 class NormalizationTests(unittest.TestCase):
@@ -171,6 +207,27 @@ class CollectPressMentionsTests(unittest.TestCase):
                 with patch.object(press.httpx, "Client", FakeClient):
                     result = collect_press_mentions()
                 self.assertEqual(0, result["events_added"])
+
+    def test_signal_feed_is_stored_with_its_classified_event_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+            with (
+                patch.object(dbmod, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+                patch.object(dbmod, "TECH_DB", Path(tmp) / "technology.db"),
+                patch.object(press, "ACTORS_DB", actors_db),
+            ):
+                dbmod.init_databases()
+                self._seed_actors(actors_db, ["ALPHANOV"])
+                FakeClient.feed_content = SIGNAL_FEED
+                FakeClient.fail_urls = set()
+                with patch.object(press.httpx, "Client", FakeClient):
+                    result = collect_press_mentions()
+                self.assertEqual(1, result["events_added"])
+                with dbmod.connect(actors_db) as db:
+                    event = db.execute("SELECT event_type,description FROM actor_events").fetchone()
+                self.assertEqual("patent", event["event_type"])
+                self.assertTrue(event["description"].startswith("Brevet ("))
 
     def test_one_feed_failing_does_not_block_the_other(self):
         with tempfile.TemporaryDirectory() as tmp:

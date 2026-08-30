@@ -74,6 +74,7 @@ from firmographics import collect_french_registry
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from openalex import collect_openalex_publications
 from press import collect_press_mentions
+from scoring import compute_confidence_scores, compute_market_attractiveness_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 from timeseries import capture_metric_snapshot, list_timeseries_keys, read_timeseries
 
@@ -590,6 +591,11 @@ def list_actors():
     events_by_actor: dict[int, list[dict[str, Any]]] = {}
     for row in rows(ACTORS_DB, "SELECT actor_id,event_type,description,event_date,source_url FROM actor_events ORDER BY event_date DESC,id"):
         events_by_actor.setdefault(row["actor_id"], []).append(row)
+    # Scores séparés (audit Horizon 2 #14, voir scoring.py) : confidence_score répond à "peut-on
+    # faire confiance aux données de cette fiche" (distinct de completeness_score, qui ne
+    # mesure que leur PRÉSENCE) ; threat_score répond à "quel niveau de menace concurrentielle".
+    confidence_scores = compute_confidence_scores()
+    threat_scores = compute_threat_scores()
     for actor in actors:
         actor["business_models"] = json.loads(actor["business_models"]) if actor["business_models"] else []
         actor["wavelengths_nm"] = json.loads(actor["wavelengths_nm"]) if actor["wavelengths_nm"] else []
@@ -602,6 +608,8 @@ def list_actors():
         actor["coverage_level"] = _coverage_level(len(sources_by_actor.get(actor["name"], set())))
         actor["facts"] = facts_by_actor.get(actor["id"], [])
         actor["events"] = events_by_actor.get(actor["id"], [])
+        actor["confidence_score"] = confidence_scores.get(actor["name"])
+        actor["threat_score"] = threat_scores.get(actor["name"], 0.0)
         actor.update(_completeness({
             "market_facts": actor["name"] in evidence_actors,
             "value_chain": bool(actor["value_chain_stages"]),
@@ -684,6 +692,14 @@ def timeseries(
     if not points:
         raise HTTPException(status_code=404, detail=f"Aucun instantané pour {dimension}={key!r} -- lancez une collecte ou POST /api/timeseries/capture.")
     return {"dimension": dimension, "key": key, "points": points}
+
+
+@app.get("/api/market-scores")
+def market_scores():
+    """Score d'attractivité par marché (audit Horizon 2 #14, voir scoring.py) : traction
+    prouvée, pipeline radar, nombre d'acteurs actifs, part de faits en stade Production/
+    Industrialisation. Trié du plus attractif au moins attractif."""
+    return compute_market_attractiveness_scores()
 
 
 @app.post("/api/timeseries/capture")

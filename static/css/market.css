@@ -35,6 +35,12 @@
 .market-fam-card header>div{flex:1;display:flex;justify-content:space-between;align-items:baseline}
 .market-fam-card h3{margin:0;font:500 17px Georgia,serif}
 .market-fam-card header b{font-size:12px;color:var(--muted);font-weight:800}
+/* Score d'attractivité (audit Horizon 2 #14) -- mêmes tons que .completeness-badge
+   (actors.css) pour rester cohérent avec le reste du vocabulaire visuel de bon/moyen/faible. */
+.attractiveness-badge{display:inline-block;margin-bottom:10px;padding:4px 8px;border-radius:10px;font-size:10px;font-weight:850;letter-spacing:.02em;white-space:nowrap}
+.attractiveness-badge.lvl-good{background:#e5f3e9;color:#2f7d52}
+.attractiveness-badge.lvl-partial{background:#fff3d6;color:#a8790b}
+.attractiveness-badge.lvl-weak{background:#fdeeec;color:#c14a2f}
 .subtheme-chips{display:flex;flex-wrap:wrap;gap:7px}
 .subtheme-chip{padding:5px 10px;border-radius:20px;background:#eef2f1;color:#41515d;font-size:11px;font-weight:700}
 .subtheme-chip b{color:var(--coral);font-weight:800;margin-left:4px}

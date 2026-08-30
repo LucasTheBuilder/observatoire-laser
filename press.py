@@ -86,18 +86,60 @@ def _parse_feed(content: bytes) -> list[dict[str, str | None]]:
     return items[:MAX_ITEMS_PER_FEED]
 
 
-def _upsert_press_event(db, actor_id: int, description: str, event_date: str | None, source_url: str) -> int:
+# Chantier Horizon 2 #13 (audit) : "Ajouter brevets, recrutements et investissements comme
+# signaux structurés" -- jusqu'ici chaque mention de presse entrait sous le même event_type
+# générique 'press_mention', indifférenciée qu'il s'agisse d'un brevet déposé, d'une levée de
+# fonds ou d'un simple article. Classification déterministe par mots-clés (même logique que
+# scrapers.MATURITY_RULES) plutôt qu'un appel IA : ni le titre ni le résumé RSS ne sont assez
+# longs pour justifier le coût/latence d'un LLM, et un faux négatif retombe simplement en
+# 'press_mention' générique (un signal moins précisément typé, pas un signal perdu). Ordre de
+# priorité explicite : brevet et investissement sont testés avant recrutement, le faux-positif
+# le plus fréquent (une ligne "nous recrutons" mentionnée en passant dans un article sur autre
+# chose ne doit pas éclipser un signal de dépôt de brevet ou de levée de fonds plus rare et plus
+# significatif dans le même article).
+SIGNAL_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "patent": ("brevet", "patent", "intellectual property filing"),
+    "investment": (
+        "levee de fonds", "leve des fonds", "tour de table", "investissement", "financement serie",
+        "series a", "series b", "series c", "funding round", "raises usd", "raises eur", "acquiert",
+        "acquisition", "rachat de", "rachete", "capital risque", "venture capital",
+    ),
+    "recruitment": (
+        "recrute", "recrutement", "embauche", "poste a pourvoir", "offre d emploi", "is hiring",
+        "we are hiring", "job opening", "career opportunit",
+    ),
+}
+SIGNAL_EVENT_LABELS = {"patent": "Brevet", "investment": "Investissement", "recruitment": "Recrutement", "press_mention": "Mention presse"}
+
+
+def classify_press_event(title: str, description: str) -> str:
+    """'patent'/'investment'/'recruitment' si un mot-clé structurant est détecté dans le titre
+    + résumé (dans cet ordre de priorité), sinon 'press_mention' (comportement identique à
+    avant ce chantier)."""
+    haystack = _normalize(f"{title} {description}")
+    for category, keywords in SIGNAL_KEYWORDS.items():
+        if any(_normalize(keyword) in haystack for keyword in keywords):
+            return category
+    return "press_mention"
+
+
+def _upsert_press_event(db, actor_id: int, event_type: str, description: str, event_date: str | None, source_url: str) -> int:
     """Dédoublonne sur (actor_id, source_url) : le lien d'un article est stable, un run répété
-    ne recrée jamais le même événement -- même principe que cordis._upsert_actor_event."""
+    ne recrée jamais le même événement -- même principe que cordis._upsert_actor_event. Une
+    reclassification (event_type a changé depuis la dernière collecte, ex: le mot-clé ajouté
+    plus tard) met à jour la ligne existante plutôt que de la laisser figée sur son ancien
+    type -- le lien reste la clé de dédoublonnage, le type peut s'affiner."""
     existing = db.execute(
-        "SELECT id FROM actor_events WHERE actor_id=? AND source_url=?", (actor_id, source_url),
+        "SELECT id,event_type FROM actor_events WHERE actor_id=? AND source_url=?", (actor_id, source_url),
     ).fetchone()
     if existing:
+        if existing["event_type"] != event_type:
+            db.execute("UPDATE actor_events SET event_type=? WHERE id=?", (event_type, existing["id"]))
         return 0
     db.execute(
         """INSERT INTO actor_events(actor_id,event_type,description,event_date,source_url,review_status,created_at)
            VALUES(?,?,?,?,?,'pending',?)""",
-        (actor_id, "press_mention", description[:500], event_date, source_url, utc_now()),
+        (actor_id, event_type, description[:500], event_date, source_url, utc_now()),
     )
     return 1
 
@@ -124,12 +166,14 @@ def collect_press_mentions() -> dict:
             with connect(ACTORS_DB) as db:
                 for item in items:
                     haystack = _normalize(f"{item['title']} {item['description']}")
+                    signal_type = classify_press_event(item["title"], item["description"])
                     for actor_name, alias in aliases.items():
                         if not _contains_whole_word(haystack, alias):
                             continue
-                        description = f"Mention presse ({feed_name}) : {item['title']}"
+                        label = SIGNAL_EVENT_LABELS[signal_type]
+                        description = f"{label} ({feed_name}) : {item['title']}"
                         events_added += _upsert_press_event(
-                            db, actor_ids[actor_name], description, item["event_date"], str(item["link"]),
+                            db, actor_ids[actor_name], signal_type, description, item["event_date"], str(item["link"]),
                         )
 
     return {
