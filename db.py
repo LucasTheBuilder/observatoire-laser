@@ -1313,6 +1313,23 @@ def init_databases() -> None:
                 ON metric_snapshots(dimension, dimension_key, period);
             CREATE INDEX IF NOT EXISTS metric_snapshots_lookup_idx
                 ON metric_snapshots(dimension, period);
+
+            -- Tableau de bord de la veille (§10.11 audit veille, 30/08/2026) : "aucun des
+            -- chiffres de l'audit n'est calculé par l'application, ils viennent tous de
+            -- requêtes ad hoc -- tant que ce sera le cas, aucune des dégradations décrites ici
+            -- ne sera détectée en production." Huit indicateurs de SANTÉ de la collecte/
+            -- extraction elle-même (pas des dimensions métier comme metric_snapshots ci-dessus),
+            -- alimentés par le même mécanisme (voir veille_metrics.capture_veille_metrics,
+            -- appelée après chaque collecte comme capture_metric_snapshot). value est NULL
+            -- quand le dénominateur est nul (rien à mesurer ce cycle), jamais fabriqué à 0.
+            CREATE TABLE IF NOT EXISTS veille_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                period TEXT NOT NULL,
+                indicator TEXT NOT NULL,
+                value REAL,
+                captured_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS veille_metrics_uq ON veille_metrics(period, indicator);
             """
         )
         _add_columns(db, "offers", {

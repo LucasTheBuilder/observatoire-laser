@@ -73,6 +73,7 @@ from db import (
     reject_evidence_review,
     reject_vocabulary_candidate,
     rows,
+    scalar,
     set_actor_active,
     update_actor_classification,
 )
@@ -83,6 +84,7 @@ from press import collect_press_mentions
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 from timeseries import capture_metric_snapshot, list_timeseries_keys, read_timeseries
+from veille_metrics import VEILLE_METRICS_THRESHOLDS, capture_veille_metrics
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -757,6 +759,44 @@ def timeseries_capture():
     return capture_metric_snapshot()
 
 
+@app.get("/api/veille-metrics")
+def veille_metrics_latest():
+    """Tableau de bord de la veille (§10.11 audit veille, 30/08/2026) : les 8 indicateurs de
+    santé de la collecte/extraction pour la période la plus récente disponible, avec leur seuil
+    d'alerte (voir veille_metrics.VEILLE_METRICS_THRESHOLDS). value=None quand le dénominateur
+    était nul à la capture -- distinct d'un problème réel."""
+    latest_period = scalar(MARKET_DB, "SELECT period FROM veille_metrics ORDER BY period DESC LIMIT 1")
+    if not latest_period:
+        raise HTTPException(status_code=404, detail="Aucun instantané de veille_metrics -- lancez une collecte ou POST /api/veille-metrics/capture.")
+    indicators = {
+        row["indicator"]: row["value"]
+        for row in rows(MARKET_DB, "SELECT indicator,value FROM veille_metrics WHERE period=?", (latest_period,))
+    }
+    return {
+        "period": latest_period,
+        "indicators": [
+            {
+                "indicator": name,
+                "value": indicators.get(name),
+                "alert_direction": direction,
+                "alert_threshold": threshold,
+                "alert": indicators.get(name) is not None and (
+                    (direction == "gt" and indicators[name] > threshold)
+                    or (direction == "lt" and indicators[name] < threshold)
+                ),
+            }
+            for name, (direction, threshold) in VEILLE_METRICS_THRESHOLDS.items()
+        ],
+    }
+
+
+@app.post("/api/veille-metrics/capture")
+def veille_metrics_capture():
+    """Déclenche un calcul immédiat des 8 indicateurs -- même fonction que celle appelée
+    automatiquement par _run_job après chaque collecte."""
+    return capture_veille_metrics()
+
+
 # --- CRUD acteurs : les modèles Pydantic ci-dessous valident/documentent automatiquement le
 # corps JSON attendu par FastAPI pour chaque endpoint POST/PATCH. ---
 class ActorCreateRequest(BaseModel):
@@ -1301,6 +1341,12 @@ def _run_job(kind: str) -> None:
             # faire échouer la collecte elle-même (même logique de tolérance que backup_all_databases
             # ci-dessus).
             capture_metric_snapshot()
+        except Exception:
+            pass
+        try:
+            # Tableau de bord de la veille (§10.11 audit veille, 30/08/2026) : même tolérance
+            # qu'au-dessus, une capture ratée ne doit jamais faire échouer la collecte.
+            capture_veille_metrics()
         except Exception:
             pass
         with job_lock:
