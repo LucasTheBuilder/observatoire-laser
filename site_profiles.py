@@ -266,7 +266,7 @@ DOMAIN_OVERRIDES: dict[str, dict[str, Any]] = {
     "alphanov.com": SITE_OVERRIDES["ALPHANOV"],
     "manutech-usd.fr": SITE_OVERRIDES["MANUTECH USD"],
     "hef.group": SITE_OVERRIDES["HEF"],
-    "lasea.eu": SITE_OVERRIDES["LASEA"],
+    "lasea.com": SITE_OVERRIDES["LASEA"],  # voir db.ACTORS : official_url réel, pas lasea.eu
     "pulsar-photonics.de": SITE_OVERRIDES["Pulsar Photonics"],
     "femtoprint.ch": SITE_OVERRIDES["FEMTOprint"],
 }

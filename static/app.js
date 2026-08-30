@@ -9,6 +9,7 @@ const state = {
   actors: [],
   profiles: [],
   vocabulary: [],
+  marketReview: [],
   network: {nodes: [], edges: []},
   duplicates: [],
   pipelineFunnel: {discovered: 0, fetched: 0, parsed: 0, evidence: 0, validated: 0},
@@ -455,6 +456,14 @@ function nextBestActions() {
       view: "vocabulary",
     });
   }
+  const pendingMarketReview = (state.marketReview || []).length;
+  if (pendingMarketReview > 0) {
+    actions.push({
+      label: `Trier ${pendingMarketReview} fait${pendingMarketReview > 1 ? "s" : ""} marché en attente`,
+      detail: "Faits partiels ou proposés par l'IA, à valider ou rejeter.",
+      view: "market-review",
+    });
+  }
   const marketRun = state.overview?.market?.last_run;
   if (marketRun?.finished_at) {
     const days = Math.floor((Date.now() - new Date(marketRun.finished_at).getTime()) / 86400000);
@@ -858,15 +867,19 @@ function firmographicsRows(a) {
   return rows;
 }
 
+// Audit v8 §2.4/priorité 4 : chaque champ chiffré a désormais SA PROPRE source_url (voir
+// capabilities._extract_capabilities) -- affichée en 3e élément de chaque ligne, plutôt que le
+// seul lien générique `capability_source_url` d'avant, qui pouvait pointer vers une page sans
+// rapport avec la valeur affichée à côté.
 function capabilitySpecRows(a) {
   const rows = [];
-  if (a.min_feature_size_um != null) rows.push(["Finesse min. démontrée", `${a.min_feature_size_um} µm`]);
-  if (a.tolerance_um != null) rows.push(["Tolérance", `± ${a.tolerance_um} µm`]);
-  if (a.max_part_size_mm != null) rows.push(["Taille de pièce max.", `${a.max_part_size_mm} mm`]);
-  if (a.throughput_units_per_h != null) rows.push(["Cadence", `${a.throughput_units_per_h} pièces/h`]);
-  if (a.pulse_duration_fs != null) rows.push(["Durée d'impulsion min.", `${a.pulse_duration_fs} fs`]);
-  if ((a.wavelengths_nm || []).length) rows.push(["Longueurs d'onde", a.wavelengths_nm.map(w => `${w} nm`).join(", ")]);
-  if (a.batch_size_range) rows.push(["Taille de série", a.batch_size_range]);
+  if (a.min_feature_size_um != null) rows.push(["Finesse min. démontrée", `${a.min_feature_size_um} µm`, a.min_feature_size_um_source_url]);
+  if (a.tolerance_um != null) rows.push(["Tolérance", `± ${a.tolerance_um} µm`, a.tolerance_um_source_url]);
+  if (a.max_part_size_mm != null) rows.push(["Taille de pièce max.", `${a.max_part_size_mm} mm`, a.max_part_size_mm_source_url]);
+  if (a.throughput_units_per_h != null) rows.push(["Cadence", `${a.throughput_units_per_h} pièces/h`, a.throughput_units_per_h_source_url]);
+  if (a.pulse_duration_fs != null) rows.push(["Durée d'impulsion min.", `${a.pulse_duration_fs} fs`, a.pulse_duration_fs_source_url]);
+  if ((a.wavelengths_nm || []).length) rows.push(["Longueurs d'onde", a.wavelengths_nm.map(w => `${w} nm`).join(", "), a.wavelengths_nm_source_url]);
+  if (a.batch_size_range) rows.push(["Taille de série", a.batch_size_range, a.batch_size_range_source_url]);
   return rows;
 }
 
@@ -905,7 +918,7 @@ function actorDetailContent(a) {
 
     ${firmographicsRows(a).length ? `<div class="detail-block"><h4>Identité entreprise</h4><ul class="fact-list">${firmographicsRows(a).map(([label, val]) => `<li><b>${esc(label)}</b> : ${esc(val)}</li>`).join("")}</ul>${a.registry_source_url ? `<a href="${esc(a.registry_source_url)}" target="_blank" rel="noopener" class="signal-link">Source registre ↗</a>` : ""}</div>` : ""}
 
-    ${capabilitySpecRows(a).length || (a.materials_qualified || []).length ? `<div class="detail-block"><h4>Capacités chiffrées</h4>${capabilitySpecRows(a).length ? `<ul class="fact-list">${capabilitySpecRows(a).map(([label, val]) => `<li><b>${esc(label)}</b> : ${esc(val)}</li>`).join("")}</ul>` : ""}${(a.materials_qualified || []).length ? `<div class="subtheme-chips">${a.materials_qualified.map(m => `<span class="subtheme-chip">${esc(m)}</span>`).join("")}</div>` : ""}${a.capability_source_url ? `<a href="${esc(a.capability_source_url)}" target="_blank" rel="noopener" class="signal-link">Source ↗</a>` : ""}</div>` : ""}
+    ${capabilitySpecRows(a).length || (a.materials_qualified || []).length ? `<div class="detail-block"><h4>Capacités chiffrées</h4>${capabilitySpecRows(a).length ? `<ul class="fact-list">${capabilitySpecRows(a).map(([label, val, sourceUrl]) => `<li><b>${esc(label)}</b> : ${esc(val)}${sourceUrl ? ` <a href="${esc(sourceUrl)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`).join("")}</ul>` : ""}${(a.materials_qualified || []).length ? `<div class="subtheme-chips">${a.materials_qualified.map(m => `<span class="subtheme-chip">${esc(m)}</span>`).join("")}</div>${a.materials_qualified_source_url ? `<a href="${esc(a.materials_qualified_source_url)}" target="_blank" rel="noopener" class="signal-link">Source matériaux ↗</a>` : ""}` : ""}</div>` : ""}
 
     ${differentiatorFacts(a).length ? `<div class="detail-block"><h4>Différenciateurs</h4><ul class="fact-list">${differentiatorFacts(a).map(f => factLine(f)).join("")}</ul></div>` : ""}
 
@@ -1247,6 +1260,66 @@ function renderVocabulary() {
   wireActions();
 }
 
+// --- Faits marché en attente de revue humaine (fact_status='partial'/'review') --------------
+// Contrairement à /api/market (qui exige les 3 dimensions market+component+operation reliées
+// ET bucket in existing/radar), ces faits n'apparaissent nulle part ailleurs dans l'app tant
+// qu'ils ne sont pas traités ici -- voir app.py: /api/market/review.
+
+const MARKET_REVIEW_STATUS_LABELS = {partial: "Partiel · 2 dimensions sur 3", review: "Proposé par l'IA"};
+
+function marketReviewStatusLabel(item) {
+  return MARKET_REVIEW_STATUS_LABELS[item.fact_status] || item.fact_status;
+}
+
+function marketReviewDims(item) {
+  return [["Marché", item.market], ["Composant", item.component], ["Opération", item.operation]]
+    .map(([label, value]) => `<div class="vocab-dim"><small>${esc(label)}</small><b>${value ? esc(value) : "—"}</b></div>`)
+    .join("");
+}
+
+// mode/extraction_mode carries either "block-rules" (deterministic lexicon) or a provider tag
+// like "anthropic:claude-..."/"ollama:..." -- surfaced so a reviewer knows at a glance whether
+// they're checking a rules-based partial match or an AI proposal the lexicon couldn't confirm.
+function marketReviewMeta(item) {
+  const parts = [];
+  if (item.relation_strength) parts.push(`Relation : ${item.relation_strength === "partial" ? "partielle" : esc(item.relation_strength)}`);
+  if (item.extraction_mode && item.extraction_mode !== "block-rules") parts.push(`IA : ${esc(item.extraction_mode)}`);
+  if (typeof item.field_confidence === "number") parts.push(`Confiance : ${Math.round(item.field_confidence * 100)}%`);
+  // A handful of existing rows store the literal string "None" instead of a real NULL --
+  // pre-existing backend data quirk, filtered here rather than shown as confusing noise.
+  if (item.industrial_stage && item.industrial_stage !== "None") parts.push(esc(item.industrial_stage));
+  return parts.length ? `<small class="block-label">${parts.join(" · ")}</small>` : "";
+}
+
+function marketReviewCard(item) {
+  return `<article class="vocab-card">
+    <header><span>${esc(item.actor_name)} · ${dateLabel(item.last_seen_at)}</span><span>${esc(marketReviewStatusLabel(item))}</span></header>
+    <blockquote>${esc(item.quote)}</blockquote>
+    <div class="vocab-dims">${marketReviewDims(item)}</div>
+    ${marketReviewMeta(item)}
+    <div class="vocab-dims" style="margin-top:12px">
+      <button class="vocab-accept" data-accept-market-review="${item.id}">✓ Valider</button>
+      <button class="vocab-reject" data-reject-market-review="${item.id}">✕ Rejeter</button>
+    </div>
+    ${item.source_url ? `<a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>` : ""}
+  </article>`;
+}
+
+function renderMarketReview() {
+  const items = state.marketReview || [];
+  const partialCount = items.filter(i => i.fact_status === "partial").length;
+  const aiCount = items.filter(i => i.fact_status === "review").length;
+  content.innerHTML = header(
+    "Administration",
+    "Faits marché à valider",
+    "Faits où seules 2 des 3 dimensions marché/composant/opération sont reliées, ou proposés par l'IA sur un bloc que le lexique déterministe avait rejeté. Valider marque le fait comme retenu et le retire de cette file — un fait partiel reste toutefois incomplet et n'apparaîtra dans la matrice Marché que si les trois dimensions finissent par y être explicitement reliées."
+  ) +
+  (items.length
+    ? `<p class="actor-summary-counts">${partialCount} partiel${partialCount > 1 ? "s" : ""} · ${aiCount} proposé${aiCount > 1 ? "s" : ""} par l'IA</p><div class="vocab-list">${items.map(marketReviewCard).join("")}</div>`
+    : `<div class="empty">Aucun fait marché en attente de revue.</div>`);
+  wireActions();
+}
+
 function dbCard(kind,label,file,count,detail,paused=false) {
   const last=state.overview?.[kind]?.last_run;
   const job=state.overview?.jobs?.[kind];
@@ -1317,6 +1390,7 @@ function render(){
   if(state.view==="futuretech") renderFutureTech();
   if(state.view==="actors") renderActors();
   if(state.view==="vocabulary") renderVocabulary();
+  if(state.view==="market-review") renderMarketReview();
   if(state.view==="collections") renderCollections();
   if(state.view==="settings") renderSettings();
 }
@@ -1349,6 +1423,15 @@ async function decideVocabulary(id, action, dimension) {
     }
     state.vocabulary = await api("/api/vocabulary-candidates");
     renderVocabulary();
+  } catch (error) { toast(error.message); }
+}
+
+async function decideMarketReview(id, action) {
+  try {
+    await api(`/api/market/review/${id}/${action}`, {method: "POST"});
+    toast(action === "accept" ? "Fait validé." : "Fait rejeté.");
+    state.marketReview = await api("/api/market/review");
+    renderMarketReview();
   } catch (error) { toast(error.message); }
 }
 
@@ -1449,6 +1532,8 @@ function wireActions(){
   document.querySelectorAll("[data-toggle-actor]").forEach(button=>button.addEventListener("click",()=>toggleActorActive(Number(button.dataset.toggleActor), button.dataset.nextActive==="1")));
   document.querySelectorAll("[data-accept-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.acceptVocab),"accept",button.dataset.dimension)));
   document.querySelectorAll("[data-reject-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.rejectVocab),"reject")));
+  document.querySelectorAll("[data-accept-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.acceptMarketReview),"accept")));
+  document.querySelectorAll("[data-reject-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.rejectMarketReview),"reject")));
   document.querySelectorAll("[data-review-actor]").forEach(button=>button.addEventListener("click",()=>decideActorReview(Number(button.dataset.reviewActor), button.dataset.reviewStatus)));
   document.querySelectorAll("[data-actor-detail]").forEach(el=>el.addEventListener("click",()=>showActorDetail(Number(el.dataset.actorDetail))));
   document.querySelectorAll("[data-actor-edit]").forEach(el=>el.addEventListener("click",()=>showActorEdit(Number(el.dataset.actorEdit))));
@@ -1467,7 +1552,7 @@ document.querySelector(".dialog-close").addEventListener("click",()=>dialog.clos
 dialog.addEventListener("click",e=>{if(e.target===dialog)dialog.close()});
 
 async function refresh(){
-  [state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.documents,state.actors,state.profiles,state.vocabulary,state.network,state.duplicates,state.pipelineFunnel]=await Promise.all([
+  [state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.documents,state.actors,state.profiles,state.vocabulary,state.marketReview,state.network,state.duplicates,state.pipelineFunnel]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
     api("/api/market"),
@@ -1477,6 +1562,7 @@ async function refresh(){
     api("/api/actors"),
     api("/api/profiles"),
     api("/api/vocabulary-candidates"),
+    api("/api/market/review"),
     api("/api/network"),
     api("/api/actors/duplicates"),
     api("/api/pipeline-funnel"),

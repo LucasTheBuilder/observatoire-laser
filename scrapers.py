@@ -45,10 +45,13 @@ import httpx
 from db import (
     ACTORS_DB,
     BUCKET_RANK,
+    DATE_CONFIDENCE_RANK,
     MARKET_DB,
     TECH_DB,
     application_key,
     classify_evidence_type,
+    classify_source_date,
+    compute_is_backfill,
     connect,
     language_from_url,
     market_fact_key,
@@ -498,6 +501,23 @@ NAVIGATION_NOISE = (
     "skip to content", "sign in", "log in", "newsletter", "contact us",
 )
 
+# Bibliography citation entries (a reference list item, not a company's own claim) are
+# reliably recognizable by their DOI link, present verbatim regardless of language or page
+# formatting -- e.g. "https://doi.org/10.2961/jlmn.2015.02.0022 Fornaroli, C., Holtkamp, J....".
+# Audit v8 §2.3: two Fraunhofer ILT facts were extracted straight from a DOI reference list.
+_DOI_PATTERN = re.compile(r"\bdoi\.org/10\.\d{4,9}/", re.IGNORECASE)
+
+# "Read more"/breadcrumb-style fragments observed leaking into extracted blocks as menu debris
+# rather than editorial content (audit v8 §2.3: Kirana "Navigation R&D Femtosecond
+# Micromachining", Workshop of Photonics "Read more..."). Kept separate from NAVIGATION_NOISE:
+# these terms are only trusted as a noise signal in combination with the structural check in
+# _is_noise_block (short, no sentence punctuation) -- "read more" appearing inside an actual
+# sentence is legitimate prose, not menu debris.
+_MENU_FRAGMENT_TERMS = (
+    "read more", "learn more", "find out more", "voir plus", "en savoir plus",
+    "back to top", "retour en haut", "share this", "partager", "navigation", "breadcrumb",
+)
+
 # Explicit negation/contrast markers. A sentence or window carrying one of these cannot
 # establish a positive relation even when it lexically contains market+component+operation
 # terms (e.g. "unlike laser cutting, we use..." or "n'offre pas de découpe laser pour...").
@@ -734,6 +754,35 @@ def _laser_match(text: str) -> bool:
     """Le "portail d'entrée" du domaine : vrai si `text` contient au moins un terme laser
     ultra-rapide connu (voir LASER_RULES). Sans ce match, aucun candidat n'est jamais créé."""
     return any(_rule_matches(text, rule) for rule in LASER_RULES.values())
+
+
+# "Monitoring IA procédé" et "Beam shaping" sont volontairement génériques dans
+# PROCESS_TECHNOLOGIES (digital twin, process monitoring, spatial light modulator...) parce que
+# technology_signals ne les tague jamais que sur un texte ayant déjà passé un filtre laser en
+# amont (voir _candidate()/_offer_candidates(), et l'ancien cordis.py qui les vérifiait sur le
+# titre+objectif SANS jamais exiger _laser_match). Utilisés seuls comme filtre de pertinence
+# thématique (voir is_on_topic ci-dessous, appelée par cordis.py/openalex.py), ces termes
+# génériques créent de faux positifs sur du contenu industriel sans rapport avec le laser --
+# vérifié : un document Tekniker "AI-Enriched Safety Criteria Catalogue and Digital Twin
+# Framework for Predictive Safety and Maintenance", sans aucune mention de laser, matchait
+# "Monitoring IA procédé" via "digital twin" seul. Exclus ici pour cette raison ; SLE/LIPSS/
+# DLIP/LSFL/HSFL restent des procédés assez spécifiquement laser pour être fiables seuls.
+_GENERIC_PROCESS_AXES = frozenset({"Monitoring IA procédé", "Beam shaping"})
+
+
+def is_on_topic(text: str) -> bool:
+    """Filtre de pertinence thématique réutilisé HORS du pipeline de crawl (cordis.py,
+    openalex.py) pour décider si un contenu obtenu ailleurs (projet CORDIS, publication
+    OpenAlex) relève seulement du laser ultra-rapide -- mêmes lexiques que le reste de ce
+    module (LASER_RULES via _laser_match, PROCESS_TECHNOLOGIES pour un procédé nommé), moins
+    les deux axes trop génériques ci-dessus. Voir audit v8 §2.1 : sans ce filtre, un centre
+    technologique généraliste matché par alias (Tekniker, CEIT) fait remonter la totalité de
+    ses projets/publications, quel que soit leur sujet réel.
+    """
+    if _laser_match(text):
+        return True
+    labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
+    return bool(labels - _GENERIC_PROCESS_AXES)
 
 
 def _detect_maturity(text: str) -> tuple[str, str]:
@@ -1100,14 +1149,24 @@ def _is_noise_block(block: ContentBlock) -> bool:
     norm = _normalize_text(direct)
     if len(norm) < 18:
         return True
+    if _DOI_PATTERN.search(norm):
+        return True
     noise_hits = sum(_contains_term(norm, term) for term in NAVIGATION_NOISE)
-    return noise_hits >= 2
+    if noise_hits >= 2:
+        return True
+    # A short fragment with no sentence-ending punctuation that also carries a menu/breadcrumb
+    # marker is very likely nav debris ("Read more", "Navigation R&D Femtosecond
+    # Micromachining"), not an editorial claim -- a real sentence has sentence structure.
+    if not any(mark in direct for mark in ".!?") and len(direct.split()) <= 8:
+        if any(_contains_term(norm, term) for term in _MENU_FRAGMENT_TERMS):
+            return True
+    return False
 
 
 def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode: str = "block-rules",
                context_text: str | None = None, structured_blocks: list[ContentBlock] | None = None,
                diagnostics: dict[str, int] | None = None, page_market: str | None = None,
-               source_date: str | None = None) -> dict | None:
+               source_date: str | None = None, date_confidence: str | None = None) -> dict | None:
     """Tente de transformer UN bloc de contenu en UN "fait marché" complet ou partiel (ou
     renvoie None).
 
@@ -1254,6 +1313,7 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
         "is_verbatim": True,
         "evidence_type": classify_evidence_type(quote),
         "source_date": source_date,
+        "date_confidence": date_confidence,
         "group": group,
         "fact_key": group,
         "application_key": app_key,
@@ -1272,7 +1332,8 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
     return result
 
 def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock, *, page_type: str,
-                      mode: str = "block-rules", source_date: str | None = None) -> list[dict]:
+                      mode: str = "block-rules", source_date: str | None = None,
+                      date_confidence: str | None = None) -> list[dict]:
     """Comme _candidate(), mais pour une "offre" (capacité/prestation) : plus permissif, car il
     n'exige PAS un triplet marché/composant/opération complet -- une simple opération ou un
     procédé laser détecté sur une page de type service/capability/technology/product suffit à
@@ -1343,6 +1404,7 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
             "is_verbatim": True,
             "evidence_type": classify_evidence_type(quote),
             "source_date": source_date,
+            "date_confidence": date_confidence,
             "fact_key": fact_key,
             "fingerprint": hashlib.sha256(fact_key.encode()).hexdigest(),
             "source_fingerprint": hashlib.sha256(f"{fact_key}|{url}|{quote}".encode()).hexdigest(),
@@ -1422,7 +1484,7 @@ def _vocabulary_candidate(
 def _ai_candidates(
     actor_name: str, url: str, title: str, blocks: list[ContentBlock], ollama: AiClient,
     diagnostics: dict[str, int] | None = None, exclude_indices: set[int] | None = None,
-    source_date: str | None = None,
+    source_date: str | None = None, date_confidence: str | None = None,
 ) -> list[dict]:
     """AI fallback for market applications the deterministic lexicon rejected, with an
     open-vocabulary escape hatch (chantier 2 item 3).
@@ -1494,7 +1556,17 @@ def _ai_candidates(
     except Exception:
         _inc_diagnostic(diagnostics, "ai_call_failed")
         return []
-    _inc_diagnostic(diagnostics, "ai_facts_proposed", len(facts))
+    # Bug fix (audit v8 §2.2): this used to count len(facts) here while only iterating over
+    # facts[:AI_FACTS_PER_PAGE_LIMIT] below -- two independent numbers that could silently
+    # diverge. On a real run this inflated "ai_facts_proposed" to ~200x the number of facts
+    # actually examined (4061 counted vs at most 1480 examinable), making the AI path look far
+    # less precise than it is, while the truncation itself left no trace at all. Now
+    # ai_facts_proposed reflects what's actually examined, and any excess is counted
+    # separately instead of disappearing.
+    AI_FACTS_PER_PAGE_LIMIT = 20
+    _inc_diagnostic(diagnostics, "ai_facts_proposed", min(len(facts), AI_FACTS_PER_PAGE_LIMIT))
+    if len(facts) > AI_FACTS_PER_PAGE_LIMIT:
+        _inc_diagnostic(diagnostics, "ai_facts_truncated", len(facts) - AI_FACTS_PER_PAGE_LIMIT)
 
     block_by_index = {i: (block, section) for i, block, section in relevant}
     complementary = {
@@ -1505,7 +1577,7 @@ def _ai_candidates(
     mode = _ai_mode_label(ollama)
     candidates: list[dict] = []
 
-    for fact in facts[:20]:
+    for fact in facts[:AI_FACTS_PER_PAGE_LIMIT]:
         try:
             original_index = int(fact["block_index"])
             block, section = block_by_index[original_index]
@@ -1598,6 +1670,7 @@ def _ai_candidates(
             "is_verbatim": True,
             "evidence_type": classify_evidence_type(quote),
             "source_date": source_date,
+            "date_confidence": date_confidence,
             "group": fact_key,
             "fact_key": fact_key,
             "application_key": app_key,
@@ -2180,6 +2253,10 @@ def _ensure_market_fact_status_column(db) -> None:
         db.execute("ALTER TABLE evidence ADD COLUMN architecture TEXT")
     if "evidence_type" not in columns:
         db.execute("ALTER TABLE evidence ADD COLUMN evidence_type TEXT")
+    if "date_confidence" not in columns:
+        db.execute("ALTER TABLE evidence ADD COLUMN date_confidence TEXT")
+    if "is_backfill" not in columns:
+        db.execute("ALTER TABLE evidence ADD COLUMN is_backfill INTEGER")
     source_columns = {row[1] for row in db.execute("PRAGMA table_info(evidence_sources)").fetchall()}
     if "is_verbatim" not in source_columns:
         db.execute("ALTER TABLE evidence_sources ADD COLUMN is_verbatim INTEGER NOT NULL DEFAULT 1")
@@ -2211,7 +2288,9 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
     stamp = utc_now()
     fact_key = candidate["fact_key"]
     app_key = candidate.get("application_key") or fact_key
-    row = db.execute("SELECT id,field_confidence,bucket FROM evidence WHERE application_key=?", (app_key,)).fetchone()
+    row = db.execute(
+        "SELECT id,field_confidence,bucket,date_confidence,created_at FROM evidence WHERE application_key=?", (app_key,)
+    ).fetchone()
     fact_added = 0
     if row:
         evidence_id = int(row["id"])
@@ -2233,19 +2312,40 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
                 (effective_bucket, stamp, evidence_id),
             )
         if float(candidate.get("confidence", 0)) > old_confidence:
+            # Revue chronologie du 30/08/2026 : date_confidence ne peut que monter en rang
+            # (published > observed_only > unknown, voir db.DATE_CONFIDENCE_RANK) -- une
+            # réobservation qui ne trouve plus de date de publication réelle ne doit jamais
+            # dégrader une ligne déjà confirmée 'published'. is_backfill n'est recalculé que
+            # quand cette ligne obtient une date de publication fiable CE tour-ci, à partir du
+            # created_at d'origine (jamais réécrit) -- pas de `stamp` : le fait a été vu pour la
+            # première fois à created_at, pas maintenant.
+            candidate_date_confidence = candidate.get("date_confidence")
+            if candidate_date_confidence and DATE_CONFIDENCE_RANK.get(candidate_date_confidence, -1) >= DATE_CONFIDENCE_RANK.get(row["date_confidence"], -1):
+                next_date_confidence = candidate_date_confidence
+                next_source_date = candidate.get("source_date")
+                next_is_backfill = compute_is_backfill(row["created_at"], next_source_date, candidate_date_confidence)
+            else:
+                # COALESCE ci-dessous conserve alors les 3 valeurs existantes -- surtout ne pas
+                # laisser source_date changer seul : sinon la date affichée se déconnecte du
+                # date_confidence/is_backfill qu'elle a servi à calculer la fois précédente.
+                next_date_confidence = None
+                next_source_date = None
+                next_is_backfill = None
             db.execute(
                 """UPDATE evidence SET industrial_stage=?,source_url=?,source_title=?,source_date=COALESCE(?,source_date),
                           quote=?,is_verbatim=?,evidence_type=COALESCE(?,evidence_type),field_confidence=?,
                           laser_process=COALESCE(?,laser_process),material=COALESCE(?,material),performance=COALESCE(?,performance),
                           architecture=COALESCE(?,architecture),
                           maturity_level=COALESCE(?,maturity_level),relation_strength=COALESCE(?,relation_strength),source_role=COALESCE(?,source_role),
+                          date_confidence=COALESCE(?,date_confidence),is_backfill=COALESCE(?,is_backfill),
                           bucket=?,fact_status=?,review_status=?,updated_at=? WHERE id=?""",
                 (
-                    candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
+                    candidate["stage"], candidate["url"], candidate["title"], next_source_date,
                     candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), candidate["confidence"],
                     candidate.get("process"), candidate.get("material"), candidate.get("performance"),
                     candidate.get("architecture"), candidate.get("maturity"),
-                    candidate.get("relation_strength"), candidate.get("source_role"), effective_bucket,
+                    candidate.get("relation_strength"), candidate.get("source_role"),
+                    next_date_confidence, next_is_backfill, effective_bucket,
                     candidate.get("fact_status", "validated"), "accepted" if candidate.get("fact_status") == "validated" else "review",
                     stamp, evidence_id,
                 ),
@@ -2253,17 +2353,22 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
     else:
         fact_status = candidate.get("fact_status", "validated")
         review_status = "accepted" if fact_status == "validated" else "review"
+        # Revue chronologie du 30/08/2026 : `stamp` == created_at de cette ligne, jamais réécrit
+        # ensuite (voir last_seen_at plus bas) -- c'est donc bien la première observation à
+        # utiliser pour is_backfill, y compris pour cette toute première insertion.
+        is_backfill = compute_is_backfill(stamp, candidate.get("source_date"), candidate.get("date_confidence"))
         evidence_id = db.execute(
             """INSERT INTO evidence(
                    actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,source_date,
-                   quote,is_verbatim,evidence_type,source_group,
+                   quote,is_verbatim,evidence_type,source_group,date_confidence,is_backfill,
                    fingerprint,fact_key,application_key,evidence_kind,language,review_status,created_at,updated_at,block_heading,block_path,
                    extraction_mode,field_confidence,laser_process,material,performance,architecture,maturity_level,relation_strength,relation_evidence,source_role,fact_status
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 candidate["actor"], candidate["bucket"], candidate["market"], candidate["component"], candidate["operation"],
                 candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
                 candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), fact_key,
+                candidate.get("date_confidence"), is_backfill,
                 candidate["fingerprint"], fact_key, app_key, language_from_url(candidate["url"]), review_status, stamp, stamp,
                 candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
                 candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("architecture"), candidate.get("maturity"),
@@ -2303,32 +2408,57 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
     directe, sans distinction bucket/application_key puisqu'une offre n'a pas de maturité
     "métier" à faire progresser). Renvoie (1 si nouvelle offre créée, 1 si nouvelle preuve créée)."""
     stamp = utc_now()
-    row = db.execute("SELECT id,field_confidence FROM offers WHERE fact_key=?", (candidate["fact_key"],)).fetchone()
+    row = db.execute(
+        "SELECT id,field_confidence,date_confidence,created_at FROM offers WHERE fact_key=?", (candidate["fact_key"],)
+    ).fetchone()
     fact_added = 0
     if row:
         offer_id = int(row["id"])
         if float(candidate.get("confidence", 0)) > float(row["field_confidence"] or 0):
+            # Revue chronologie du 30/08/2026 : même règle que _upsert_market_candidate --
+            # date_confidence ne redescend jamais, is_backfill n'est recalculé que quand cette
+            # ligne obtient une date de publication fiable ce tour-ci, à partir de son
+            # created_at d'origine (première observation), pas de `stamp`.
+            candidate_date_confidence = candidate.get("date_confidence")
+            if candidate_date_confidence and DATE_CONFIDENCE_RANK.get(candidate_date_confidence, -1) >= DATE_CONFIDENCE_RANK.get(row["date_confidence"], -1):
+                next_date_confidence = candidate_date_confidence
+                next_source_date = candidate.get("source_date")
+                next_is_backfill = compute_is_backfill(row["created_at"], next_source_date, candidate_date_confidence)
+            else:
+                # COALESCE ci-dessous conserve alors les 3 valeurs existantes -- voir
+                # _upsert_market_candidate ci-dessus pour le raisonnement complet.
+                next_date_confidence = None
+                next_source_date = None
+                next_is_backfill = None
             db.execute(
                 """UPDATE offers SET industrial_stage=?,source_url=?,source_title=?,source_date=COALESCE(?,source_date),
                           quote=?,is_verbatim=?,evidence_type=COALESCE(?,evidence_type),field_confidence=?,
-                          material=COALESCE(?,material),performance=COALESCE(?,performance),updated_at=? WHERE id=?""",
+                          material=COALESCE(?,material),performance=COALESCE(?,performance),
+                          date_confidence=COALESCE(?,date_confidence),is_backfill=COALESCE(?,is_backfill),
+                          updated_at=? WHERE id=?""",
                 (
-                    candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
+                    candidate["stage"], candidate["url"], candidate["title"], next_source_date,
                     candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), candidate["confidence"],
-                    candidate.get("material"), candidate.get("performance"), stamp, offer_id,
+                    candidate.get("material"), candidate.get("performance"),
+                    next_date_confidence, next_is_backfill, stamp, offer_id,
                 ),
             )
     else:
+        # Revue chronologie du 30/08/2026 : `stamp` == created_at de cette ligne (première
+        # observation), voir _upsert_market_candidate ci-dessus pour le même raisonnement.
+        is_backfill = compute_is_backfill(stamp, candidate.get("source_date"), candidate.get("date_confidence"))
         offer_id = db.execute(
             """INSERT INTO offers(
                    actor_name,offer_type,capability,operation,laser_process,material,performance,industrial_stage,page_type,
-                   source_url,source_title,source_date,quote,is_verbatim,evidence_type,fact_key,fingerprint,review_status,field_confidence,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
+                   source_url,source_title,source_date,quote,is_verbatim,evidence_type,date_confidence,is_backfill,
+                   fact_key,fingerprint,review_status,field_confidence,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
             (
                 candidate["actor"], candidate["offer_type"], candidate["capability"], candidate.get("operation"), candidate.get("process"),
                 candidate.get("material"), candidate.get("performance"), candidate["stage"], candidate["page_type"], candidate["url"],
                 candidate["title"], candidate.get("source_date"), candidate["quote"], int(candidate.get("is_verbatim", True)),
-                candidate.get("evidence_type"), candidate["fact_key"], candidate["fingerprint"], candidate["confidence"], stamp, stamp,
+                candidate.get("evidence_type"), candidate.get("date_confidence"), is_backfill,
+                candidate["fact_key"], candidate["fingerprint"], candidate["confidence"], stamp, stamp,
             ),
         ).lastrowid
         fact_added = 1
@@ -2449,7 +2579,12 @@ def scrape_market(max_pages: int | None = None, actor_names: list[str] | None = 
 
                 # Chantier 4 : date de publication de la page si connue, sinon date d'observation
                 # (jamais NULL -- un fait sans aucune date ne peut ni vieillir ni se comparer).
-                source_date = published_date or utc_now()[:10]
+                # Revue chronologie du 30/08/2026 : date_confidence porte désormais la trace de
+                # laquelle des deux c'était (voir db.classify_source_date) -- sans cette trace,
+                # /api/monthly ne pouvait pas distinguer un vrai signal récent d'une vieille page
+                # simplement recrawlée aujourd'hui (voir _upsert_market_candidate/
+                # _upsert_offer_candidate pour l'usage de date_confidence à l'écriture).
+                source_date, date_confidence = classify_source_date(published_date)
                 page_market = _url_market_hint(source_url, source_title)
 
                 market_candidates: list[dict] = []
@@ -2462,13 +2597,16 @@ def scrape_market(max_pages: int | None = None, actor_names: list[str] | None = 
                     candidate = _candidate(
                         source["name"], source_url, source_title, block, context_text=section,
                         structured_blocks=structured, diagnostics=diagnostics, page_market=page_market,
-                        source_date=source_date,
+                        source_date=source_date, date_confidence=date_confidence,
                     )
                     if candidate:
                         market_candidates.append(candidate)
                         covered_indices.add(index)
                     offer_candidates.extend(
-                        _offer_candidates(source["name"], source_url, source_title, block, page_type=page_type, source_date=source_date)
+                        _offer_candidates(
+                            source["name"], source_url, source_title, block, page_type=page_type,
+                            source_date=source_date, date_confidence=date_confidence,
+                        )
                     )
 
                 # AI now focuses on blocks the deterministic lexicon rejected this pass, not the
@@ -2477,7 +2615,7 @@ def scrape_market(max_pages: int | None = None, actor_names: list[str] | None = 
                 if source.get("strategy") == "adaptive":
                     for candidate in _ai_candidates(
                         source["name"], source_url, source_title, blocks, ollama, diagnostics,
-                        exclude_indices=covered_indices, source_date=source_date,
+                        exclude_indices=covered_indices, source_date=source_date, date_confidence=date_confidence,
                     ):
                         if candidate.get("kind") == "vocabulary_candidate":
                             vocabulary_candidates.append(candidate)
@@ -2628,14 +2766,19 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
                 try:
                     fingerprint = hashlib.sha256((item["doi"] or item["url"]).casefold().encode()).hexdigest()
                     stamp = utc_now()
+                    # Revue chronologie du 30/08/2026 : item["published"] vient du champ structuré
+                    # Crossref "published"/date-parts (voir plus haut), jamais d'un repli fabriqué
+                    # -- même raisonnement que openalex._upsert_document.
+                    date_confidence = "published" if item.get("published") else "observed_only"
+                    is_backfill = compute_is_backfill(stamp, item.get("published"), date_confidence)
                     before = db.total_changes
                     db.execute(
                         """INSERT OR IGNORE INTO documents(
-                               document_type,title,source_url,published_at,doi,abstract,fingerprint,created_at,last_seen_at
-                           ) VALUES('publication',?,?,?,?,?,?,?,?)""",
+                               document_type,title,source_url,published_at,doi,abstract,date_confidence,is_backfill,fingerprint,created_at,last_seen_at
+                           ) VALUES('publication',?,?,?,?,?,?,?,?,?,?)""",
                         (
                             item["title"], item["url"], item["published"], item["doi"],
-                            item["abstract"], fingerprint, stamp, stamp,
+                            item["abstract"], date_confidence, is_backfill, fingerprint, stamp, stamp,
                         ),
                     )
                     inserted = int(db.total_changes > before)

@@ -168,6 +168,39 @@ class AiCandidatesKnownLabelTests(unittest.TestCase):
         self.assertEqual([], candidates)
 
 
+class AiCandidatesTruncationTests(unittest.TestCase):
+    def test_facts_beyond_the_per_page_limit_are_counted_not_silently_dropped(self):
+        # Bug fix (audit v8 §2.2): ai_facts_proposed used to count len(facts) while the loop
+        # below only ever examined facts[:20] -- the two numbers could diverge without a
+        # trace. 25 facts here must report 20 examined + 5 truncated, not 25 examined.
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            text="Femtosecond laser surface texturing of medical stents for production customers.",
+            path="main > article",
+        )
+        facts = [{"block_index": 0, "quote": "not a real substring", "confidence": 0.9} for _ in range(25)]
+        fake = FakeAiClient(facts)
+        diagnostics: dict[str, int] = {}
+        _ai_candidates("Example", "https://example.test/medical", "Applications", [block], fake, diagnostics)
+        self.assertEqual(20, diagnostics.get("ai_facts_proposed"))
+        self.assertEqual(5, diagnostics.get("ai_facts_truncated"))
+
+    def test_facts_under_the_limit_report_no_truncation(self):
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            text="Femtosecond laser surface texturing of medical stents for production customers.",
+            path="main > article",
+        )
+        facts = [{"block_index": 0, "quote": "not a real substring", "confidence": 0.9} for _ in range(3)]
+        fake = FakeAiClient(facts)
+        diagnostics: dict[str, int] = {}
+        _ai_candidates("Example", "https://example.test/medical", "Applications", [block], fake, diagnostics)
+        self.assertEqual(3, diagnostics.get("ai_facts_proposed"))
+        self.assertNotIn("ai_facts_truncated", diagnostics)
+
+
 class AiCandidatesOpenVocabularyTests(unittest.TestCase):
     def test_unresolved_component_is_queued_as_vocabulary_candidate_not_discarded(self):
         block = ContentBlock(

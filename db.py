@@ -56,7 +56,11 @@ ACTORS = [
     ("ALPHANOV", "France", "Centre technologique - procédés laser & micro-usinage", 1, "https://www.alphanov.com"),
     ("MANUTECH USD", "France", "Plateforme technologique femtoseconde - texturation/fonctionnalisation", 1, "https://www.manutech-usd.fr"),
     ("HEF", "France", "Référence interne - groupe industriel", 1, "https://hef.group"),
-    ("LASEA", "Belgique", "Systèmes femtoseconde & développement d'applications", 1, "https://www.lasea.eu"),
+    # lasea.com, not lasea.eu: 108 des 109 sources crawlées résolvent sur lasea.com (HTTP 200,
+    # vérifié en base) -- lasea.eu semble n'être conservé qu'en page d'accueil/redirection.
+    # Voir audit v8 §2.7 : deux mécanismes matchent sur ce domaine (site_profiles.DOMAIN_OVERRIDES,
+    # openalex._find_institution) et ne s'appliquaient donc probablement pas avec l'ancien domaine.
+    ("LASEA", "Belgique", "Systèmes femtoseconde & développement d'applications", 1, "https://lasea.com"),
     ("IREPA LASER", "France", "Centre technologique - développement, industrialisation & production laser", 0, "https://www.irepa-laser.com"),
     ("Pulsar Photonics", "Allemagne", "Développement d'applications USP & fabrication sous contrat", 0, "https://www.pulsar-photonics.de"),
     ("Lightmotif", "Pays-Bas", "Micro-usinage USP & texturation - process development / contract manufacturing", 0, "https://www.lightmotif.nl"),
@@ -103,6 +107,84 @@ SEED_EVIDENCE: list[dict[str, Any]] = []
 def utc_now() -> str:
     """Horodatage ISO 8601 en UTC, à la seconde près -- utilisé partout comme created_at/updated_at."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# Revue chronologie du 30/08/2026 (P0) : jusqu'ici, `evidence.source_date`/`offers.source_date`
+# recevaient systématiquement soit la date de publication réelle de la page, soit -- faute de
+# mieux -- la date d'observation elle-même (voir l'ancien `published_date or utc_now()[:10]`
+# dans scrapers.scrape_market), et les deux cas étaient écrits dans la même colonne sans aucune
+# trace de laquelle des deux s'était produite. Résultat : `/api/monthly` ne pouvait distinguer
+# "cet acteur vient réellement de publier quelque chose" de "on vient seulement de découvrir/
+# recrawler une vieille page" -- un backfill documentaire ressortait comme un signal concurrentiel
+# frais. `date_confidence` restaure cette distinction dès l'écriture (jamais reconstruite après
+# coup : voir _backfill_date_confidence, qui marque 'unknown' plutôt que d'inventer une réponse
+# pour les lignes déjà en base avant ce correctif). `is_backfill` va plus loin : même avec une
+# date de publication confirmée, un fait vu pour la première fois (created_at) bien après cette
+# date reste un rattrapage documentaire, pas un mouvement récent.
+DATE_CONFIDENCE_RANK = {"published": 2, "observed_only": 1, "unknown": 0}
+BACKFILL_THRESHOLD_DAYS = 60
+
+
+def classify_source_date(published_date: str | None) -> tuple[str, str]:
+    """(source_date, date_confidence) à partir d'une date de publication extraite de la page
+    (ou None si elle n'en expose aucune) -- ne fabrique jamais de date de publication : la
+    valeur de repli reste la date d'observation (comme avant), mais désormais marquée
+    'observed_only' plutôt que confondue avec une vraie date de publication ('published')."""
+    if published_date:
+        return published_date, "published"
+    return utc_now()[:10], "observed_only"
+
+
+def compute_is_backfill(first_seen_at: str | None, source_date: str | None, date_confidence: str | None) -> int | None:
+    """1 si un fait à date de publication confirmée (date_confidence='published') n'a été vu
+    pour la première fois (first_seen_at, en pratique `created_at` qui n'est jamais réécrit
+    après l'insertion initiale -- voir scrapers._upsert_market_candidate/_upsert_offer_candidate)
+    que plus de BACKFILL_THRESHOLD_DAYS après cette date de publication ; 0 sinon. None quand la
+    date n'est pas fiable (observed_only/unknown/absente) : impossible de confirmer ou d'infirmer
+    un backfill sans date de publication réelle -- ne jamais deviner."""
+    if date_confidence != "published" or not first_seen_at or not source_date:
+        return None
+    try:
+        seen = datetime.fromisoformat(first_seen_at)
+        published = datetime.fromisoformat(source_date)
+    except ValueError:
+        return None
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=timezone.utc)
+    return int((seen - published).days > BACKFILL_THRESHOLD_DAYS)
+
+
+def _backfill_date_confidence_market(db: sqlite3.Connection) -> None:
+    """One-time (idempotent), MARKET_DB (evidence/offers) : source_date a pu recevoir une date
+    de repli avant ce correctif sans que rien ne distingue les deux cas a posteriori (voir
+    classify_source_date) -- marquées 'unknown' plutôt que de deviner, en attendant une
+    réobservation qui passera par le chemin d'écriture corrigé (scrapers._upsert_market_candidate/
+    _upsert_offer_candidate)."""
+    for table in ("evidence", "offers"):
+        db.execute(f"UPDATE {table} SET date_confidence='unknown' WHERE date_confidence IS NULL")
+
+
+def _backfill_date_confidence_documents(db: sqlite3.Connection) -> None:
+    """One-time (idempotent), TECH_DB (documents) : published_at n'a jamais été rempli par une
+    date de repli (voir openalex.py/scrapers.scrape_technology, tous deux alimentés par une date
+    structurée d'API, jamais falsifiée) -- reclassable sans ambiguïté à partir de la donnée déjà
+    en base, contrairement à evidence/offers ci-dessus."""
+    db.execute(
+        "UPDATE documents SET date_confidence='published' "
+        "WHERE date_confidence IS NULL AND published_at IS NOT NULL AND published_at!=''"
+    )
+    db.execute(
+        "UPDATE documents SET date_confidence='observed_only' "
+        "WHERE date_confidence IS NULL AND (published_at IS NULL OR published_at='')"
+    )
+    for row in db.execute(
+        "SELECT id,created_at,published_at FROM documents WHERE is_backfill IS NULL AND date_confidence='published'"
+    ).fetchall():
+        is_backfill = compute_is_backfill(row["created_at"], row["published_at"], "published")
+        if is_backfill is not None:
+            db.execute("UPDATE documents SET is_backfill=? WHERE id=?", (is_backfill, row["id"]))
 
 
 @contextmanager
@@ -713,6 +795,25 @@ def init_databases() -> None:
             "coverage_ready": "INTEGER NOT NULL DEFAULT 0",
             "coverage_discovered": "INTEGER NOT NULL DEFAULT 0",
         })
+        # Audit v8 §2.4/§3 priorité 4 : "une seule source_url par ligne" -- le meilleur
+        # min_feature_size_um et le meilleur max_part_size_mm, par exemple, peuvent venir de
+        # deux pages différentes, mais capability_spec.source_url (un seul champ partagé) ne
+        # pouvait pointer que vers l'une des deux. Une colonne par champ numérique/liste, plutôt
+        # qu'une deuxième table : capability_spec reste "la meilleure valeur connue par acteur",
+        # pas un historique de citations multiples comme evidence/evidence_sources (voir
+        # capabilities.py). L'ancienne colonne `source_url` reste en place (première page
+        # analysée pour cet acteur, inchangée) pour ne rien casser en aval ; les colonnes
+        # ci-dessous sont la source de vérité par champ désormais utilisée par le front.
+        _add_columns(db, "capability_spec", {
+            "min_feature_size_um_source_url": "TEXT",
+            "tolerance_um_source_url": "TEXT",
+            "max_part_size_mm_source_url": "TEXT",
+            "throughput_units_per_h_source_url": "TEXT",
+            "wavelengths_nm_source_url": "TEXT",
+            "pulse_duration_fs_source_url": "TEXT",
+            "materials_qualified_source_url": "TEXT",
+            "batch_size_range_source_url": "TEXT",
+        })
         db.executescript(
             """
             CREATE INDEX IF NOT EXISTS actor_sources_actor_active_score_idx
@@ -814,6 +915,10 @@ def init_databases() -> None:
             # concaténation. evidence_type : voir classify_evidence_type ci-dessus.
             "architecture": "TEXT",
             "evidence_type": "TEXT",
+            # Revue chronologie du 30/08/2026 : voir classify_source_date/compute_is_backfill
+            # ci-dessus. date_confidence in ('published','observed_only','unknown').
+            "date_confidence": "TEXT",
+            "is_backfill": "INTEGER",
         })
         db.executescript(
             """
@@ -935,6 +1040,10 @@ def init_databases() -> None:
             "is_verbatim": "INTEGER NOT NULL DEFAULT 1",
             "source_date": "TEXT",
             "evidence_type": "TEXT",
+            # Revue chronologie du 30/08/2026 : voir classify_source_date/compute_is_backfill
+            # ci-dessus. date_confidence in ('published','observed_only','unknown').
+            "date_confidence": "TEXT",
+            "is_backfill": "INTEGER",
         })
         _add_columns(db, "evidence_sources", {
             "relation_strength": "TEXT",
@@ -976,6 +1085,7 @@ def init_databases() -> None:
         db.execute("UPDATE offer_sources SET is_verbatim=0 WHERE extraction_mode IS NULL")
         _migrate_industrial_stage_concatenation(db)
         _backfill_evidence_type(db)
+        _backfill_date_confidence_market(db)
         # Both migrations run on every startup, not just once: they are idempotent (a row that
         # already carries its canonical key is only re-derived, never duplicated) and this keeps
         # the evidence table self-healing if a row is ever inserted or edited outside the normal
@@ -999,10 +1109,14 @@ def init_databases() -> None:
                 ON evidence(fact_status,evidence_kind,bucket,created_at);
             CREATE INDEX IF NOT EXISTS evidence_last_seen_idx
                 ON evidence(last_seen_at);
+            CREATE INDEX IF NOT EXISTS evidence_date_confidence_idx
+                ON evidence(date_confidence,created_at);
             CREATE INDEX IF NOT EXISTS offers_status_created_idx
                 ON offers(review_status,created_at);
             CREATE INDEX IF NOT EXISTS offers_last_seen_idx
                 ON offers(last_seen_at);
+            CREATE INDEX IF NOT EXISTS offers_date_confidence_idx
+                ON offers(date_confidence,created_at);
             """
         )
         stamp = utc_now()
@@ -1074,14 +1188,21 @@ def init_databases() -> None:
         )
         _add_columns(db, "documents", {
             "last_seen_at": "TEXT",
+            # Revue chronologie du 30/08/2026 : voir classify_source_date/compute_is_backfill
+            # ci-dessus. date_confidence in ('published','observed_only','unknown').
+            "date_confidence": "TEXT",
+            "is_backfill": "INTEGER",
         })
         db.execute("UPDATE documents SET last_seen_at=COALESCE(last_seen_at,created_at)")
+        _backfill_date_confidence_documents(db)
         db.executescript(
             """
             CREATE INDEX IF NOT EXISTS documents_type_published_idx
                 ON documents(document_type,published_at);
             CREATE INDEX IF NOT EXISTS documents_created_idx
                 ON documents(created_at);
+            CREATE INDEX IF NOT EXISTS documents_date_confidence_idx
+                ON documents(date_confidence,created_at);
             """
         )
 

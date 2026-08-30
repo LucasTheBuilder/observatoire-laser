@@ -1,5 +1,6 @@
-"""Tests pour capabilities.py (chantier 5) : capability_spec, l'enveloppe de capacités
-chiffrées extraite déterministiquement des pages product/equipment/capability déjà crawlées.
+"""Tests pour capabilities.py (chantier 5, durci par l'audit v8 priorité 4) : capability_spec,
+l'enveloppe de capacités chiffrées extraite déterministiquement des pages
+product/equipment/capability/service/about déjà crawlées.
 
 Les cas de collect_capability_specs() ici passent tous par le chemin blocks_json en cache
 (actor_sources.blocks_json + last_checked_at déjà renseignés), qui court-circuite tout appel
@@ -34,6 +35,12 @@ def _block(text: str, heading: str = "") -> dict:
     return {"heading": heading, "h1": "", "h2": "", "h3": "", "text": text, "path": "main > p", "media_context": ""}
 
 
+def _pages(*texts: str, url: str = "https://example.test/page") -> list[tuple[str, str]]:
+    """Builds the (source_url, text) pairs _extract_* now expects -- one fixed URL for every
+    text unless a test needs to tell two pages apart (see the source-tracking tests below)."""
+    return [(url, text) for text in texts]
+
+
 class ParseNumberTests(unittest.TestCase):
     def test_dot_decimal(self):
         self.assertEqual(1.5, _parse_number("1.5"))
@@ -50,44 +57,64 @@ class ParseNumberTests(unittest.TestCase):
 
 class ExtractCapabilitiesTests(unittest.TestCase):
     def test_wavelengths_collected_and_out_of_range_rejected(self):
-        fields = _extract_capabilities(["Available wavelengths: 1030 nm, 515 nm and 343 nm.", "Cable length 5000 nm reel (irrelevant)."])
+        fields = _extract_capabilities(_pages(
+            "Available wavelengths: 1030 nm, 515 nm and 343 nm.",
+            "Cable length 5000 nm reel (irrelevant).",
+        ))
         self.assertEqual([343, 515, 1030], fields["wavelengths_nm"])
 
+    def test_wavelength_requires_laser_context_word_in_same_block(self):
+        # Audit v8 §2.4: a bare "nm" number on a generic equipment page (no laser/wavelength
+        # wording nearby) must never be attributed as a laser wavelength -- same principle
+        # already applied to feature size/part size below.
+        with_context = _extract_capabilities(_pages("This laser operates at 1064 nm."))
+        without_context = _extract_capabilities(_pages("Sensor resolution: 1064 nm."))
+        self.assertEqual([1064], with_context["wavelengths_nm"])
+        self.assertEqual([], without_context["wavelengths_nm"])
+
     def test_pulse_duration_takes_shortest(self):
-        fields = _extract_capabilities(["System A: 290 fs pulse duration.", "System B: 900 fs pulse duration."])
+        fields = _extract_capabilities(_pages("System A: 290 fs pulse duration.", "System B: 900 fs pulse duration."))
         self.assertEqual(290.0, fields["pulse_duration_fs"])
 
     def test_tolerance_uses_plus_minus_marker(self):
-        fields = _extract_capabilities(["Positioning accuracy of ±2 µm on all axes."])
+        fields = _extract_capabilities(_pages("Positioning accuracy of ±2 µm on all axes."))
         self.assertEqual(2.0, fields["tolerance_um"])
 
     def test_feature_size_requires_context_word_in_same_block(self):
         # A bare µm value with no feature-size context must never be attributed to feature size.
-        with_context = _extract_capabilities(["Minimum feature size achievable: 8 µm."])
-        without_context = _extract_capabilities(["Cable diameter: 8 µm."])
+        with_context = _extract_capabilities(_pages("Minimum feature size achievable: 8 µm."))
+        without_context = _extract_capabilities(_pages("Cable diameter: 8 µm."))
         self.assertEqual(8.0, with_context["min_feature_size_um"])
         self.assertIsNone(without_context["min_feature_size_um"])
 
     def test_part_size_requires_context_word_and_takes_largest(self):
-        fields = _extract_capabilities(["X-Y travel of 300 mm.", "X-Y travel up to 600 mm on the large-format stage."])
+        fields = _extract_capabilities(_pages("X-Y travel of 300 mm.", "X-Y travel up to 600 mm on the large-format stage."))
         self.assertEqual(600.0, fields["max_part_size_mm"])
 
+    def test_implausible_part_size_for_micromachining_is_rejected(self):
+        # Audit v8 §2.4, real production example: Femtika max_part_size_mm=2680 (2.68 m) was
+        # kept by the old 5000mm bound despite not being plausible for this segment.
+        fields = _extract_capabilities(_pages("Work envelope up to 2680 mm for large panels."))
+        self.assertIsNone(fields["max_part_size_mm"])
+        plausible = _extract_capabilities(_pages("Work envelope up to 900 mm for large panels."))
+        self.assertEqual(900.0, plausible["max_part_size_mm"])
+
     def test_throughput_pattern_and_largest_kept(self):
-        fields = _extract_capabilities(["Standard line: 1200 parts/hour.", "Fast line: 3000 parts per hour."])
+        fields = _extract_capabilities(_pages("Standard line: 1200 parts/hour.", "Fast line: 3000 parts per hour."))
         self.assertEqual(3000.0, fields["throughput_units_per_h"])
 
     def test_batch_size_range_kept_as_verbatim_quote(self):
-        fields = _extract_capabilities(["We process from 1 to 100000 parts depending on the program."])
+        fields = _extract_capabilities(_pages("We process from 1 to 100000 parts depending on the program."))
         self.assertIn("1", fields["batch_size_range"])
         self.assertIn("100000", fields["batch_size_range"])
 
     def test_materials_qualified_uses_shared_lexicon(self):
-        fields = _extract_capabilities(["Qualified on titanium, stainless steel and fused silica glass parts."])
+        fields = _extract_capabilities(_pages("Qualified on titanium, stainless steel and fused silica glass parts."))
         self.assertIn("Métal", fields["materials_qualified"])
         self.assertIn("Verre", fields["materials_qualified"])
 
     def test_no_signal_yields_all_none(self):
-        fields = _extract_capabilities(["Contact us for more information about our company history."])
+        fields = _extract_capabilities(_pages("Contact us for more information about our company history."))
         self.assertIsNone(fields["min_feature_size_um"])
         self.assertIsNone(fields["tolerance_um"])
         self.assertIsNone(fields["max_part_size_mm"])
@@ -97,43 +124,88 @@ class ExtractCapabilitiesTests(unittest.TestCase):
         self.assertEqual([], fields["wavelengths_nm"])
         self.assertEqual([], fields["materials_qualified"])
 
+    def test_each_field_is_sourced_from_the_page_that_actually_carries_it(self):
+        # Audit v8 §2.4/priority 4: capability_spec used to share a single source_url across
+        # every field, regardless of which page actually produced the winning value. Two
+        # different pages here must each be credited for the field they actually contributed.
+        page_texts = [
+            ("https://example.test/product-a", "Minimum feature size achievable: 8 µm."),
+            ("https://example.test/product-b", "X-Y travel of 600 mm on the large-format stage."),
+        ]
+        fields = _extract_capabilities(page_texts)
+        self.assertEqual("https://example.test/product-a", fields["min_feature_size_um_source_url"])
+        self.assertEqual("https://example.test/product-b", fields["max_part_size_mm_source_url"])
+
+    def test_winning_value_from_a_later_page_is_sourced_to_that_page(self):
+        # Not just "the first page wins by default": the source must track whichever page's
+        # value was actually retained (here, the largest part size, found on the second page).
+        page_texts = [
+            ("https://example.test/product-a", "X-Y travel of 300 mm."),
+            ("https://example.test/product-b", "X-Y travel up to 600 mm on the large-format stage."),
+        ]
+        fields = _extract_capabilities(page_texts)
+        self.assertEqual(600.0, fields["max_part_size_mm"])
+        self.assertEqual("https://example.test/product-b", fields["max_part_size_mm_source_url"])
+
 
 class ExtractCertificationsTests(unittest.TestCase):
     def test_recognized_codes_are_matched_regardless_of_spacing(self):
-        found = _extract_certifications(["Our quality system is certified ISO9001 and ISO 13485 for medical devices."])
-        self.assertEqual(["ISO 13485", "ISO 9001"], found)
+        found = _extract_certifications(_pages("Our quality system is certified ISO9001 and ISO 13485 for medical devices."))
+        self.assertEqual({"ISO 13485", "ISO 9001"}, set(found))
 
     def test_aerospace_and_export_control_codes(self):
-        found = _extract_certifications(["AS9100 certified, Nadcap accredited for special processes, ITAR registered."])
-        self.assertEqual(["AS9100", "ITAR", "Nadcap"], found)
+        found = _extract_certifications(_pages("AS9100 certified, Nadcap accredited for special processes, ITAR registered."))
+        self.assertEqual({"AS9100", "ITAR", "Nadcap"}, set(found))
 
     def test_unrelated_iso_number_is_not_a_certification(self):
         # ISO 8601 is a date format, not a quality/industry certification -- must never match.
-        found = _extract_certifications(["Dates on this page follow ISO 8601."])
-        self.assertEqual([], found)
+        found = _extract_certifications(_pages("Dates on this page follow ISO 8601."))
+        self.assertEqual({}, found)
+
+    def test_each_certification_is_sourced_to_the_page_that_states_it(self):
+        page_texts = [
+            ("https://example.test/quality", "Our facility is certified ISO 9001."),
+            ("https://example.test/medical", "Our medical line is certified ISO 13485."),
+        ]
+        found = _extract_certifications(page_texts)
+        self.assertEqual("https://example.test/quality", found["ISO 9001"])
+        self.assertEqual("https://example.test/medical", found["ISO 13485"])
 
 
 class ExtractCleanroomClassTests(unittest.TestCase):
     def test_iso_class_requires_cleanroom_context(self):
-        with_context = _extract_cleanroom_class(["Machining is performed in an ISO 7 cleanroom."])
-        without_context = _extract_cleanroom_class(["Section ISO 7 of the quality manual covers calibration."])
+        with_context, source = _extract_cleanroom_class(_pages("Machining is performed in an ISO 7 cleanroom."))
+        without_context, no_source = _extract_cleanroom_class(_pages("Section ISO 7 of the quality manual covers calibration."))
         self.assertEqual("ISO 7", with_context)
+        self.assertTrue(source)
         self.assertIsNone(without_context)
+        self.assertIsNone(no_source)
 
     def test_iso_class_prefers_the_best_finest_across_blocks(self):
-        result = _extract_cleanroom_class(["Standard cleanroom: ISO 8.", "Premium line operates in an ISO 5 cleanroom."])
+        result, _source = _extract_cleanroom_class(_pages("Standard cleanroom: ISO 8.", "Premium line operates in an ISO 5 cleanroom."))
         self.assertEqual("ISO 5", result)
 
     def test_federal_standard_209e_class_fallback(self):
-        result = _extract_cleanroom_class(["Assembly takes place in a Class 10000 clean room."])
+        result, _source = _extract_cleanroom_class(_pages("Assembly takes place in a Class 10000 clean room."))
         self.assertEqual("Class 10000", result)
 
     def test_iso_scale_preferred_over_federal_when_both_present(self):
-        result = _extract_cleanroom_class(["Legacy Class 1000 clean room, now rated ISO 6 cleanroom."])
+        result, _source = _extract_cleanroom_class(_pages("Legacy Class 1000 clean room, now rated ISO 6 cleanroom."))
         self.assertEqual("ISO 6", result)
 
     def test_no_cleanroom_context_at_all_yields_none(self):
-        self.assertIsNone(_extract_cleanroom_class(["General manufacturing floor, no special classification."]))
+        result, source = _extract_cleanroom_class(_pages("General manufacturing floor, no special classification."))
+        self.assertIsNone(result)
+        self.assertIsNone(source)
+
+    def test_best_class_is_sourced_to_the_page_that_states_it(self):
+        page_texts = [
+            ("https://example.test/standard", "Standard cleanroom: ISO 8."),
+            ("https://example.test/premium", "Premium line operates in an ISO 5 cleanroom."),
+        ]
+        result, source = _extract_cleanroom_class(page_texts)
+        self.assertEqual("ISO 5", result)
+        self.assertEqual("https://example.test/premium", source)
 
 
 class CollectCapabilitySpecsTests(unittest.TestCase):
@@ -173,12 +245,17 @@ class CollectCapabilitySpecsTests(unittest.TestCase):
             self.assertEqual(0, result["errors"])
             with dbmod.connect(actors_db) as db:
                 row = db.execute(
-                    """SELECT min_feature_size_um,tolerance_um,source_url FROM capability_spec c
-                       JOIN actors a ON a.id=c.actor_id WHERE a.name='FEMTOprint'"""
+                    """SELECT min_feature_size_um,tolerance_um,source_url,
+                              min_feature_size_um_source_url,tolerance_um_source_url
+                       FROM capability_spec c JOIN actors a ON a.id=c.actor_id WHERE a.name='FEMTOprint'"""
                 ).fetchone()
             self.assertEqual(8.0, row["min_feature_size_um"])
             self.assertEqual(2.0, row["tolerance_um"])
             self.assertTrue(row["source_url"])
+            # Both fields came from the same (only) seeded page here, but through the per-field
+            # column now -- not just the legacy shared `source_url`.
+            self.assertEqual(row["source_url"], row["min_feature_size_um_source_url"])
+            self.assertEqual(row["source_url"], row["tolerance_um_source_url"])
 
     def test_page_type_outside_scope_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:

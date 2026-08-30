@@ -19,7 +19,25 @@ sys.path.insert(0, str(ROOT))
 
 import db as dbmod
 import openalex
-from openalex import _domain, _find_institution, _parse_work, _upsert_document, collect_openalex_publications
+from openalex import _domain, _find_institution, _parse_work, _upsert_document, _work_is_on_topic, collect_openalex_publications
+
+
+class WorkIsOnTopicTests(unittest.TestCase):
+    def test_femtosecond_title_is_on_topic(self):
+        self.assertTrue(_work_is_on_topic("Femtosecond laser micromachining of fused silica"))
+
+    def test_named_process_without_laser_wording_is_on_topic(self):
+        self.assertTrue(_work_is_on_topic("Selective laser etching (SLE) of photonic glass components"))
+
+    def test_unrelated_title_is_off_topic(self):
+        self.assertFalse(_work_is_on_topic("Effects of graded dietary levels of microalgae on poultry growth"))
+
+    def test_generic_process_axis_without_laser_wording_is_off_topic(self):
+        # Regression: same real false positive found in cordis.py's fixtures -- a title
+        # matching "Monitoring IA procédé" via "digital twin" alone, no laser mention.
+        self.assertFalse(_work_is_on_topic(
+            "AI-Enriched Safety Criteria Catalogue and Digital Twin Framework for Predictive Safety and Maintenance"
+        ))
 
 
 class DomainHelperTests(unittest.TestCase):
@@ -202,9 +220,11 @@ class CollectOpenAlexTests(unittest.TestCase):
 
                 def works_handler(params):
                     return {"results": [
-                        {"id": "https://openalex.org/W1", "doi": "https://doi.org/10.1/a", "title": "Paper A", "publication_date": "2026-01-01",
+                        {"id": "https://openalex.org/W1", "doi": "https://doi.org/10.1/a", "title": "Femtosecond laser micromachining of fused silica", "publication_date": "2026-01-01",
                          "primary_location": {"landing_page_url": "https://doi.org/10.1/a"}},
-                        {"id": "https://openalex.org/W2", "doi": None, "title": "Paper B", "publication_date": "2026-02-01",
+                        # Off-topic: same institution, but nothing to do with lasers -- must be
+                        # counted and skipped, not stored (audit v8 §2.1).
+                        {"id": "https://openalex.org/W2", "doi": None, "title": "Effects of graded dietary levels of microalgae on poultry growth", "publication_date": "2026-02-01",
                          "primary_location": {}},
                     ]}
 
@@ -213,12 +233,14 @@ class CollectOpenAlexTests(unittest.TestCase):
                     result = collect_openalex_publications()
 
                 self.assertEqual(1, result["actors_matched"])
-                self.assertEqual(2, result["documents_added"])
+                self.assertEqual(1, result["documents_added"])
+                self.assertEqual(1, result["documents_off_topic"])
                 self.assertEqual(0, result["errors"])
 
                 with dbmod.connect(tech_db) as db:
                     docs = list(db.execute("SELECT actor_name,title,doi FROM documents ORDER BY title"))
-                self.assertEqual(2, len(docs))
+                self.assertEqual(1, len(docs))
+                self.assertEqual("Femtosecond laser micromachining of fused silica", docs[0]["title"])
                 self.assertTrue(all(d["actor_name"] == "ALPHANOV" for d in docs))
 
 

@@ -43,7 +43,7 @@ from typing import Any
 import httpx
 
 from db import ACTORS_DB, DATA_DIR, TECH_DB, connect, technology_signal_key, utc_now
-from scrapers import HEADERS, PROCESS_TECHNOLOGIES, _detect_maturity, _match_label_details, _quote
+from scrapers import HEADERS, PROCESS_TECHNOLOGIES, _detect_maturity, _match_label_details, _quote, is_on_topic
 
 CORDIS_PROJECTS_ZIP_URL = "https://cordis.europa.eu/data/cordis-HORIZONprojects-csv.zip"
 CORDIS_CACHE_PATH = DATA_DIR / "cordis_cache" / "horizon_projects.zip"
@@ -97,6 +97,20 @@ def _contains_whole_phrase(haystack: str, phrase: str) -> bool:
 
 def _project_url(project_id: str) -> str:
     return f"https://cordis.europa.eu/project/id/{project_id}"
+
+
+def _project_is_on_topic(project: dict[str, str]) -> bool:
+    """Un projet CORDIS n'est retenu comme événement/relation observatoire que s'il relève du
+    laser ultra-rapide, jugé sur son titre + objectif via scrapers.is_on_topic() -- le même
+    filtre que celui appliqué aux publications OpenAlex, voir son docstring pour le détail des
+    lexiques utilisés. Auparavant ce filtre n'existait que pour technology_signals (voir
+    _upsert_technology_signal plus bas) : un centre technologique généraliste matché par alias
+    (Tekniker, CEIT) faisait donc remonter TOUS ses projets européens -- recyclage, ferroviaire,
+    sciences sociales... -- comme événements/partenariats de l'observatoire laser. Voir audit v8
+    §2.1 (73/83 projets CORDIS hors sujet, 84% du graphe réseau issu de ces deux seuls acteurs).
+    """
+    text = f"{project.get('title') or ''} {project.get('objective') or ''}"
+    return is_on_topic(text)
 
 
 def _ensure_cache(client: httpx.Client) -> Path:
@@ -290,7 +304,7 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
                 zip_path = _ensure_cache(client)
     except Exception as exc:
         return {
-            "error": str(exc)[:300], "actors_matched": 0, "projects_matched": 0,
+            "error": str(exc)[:300], "actors_matched": 0, "projects_matched": 0, "projects_off_topic": 0,
             "events_added": 0, "relations_added": 0, "signals_added": 0, "signal_sources_added": 0, "errors": 0,
         }
 
@@ -308,10 +322,17 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
     projects = _project_details(zip_path, all_project_ids)
 
     events_added = relations_added = signals_added = signal_sources_added = errors = 0
+    projects_off_topic = 0
     with connect(ACTORS_DB) as actors_db, connect(TECH_DB) as tech_db:
         for project_id, actor_names in project_actor_names.items():
             project = projects.get(project_id)
             if not project:
+                continue
+            if not _project_is_on_topic(project):
+                # Le projet matche un acteur suivi (même alias d'organisation) mais son
+                # titre/objectif ne relève pas du laser ultra-rapide : ni événement, ni
+                # relation, ni signal techno n'est créé pour lui (voir _project_is_on_topic).
+                projects_off_topic += 1
                 continue
             source_url = _project_url(project_id)
             try:
@@ -324,7 +345,19 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
                     own_alias = aliases[actor_name]
                     for org in consortiums.get(project_id, [])[:MAX_PARTNERS_PER_PROJECT]:
                         related_name = (org.get("name") or "").strip()
-                        if not related_name or _contains_whole_phrase(_normalize_org_text(related_name), own_alias):
+                        short_name = (org.get("shortName") or "").strip()
+                        # A consortium can list the actor's own entity under its full legal
+                        # name (e.g. CORDIS registers LASEA as "Laser Engineering Applications
+                        # SA", shortName "LASEA") -- the alias never appears as a substring of
+                        # that legal name, so checking only `name` let the actor's own row slip
+                        # through as if it were a distinct partner (a self-loop in the network
+                        # graph: LASEA -> "Laser Engineering Applications SA"). Checking
+                        # shortName too catches this without touching _match_projects' broader
+                        # project-discovery matching, which is unaffected by this bug.
+                        is_own_row = _contains_whole_phrase(_normalize_org_text(related_name), own_alias) or (
+                            short_name and _contains_whole_phrase(_normalize_org_text(short_name), own_alias)
+                        )
+                        if not related_name or is_own_row:
                             continue  # skip the actor's own consortium row(s)
                         related_actor_id = actors_by_name.get(_find_tracked_actor(related_name, aliases) or "")
                         note = f"Consortium {label} ({org.get('role') or 'participant'})"[:240]
@@ -347,6 +380,7 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
     return {
         "actors_matched": len(matches),
         "projects_matched": len(project_actor_names),
+        "projects_off_topic": projects_off_topic,
         "events_added": events_added,
         "relations_added": relations_added,
         "signals_added": signals_added,

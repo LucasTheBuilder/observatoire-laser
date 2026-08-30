@@ -353,6 +353,40 @@ def overview():
     }
 
 
+def _monthly_signal_kind(date_confidence: str | None, is_backfill: int | None) -> str:
+    """Classe une ligne récemment insérée (created_at>=cutoff) en 'fresh' (date de publication
+    confirmée et récente -- un vrai signal concurrentiel), 'backfill' (date de publication
+    confirmée mais ancienne : contenu ancien seulement découvert/recrawlé maintenant, PAS un
+    mouvement récent) ou 'undated' (aucune date de publication fiable trouvée : on sait que la
+    ligne vient d'entrer en base, pas si le fait lui-même est récent).
+
+    Revue chronologie du 30/08/2026 (P0) : avant ce correctif, created_at>=cutoff seul faisait
+    remonter les trois cas indifféremment comme "nouveau signal" -- un backfill documentaire (une
+    vieille page enfin crawlée) pouvait se faire passer pour une accélération de marché. Voir
+    db.classify_source_date/db.compute_is_backfill pour comment ces deux champs sont écrits."""
+    if date_confidence == "published":
+        return "backfill" if is_backfill else "fresh"
+    return "undated"
+
+
+def _split_monthly_signals(rows: list[dict], *, limit: int = 40) -> tuple[list[dict], list[dict], list[dict], dict[str, int]]:
+    """Répartit des lignes déjà triées (created_at DESC) dans les 3 compartiments de
+    _monthly_signal_kind. Les 3 listes renvoyées sont plafonnées à ``limit`` pour l'affichage
+    (même plafond que l'ancien ``LIMIT 40`` SQL), mais ``counts`` porte lui sur la totalité de
+    ``rows`` -- un compteur ne doit jamais être silencieusement tronqué à ce que l'UI affiche."""
+    fresh: list[dict] = []
+    backfill: list[dict] = []
+    undated: list[dict] = []
+    buckets = {"fresh": fresh, "backfill": backfill, "undated": undated}
+    counts = {"fresh": 0, "backfill": 0, "undated": 0}
+    for row in rows:
+        kind = _monthly_signal_kind(row.get("date_confidence"), row.get("is_backfill"))
+        counts[kind] += 1
+        if len(buckets[kind]) < limit:
+            buckets[kind].append(row)
+    return fresh, backfill, undated, counts
+
+
 @app.get("/api/monthly")
 def monthly(days: int = Query(default=30, ge=1, le=365)):
     """Return a compact delta view for the analyst's recurring review."""
@@ -378,43 +412,50 @@ def monthly(days: int = Query(default=30, ge=1, le=365)):
         ]
 
     with connect(MARKET_DB) as db:
-        recent_counts = db.execute(
-            """SELECT
-                   SUM(CASE WHEN evidence_kind='market_application' AND fact_status='validated' AND created_at>=? THEN 1 ELSE 0 END) AS new_market,
-                   SUM(CASE WHEN evidence_kind='market_application' AND fact_status='validated' AND created_at<? AND last_seen_at>=? THEN 1 ELSE 0 END) AS resurfaced_market
-               FROM evidence""",
-            (cutoff, cutoff, cutoff),
-        ).fetchone()
-        new_offers_count = db.execute(
-            "SELECT COUNT(*) FROM offers WHERE review_status='accepted' AND created_at>=?",
-            (cutoff,),
-        ).fetchone()[0]
-        new_market = [
+        # Revue chronologie du 30/08/2026 (P0) : created_at>=cutoff seul ne dit rien sur QUAND
+        # le fait a réellement eu lieu -- voir _monthly_signal_kind ci-dessus. Chaque ligne
+        # récemment insérée est donc classée en fresh (signal daté et récent : compte comme
+        # "nouveau"), backfill (daté mais ancien : découverte tardive de contenu ancien, jamais
+        # comptée comme un mouvement récent) ou undated (aucune date fiable : la ligne EST
+        # nouvelle en base, mais on ignore si le fait l'est). Fetch non plafonné ici : le
+        # plafond d'affichage (40) s'applique après la répartition par compartiment, dans
+        # _split_monthly_signals, pas avant -- sinon un compartiment pourrait être sous-compté.
+        recent_market_rows = [
             dict(row) for row in db.execute(
                 """SELECT id,actor_name,bucket,market,component,operation,industrial_stage,
-                          field_confidence,created_at,last_seen_at
+                          field_confidence,created_at,last_seen_at,source_date,date_confidence,is_backfill
                    FROM evidence
-                   WHERE evidence_kind='market_application'
-                     AND fact_status='validated'
-                     AND created_at>=?
-                   ORDER BY created_at DESC
-                   LIMIT 40""",
+                   WHERE evidence_kind='market_application' AND fact_status='validated' AND created_at>=?
+                   ORDER BY created_at DESC""",
                 (cutoff,),
             )
         ]
-        new_offers = [
+        new_market, new_market_backfill, new_market_undated, new_market_counts = _split_monthly_signals(recent_market_rows)
+
+        recent_offer_rows = [
             dict(row) for row in db.execute(
                 """SELECT o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,
-                          o.performance,o.industrial_stage,o.created_at,o.last_seen_at,
+                          o.performance,o.industrial_stage,o.created_at,o.last_seen_at,o.source_date,
+                          o.date_confidence,o.is_backfill,
                           (SELECT COUNT(*) FROM offer_sources os WHERE os.offer_id=o.id) AS proofs,
                           (SELECT COUNT(DISTINCT COALESCE(os.language,'unknown')) FROM offer_sources os WHERE os.offer_id=o.id) AS languages
                    FROM offers o
                    WHERE o.review_status='accepted' AND o.created_at>=?
-                   ORDER BY o.created_at DESC
-                   LIMIT 40""",
+                   ORDER BY o.created_at DESC""",
                 (cutoff,),
             )
         ]
+        new_offers, new_offers_backfill, new_offers_undated, new_offers_counts = _split_monthly_signals(recent_offer_rows)
+
+        # Compte non plafonné, distinct de la liste d'affichage ci-dessous (LIMIT 40) -- même
+        # raison que new_market_counts/new_offers_counts plus haut : un compteur ne doit jamais
+        # être silencieusement tronqué à ce qu'affiche l'UI.
+        resurfaced_market_count = db.execute(
+            """SELECT COUNT(*) FROM evidence
+               WHERE evidence_kind='market_application' AND fact_status='validated'
+                 AND created_at<? AND last_seen_at>=?""",
+            (cutoff, cutoff),
+        ).fetchone()[0]
         resurfaced = [
             dict(row) for row in db.execute(
                 """SELECT id,actor_name,bucket,market,component,operation,last_seen_at
@@ -430,36 +471,50 @@ def monthly(days: int = Query(default=30, ge=1, le=365)):
         ]
 
     with connect(TECH_DB) as db:
-        technology_count = db.execute(
-            "SELECT COUNT(*) FROM documents WHERE created_at>=?",
-            (cutoff,),
-        ).fetchone()[0]
-        technology = [
+        recent_document_rows = [
             dict(row) for row in db.execute(
-                """SELECT id,actor_name,document_type,title,source_url,published_at,doi,patent_number,created_at
+                """SELECT id,actor_name,document_type,title,source_url,published_at,doi,patent_number,created_at,
+                          date_confidence,is_backfill
                    FROM documents
                    WHERE created_at>=?
-                   ORDER BY created_at DESC
-                   LIMIT 40""",
+                   ORDER BY created_at DESC""",
                 (cutoff,),
             )
         ]
+        technology, technology_backfill, technology_undated, technology_counts = _split_monthly_signals(recent_document_rows)
 
     return {
         "days": days,
         "cutoff": cutoff,
         "counts": {
             "changed_sources": int(changed_sources_count or 0),
-            "new_market": int(recent_counts["new_market"] or 0),
-            "new_offers": int(new_offers_count or 0),
-            "resurfaced_market": int(recent_counts["resurfaced_market"] or 0),
-            "technology": int(technology_count or 0),
+            # "new_*" ne compte plus que les signaux 'fresh' (date de publication confirmée ET
+            # récente) -- voir _monthly_signal_kind. "*_backfill"/"*_undated" existent pour ne
+            # pas faire disparaître les lignes exclues de "new_*", pas pour les y remettre : un
+            # tableau de bord qui ignore ce correctif et ne lit que "new_*" obtient déjà le
+            # comportement corrigé sans rien changer côté UI.
+            "new_market": new_market_counts["fresh"],
+            "new_market_backfill": new_market_counts["backfill"],
+            "new_market_undated": new_market_counts["undated"],
+            "new_offers": new_offers_counts["fresh"],
+            "new_offers_backfill": new_offers_counts["backfill"],
+            "new_offers_undated": new_offers_counts["undated"],
+            "resurfaced_market": int(resurfaced_market_count or 0),
+            "technology": technology_counts["fresh"],
+            "technology_backfill": technology_counts["backfill"],
+            "technology_undated": technology_counts["undated"],
         },
         "changed_sources": changed_sources,
         "new_market": new_market,
+        "new_market_backfill": new_market_backfill,
+        "new_market_undated": new_market_undated,
         "new_offers": new_offers,
+        "new_offers_backfill": new_offers_backfill,
+        "new_offers_undated": new_offers_undated,
         "resurfaced_market": resurfaced,
         "technology": technology,
+        "technology_backfill": technology_backfill,
+        "technology_undated": technology_undated,
     }
 
 
@@ -481,7 +536,10 @@ def list_actors():
                                f.founded_year,f.legal_form_code,f.headcount_bracket_code,f.registry_name,f.source_url AS registry_source_url,
                                c.min_feature_size_um,c.tolerance_um,c.max_part_size_mm,c.throughput_units_per_h,
                                c.wavelengths_nm,c.pulse_duration_fs,c.materials_qualified,c.batch_size_range,
-                               c.source_url AS capability_source_url
+                               c.source_url AS capability_source_url,
+                               c.min_feature_size_um_source_url,c.tolerance_um_source_url,c.max_part_size_mm_source_url,
+                               c.throughput_units_per_h_source_url,c.wavelengths_nm_source_url,c.pulse_duration_fs_source_url,
+                               c.materials_qualified_source_url,c.batch_size_range_source_url
                                FROM actors a LEFT JOIN site_profiles p ON p.actor_id=a.id
                                LEFT JOIN actor_profile f ON f.actor_id=a.id
                                LEFT JOIN capability_spec c ON c.actor_id=a.id

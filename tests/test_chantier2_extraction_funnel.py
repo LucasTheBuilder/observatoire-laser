@@ -29,6 +29,7 @@ from scrapers import (
     COMPONENTS,
     MARKET_PAGES_PER_ACTOR,
     _candidate,
+    _is_noise_block,
     _match_label,
     _partial_candidate_dims,
     _relation_evidence,
@@ -317,6 +318,46 @@ class EvidenceReviewQueueTests(unittest.TestCase):
                 self.assertEqual(1, len(pending_after))
                 accepted = appmod.market_review(status="accepted")
                 self.assertEqual(1, len(accepted))
+
+
+class NoiseBlockTests(unittest.TestCase):
+    # Audit v8 §2.3/§2.6 (priority 6): _is_noise_block let bibliography citations and menu
+    # debris through once the mandatory triplet was relaxed -- these reproduce the audit's own
+    # examples (a DOI reference list at Fraunhofer ILT, "Navigation ..." at Kirana, "Read
+    # more..." at Workshop of Photonics).
+
+    def test_doi_reference_list_entry_is_noise(self):
+        block = ContentBlock(
+            heading="Publications",
+            text="https://doi.org/10.2961/jlmn.2015.02.0022 Fornaroli, C., Holtkamp, J., Gillner, A. et al.",
+            path="main > section.publications",
+        )
+        self.assertTrue(_is_noise_block(block))
+
+    def test_bare_navigation_breadcrumb_is_noise(self):
+        block = ContentBlock(heading="", text="Navigation R&D Femtosecond Micromachining", path="nav.menu")
+        self.assertTrue(_is_noise_block(block))
+
+    def test_bare_read_more_link_is_noise(self):
+        block = ContentBlock(heading="", text="Read more", path="a.read-more")
+        self.assertTrue(_is_noise_block(block))
+
+    def test_read_more_inside_a_real_sentence_is_not_noise(self):
+        # The menu-fragment terms are only trusted combined with "short + no sentence
+        # punctuation" -- the same phrase inside actual prose must not be flagged.
+        block = ContentBlock(
+            heading="Applications",
+            text=(
+                "Our femtosecond laser micromachining process delivers sub-micron precision for "
+                "medical stents in volume production; read more about our qualified processes below."
+            ),
+            path="main > article",
+        )
+        self.assertFalse(_is_noise_block(block))
+
+    def test_legitimate_short_claim_without_punctuation_is_not_noise(self):
+        block = ContentBlock(heading="", text="Femtosecond laser micromachining for medical implants", path="main > h2")
+        self.assertFalse(_is_noise_block(block))
 
 
 if __name__ == "__main__":

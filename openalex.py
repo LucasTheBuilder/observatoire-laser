@@ -19,6 +19,12 @@ Photonics ne matchent simplement aucune institution OpenAlex -- ignorés, jamais
 À la différence de CORDIS (une seule entité Fraunhofer-Gesellschaft pour tous les instituts),
 OpenAlex indexe Fraunhofer ILT comme institution à part entière (homepage propre), donc ce
 module PEUT lui attribuer des publications en toute sécurité.
+
+La vérification par domaine protège l'identité de l'institution, pas la pertinence du contenu :
+pour un institut généraliste, les OPENALEX_WORKS_PER_ACTOR publications les plus récentes
+peuvent n'avoir aucun rapport avec le laser. _work_is_on_topic() filtre donc chaque titre avec
+les mêmes lexiques que le reste du pipeline (scrapers.LASER_RULES/PROCESS_TECHNOLOGIES), comme
+scrapers.scrape_technology() le fait déjà pour Crossref -- voir audit v8 §2.1.
 """
 
 from __future__ import annotations
@@ -29,8 +35,8 @@ from urllib.parse import urlparse
 
 import httpx
 
-from db import ACTORS_DB, TECH_DB, connect, utc_now
-from scrapers import CRAWLER_CONTACT, HEADERS
+from db import ACTORS_DB, TECH_DB, compute_is_backfill, connect, utc_now
+from scrapers import CRAWLER_CONTACT, HEADERS, is_on_topic
 
 OPENALEX_API = "https://api.openalex.org"
 OPENALEX_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
@@ -90,6 +96,18 @@ def _fetch_recent_works(client: httpx.Client, institution_id: str, from_date: st
         return []
 
 
+def _work_is_on_topic(title: str) -> bool:
+    """Une publication n'est retenue que si son titre relève du laser ultra-rapide, via
+    scrapers.is_on_topic() -- même filtre que cordis.py, voir son docstring pour le détail des
+    lexiques utilisés. Même principe que scrapers.scrape_technology() pour Crossref. Sans ce
+    filtre, _fetch_recent_works ne fait que trier par date de publication : pour un institut
+    généraliste, les publications les plus récentes sur n'importe quel sujet (poultry farming,
+    fusion inertielle, Six Sigma...) écrasent mécaniquement la production laser -- voir audit v8
+    §2.1 (123/203 publications hors sujet avant ce filtre).
+    """
+    return is_on_topic(title)
+
+
 def _parse_work(work: dict) -> dict | None:
     title = str(work.get("title") or "").strip()
     if not title:
@@ -111,12 +129,22 @@ def _upsert_document(db, actor_name: str, item: dict) -> tuple[int, int]:
     enfin son actor_name plutôt que de rester orpheline."""
     fingerprint = hashlib.sha256((item["doi"] or item["url"]).casefold().encode()).hexdigest()
     stamp = utc_now()
+    # Revue chronologie du 30/08/2026 : published_at vient toujours d'un champ structuré de
+    # l'API OpenAlex (voir _parse_work ci-dessus), jamais d'un repli fabriqué -- donc, à la
+    # différence de evidence/offers (scrapers.py), 'published'/'observed_only' peut être décidé
+    # sans ambiguïté dès cette écriture. is_backfill compare cette date à `stamp`, qui EST le
+    # created_at de la ligne (première insertion, jamais réécrite ensuite).
+    date_confidence = "published" if item.get("published_at") else "observed_only"
+    is_backfill = compute_is_backfill(stamp, item.get("published_at"), date_confidence)
     before = db.total_changes
     db.execute(
         """INSERT OR IGNORE INTO documents(
-               actor_name,document_type,title,source_url,published_at,doi,fingerprint,created_at,last_seen_at
-           ) VALUES(?,'publication',?,?,?,?,?,?,?)""",
-        (actor_name, item["title"], item["url"], item["published_at"], item["doi"], fingerprint, stamp, stamp),
+               actor_name,document_type,title,source_url,published_at,doi,date_confidence,is_backfill,fingerprint,created_at,last_seen_at
+           ) VALUES(?,'publication',?,?,?,?,?,?,?,?,?)""",
+        (
+            actor_name, item["title"], item["url"], item["published_at"], item["doi"],
+            date_confidence, is_backfill, fingerprint, stamp, stamp,
+        ),
     )
     inserted = int(db.total_changes > before)
     attributed = 0
@@ -139,7 +167,7 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
     with connect(TECH_DB) as db:
         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
 
-    matched_actors = added = attributed = errors = 0
+    matched_actors = added = attributed = off_topic = errors = 0
     with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=OPENALEX_TIMEOUT) as client:
         for actor in actors:
             try:
@@ -154,6 +182,9 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                         item = _parse_work(work)
                         if not item:
                             continue
+                        if not _work_is_on_topic(item["title"]):
+                            off_topic += 1
+                            continue
                         inserted, was_attributed = _upsert_document(db, actor["name"], item)
                         added += inserted
                         attributed += was_attributed
@@ -166,7 +197,7 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
             (
                 utc_now(), "completed", matched_actors, added, errors,
                 f"OpenAlex : {matched_actors} institutions vérifiées par domaine, {added} nouvelles publications, "
-                f"{attributed} déjà connues ré-attribuées à un acteur",
+                f"{attributed} déjà connues ré-attribuées à un acteur, {off_topic} hors sujet filtrées",
                 run_id,
             ),
         )
@@ -174,5 +205,6 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
         "actors_matched": matched_actors,
         "documents_added": added,
         "documents_attributed": attributed,
+        "documents_off_topic": off_topic,
         "errors": errors,
     }

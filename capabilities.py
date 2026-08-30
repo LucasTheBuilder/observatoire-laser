@@ -105,10 +105,26 @@ _PART_SIZE_CONTEXT = (
     "format maximal", "dimensions maxi", "taille maximale", "zone de travail", "work volume",
 )
 
+# Un nombre suivi de "nm" est ambigu sur une page équipement générique (14 valeurs 200-2100nm
+# extraites d'une seule page /profile/equipment.html décrivant tout un institut, sans lien
+# garanti avec une source laser précise -- audit v8 §2.4). Comme _FEATURE_SIZE_CONTEXT/
+# _PART_SIZE_CONTEXT plus bas, une valeur "nm" n'est retenue que si un mot de ce contexte
+# apparaît dans le MÊME bloc éditorial. "laser" seul suffit : ces pages appartiennent déjà à
+# des acteurs laser suivis, la garde sert seulement à écarter les nm sans rapport avec un
+# faisceau (résolution d'un axe, épaisseur d'un revêtement...).
+_WAVELENGTH_CONTEXT = ("laser", "wavelength", "longueur d'onde", "longueur d onde", "wavelengths")
+
 _WAVELENGTH_MIN_NM = 200
 _WAVELENGTH_MAX_NM = 2200
 _PULSE_MIN_FS = 5
 _PULSE_MAX_FS = 100_000
+# Bornes de plausibilité pour le micro-usinage laser (audit v8 §2.4) : une "taille de pièce
+# max." de plusieurs mètres n'a plus rien de "micro" -- exemple concret trouvé en production,
+# Femtika max_part_size_mm=2680 (2,68 m), retenu par l'ancienne borne (5000mm) sans être
+# vérifiable ni plausible pour ce segment. 1500mm reste généreux (verre/panneaux grand format)
+# tout en excluant ce type de valeur aberrante.
+_FEATURE_SIZE_MAX_UM = 5000
+_PART_SIZE_MAX_MM = 1500
 
 # §3.2 : "Certification et capacité industrielle sont les deux critères d'achat de ce segment
 # ... 9 certifications en base." Chaque code est un motif dédié (pas une regex générique type
@@ -157,32 +173,42 @@ def _block_text(block: Any) -> str:
     return " ".join(filter(None, (block.h1, block.h2, block.h3, block.heading, block.text)))
 
 
-def _extract_capabilities(block_texts: list[str]) -> dict[str, Any]:
+def _extract_capabilities(page_texts: list[tuple[str, str]]) -> dict[str, Any]:
+    """``page_texts`` : liste de (source_url, texte du bloc), une entrée par bloc de chaque
+    page scannée pour l'acteur. Le dict renvoyé associe, à CHAQUE champ retenu, la source_url de
+    la page où sa valeur gagnante a réellement été trouvée -- pas une source_url générique
+    partagée par toute l'enveloppe (audit v8 §2.4/priorité 4 : le min_feature_size_um et le
+    max_part_size_mm gagnants peuvent très bien venir de deux pages différentes)."""
     wavelengths: set[int] = set()
+    wavelength_source: str | None = None
     materials: set[str] = set()
-    pulse_values: list[float] = []
-    tolerance_values: list[float] = []
-    feature_values: list[float] = []
-    part_size_values: list[float] = []
-    throughput_values: list[float] = []
+    material_source: str | None = None
+    pulse_candidates: list[tuple[float, str]] = []
+    tolerance_candidates: list[tuple[float, str]] = []
+    feature_candidates: list[tuple[float, str]] = []
+    part_size_candidates: list[tuple[float, str]] = []
+    throughput_candidates: list[tuple[float, str]] = []
     batch_quote: str | None = None
+    batch_source: str | None = None
 
-    for text in block_texts:
+    for source_url, text in page_texts:
         if not text.strip():
             continue
-        for match in _WAVELENGTH_RE.finditer(text):
-            nm_value = int(match.group(1))
-            if _WAVELENGTH_MIN_NM <= nm_value <= _WAVELENGTH_MAX_NM:
-                wavelengths.add(nm_value)
+        if _contains_any(text, _WAVELENGTH_CONTEXT):
+            for match in _WAVELENGTH_RE.finditer(text):
+                nm_value = int(match.group(1))
+                if _WAVELENGTH_MIN_NM <= nm_value <= _WAVELENGTH_MAX_NM:
+                    wavelengths.add(nm_value)
+                    wavelength_source = wavelength_source or source_url
         for match in _PULSE_FS_RE.finditer(text):
             value = _parse_number(match.group(1))
             if value is not None and _PULSE_MIN_FS <= value <= _PULSE_MAX_FS:
-                pulse_values.append(value)
+                pulse_candidates.append((value, source_url))
         tolerance_spans = [match.span() for match in _TOLERANCE_RE.finditer(text)]
         for match in _TOLERANCE_RE.finditer(text):
             value = _parse_number(match.group(1))
             if value is not None and 0 < value <= 1000:
-                tolerance_values.append(value)
+                tolerance_candidates.append((value, source_url))
         if _contains_any(text, _FEATURE_SIZE_CONTEXT):
             for match in _UM_VALUE_RE.finditer(text):
                 # A "±2 µm" tolerance is not a feature size, even when both share one block
@@ -191,61 +217,75 @@ def _extract_capabilities(block_texts: list[str]) -> dict[str, Any]:
                 if any(match.start() < end and match.end() > start for start, end in tolerance_spans):
                     continue
                 value = _parse_number(match.group(1))
-                if value is not None and 0 < value <= 5000:
-                    feature_values.append(value)
+                if value is not None and 0 < value <= _FEATURE_SIZE_MAX_UM:
+                    feature_candidates.append((value, source_url))
         if _contains_any(text, _PART_SIZE_CONTEXT):
             for match in _MM_VALUE_RE.finditer(text):
                 value = _parse_number(match.group(1))
-                if value is not None and 0 < value <= 5000:
-                    part_size_values.append(value)
+                if value is not None and 0 < value <= _PART_SIZE_MAX_MM:
+                    part_size_candidates.append((value, source_url))
         for match in _THROUGHPUT_RE.finditer(text):
             value = _parse_number(match.group(1))
             if value is not None and value > 0:
-                throughput_values.append(value)
+                throughput_candidates.append((value, source_url))
         if batch_quote is None:
             batch_match = _BATCH_RANGE_RE.search(text)
             if batch_match:
                 batch_quote = batch_match.group(0).strip()
+                batch_source = source_url
         for label, _hits in _match_all_labels(text, MATERIALS):
             materials.add(label)
+            material_source = material_source or source_url
+
+    best_pulse = min(pulse_candidates, key=lambda item: item[0]) if pulse_candidates else (None, None)
+    best_tolerance = min(tolerance_candidates, key=lambda item: item[0]) if tolerance_candidates else (None, None)
+    best_feature = min(feature_candidates, key=lambda item: item[0]) if feature_candidates else (None, None)
+    best_part_size = max(part_size_candidates, key=lambda item: item[0]) if part_size_candidates else (None, None)
+    best_throughput = max(throughput_candidates, key=lambda item: item[0]) if throughput_candidates else (None, None)
 
     return {
-        "min_feature_size_um": min(feature_values) if feature_values else None,
-        "tolerance_um": min(tolerance_values) if tolerance_values else None,
-        "max_part_size_mm": max(part_size_values) if part_size_values else None,
-        "throughput_units_per_h": max(throughput_values) if throughput_values else None,
-        "wavelengths_nm": sorted(wavelengths),
-        "pulse_duration_fs": min(pulse_values) if pulse_values else None,
-        "materials_qualified": sorted(materials),
-        "batch_size_range": batch_quote,
+        "min_feature_size_um": best_feature[0], "min_feature_size_um_source_url": best_feature[1],
+        "tolerance_um": best_tolerance[0], "tolerance_um_source_url": best_tolerance[1],
+        "max_part_size_mm": best_part_size[0], "max_part_size_mm_source_url": best_part_size[1],
+        "throughput_units_per_h": best_throughput[0], "throughput_units_per_h_source_url": best_throughput[1],
+        "wavelengths_nm": sorted(wavelengths), "wavelengths_nm_source_url": wavelength_source,
+        "pulse_duration_fs": best_pulse[0], "pulse_duration_fs_source_url": best_pulse[1],
+        "materials_qualified": sorted(materials), "materials_qualified_source_url": material_source,
+        "batch_size_range": batch_quote, "batch_size_range_source_url": batch_source,
     }
 
 
-def _extract_certifications(block_texts: list[str]) -> list[str]:
-    found: set[str] = set()
-    for text in block_texts:
+def _extract_certifications(page_texts: list[tuple[str, str]]) -> dict[str, str]:
+    """Renvoie {code_certification: source_url de la page qui le prouve} -- chaque code garde
+    la page où il a réellement été trouvé (voir _upsert_actor_fact) plutôt que la première page
+    scannée pour l'acteur, même correctif de sourcing que _extract_capabilities ci-dessus."""
+    found: dict[str, str] = {}
+    for source_url, text in page_texts:
         for label, pattern in _CERTIFICATION_PATTERNS:
-            if pattern.search(text):
-                found.add(label)
-    return sorted(found)
+            if label not in found and pattern.search(text):
+                found[label] = source_url
+    return found
 
 
-def _extract_cleanroom_class(block_texts: list[str]) -> str | None:
+def _extract_cleanroom_class(page_texts: list[tuple[str, str]]) -> tuple[str | None, str | None]:
     """Norme ISO 14644 préférée si trouvée (c'est la norme en vigueur) ; sinon Federal Standard
     209E. Les deux échelles ne sont pas convertibles l'une en l'autre -- pas de mélange, on
-    retient la meilleure classe (le plus petit chiffre) au sein de l'échelle trouvée."""
-    iso_values: list[int] = []
-    fed_values: list[int] = []
-    for text in block_texts:
+    retient la meilleure classe (le plus petit chiffre) au sein de l'échelle trouvée, avec la
+    source_url de la page qui la porte."""
+    iso_values: list[tuple[int, str]] = []
+    fed_values: list[tuple[int, str]] = []
+    for source_url, text in page_texts:
         if not _contains_any(text, _CLEANROOM_CONTEXT):
             continue
-        iso_values.extend(int(match.group(1)) for match in _CLEANROOM_ISO_CLASS_RE.finditer(text))
-        fed_values.extend(int(match.group(1)) for match in _CLEANROOM_FED_CLASS_RE.finditer(text))
+        iso_values.extend((int(match.group(1)), source_url) for match in _CLEANROOM_ISO_CLASS_RE.finditer(text))
+        fed_values.extend((int(match.group(1)), source_url) for match in _CLEANROOM_FED_CLASS_RE.finditer(text))
     if iso_values:
-        return f"ISO {min(iso_values)}"
+        value, source_url = min(iso_values, key=lambda item: item[0])
+        return f"ISO {value}", source_url
     if fed_values:
-        return f"Class {min(fed_values)}"
-    return None
+        value, source_url = min(fed_values, key=lambda item: item[0])
+        return f"Class {value}", source_url
+    return None, None
 
 
 def _upsert_actor_fact(db, actor_id: int, dimension: str, value: str, source_url: str) -> int:
@@ -273,21 +313,33 @@ def _upsert_actor_fact(db, actor_id: int, dimension: str, value: str, source_url
 
 def _upsert_capability_spec(db, actor_id: int, fields: dict[str, Any], source_url: str) -> int:
     """Une ligne par acteur, comme firmographics._upsert_actor_profile -- un rafraîchissement
-    remplace l'enveloppe précédente plutôt que de l'ignorer."""
+    remplace l'enveloppe précédente plutôt que de l'ignorer. ``source_url`` reste la première
+    page analysée pour cet acteur (compatibilité/complétude, voir app.py) ; chaque champ a en
+    plus sa PROPRE colonne ``*_source_url`` (voir _extract_capabilities), désormais la source de
+    vérité pour savoir d'où vient une valeur donnée."""
     stamp = utc_now()
     wavelengths_json = json.dumps(fields["wavelengths_nm"], ensure_ascii=False) if fields["wavelengths_nm"] else None
     materials_json = json.dumps(fields["materials_qualified"], ensure_ascii=False) if fields["materials_qualified"] else None
     values = (
         fields["min_feature_size_um"], fields["tolerance_um"], fields["max_part_size_mm"],
         fields["throughput_units_per_h"], wavelengths_json, fields["pulse_duration_fs"],
-        materials_json, fields["batch_size_range"], source_url, stamp[:10], stamp,
+        materials_json, fields["batch_size_range"], source_url, stamp[:10],
+        fields["min_feature_size_um_source_url"], fields["tolerance_um_source_url"],
+        fields["max_part_size_mm_source_url"], fields["throughput_units_per_h_source_url"],
+        fields["wavelengths_nm_source_url"], fields["pulse_duration_fs_source_url"],
+        fields["materials_qualified_source_url"], fields["batch_size_range_source_url"],
+        stamp,
     )
     existing = db.execute("SELECT actor_id FROM capability_spec WHERE actor_id=?", (actor_id,)).fetchone()
     if existing:
         db.execute(
             """UPDATE capability_spec SET min_feature_size_um=?,tolerance_um=?,max_part_size_mm=?,
                       throughput_units_per_h=?,wavelengths_nm=?,pulse_duration_fs=?,materials_qualified=?,
-                      batch_size_range=?,source_url=?,as_of_date=?,updated_at=?
+                      batch_size_range=?,source_url=?,as_of_date=?,
+                      min_feature_size_um_source_url=?,tolerance_um_source_url=?,max_part_size_mm_source_url=?,
+                      throughput_units_per_h_source_url=?,wavelengths_nm_source_url=?,pulse_duration_fs_source_url=?,
+                      materials_qualified_source_url=?,batch_size_range_source_url=?,
+                      updated_at=?
                WHERE actor_id=?""",
             values + (actor_id,),
         )
@@ -296,8 +348,11 @@ def _upsert_capability_spec(db, actor_id: int, fields: dict[str, Any], source_ur
         """INSERT INTO capability_spec(
                actor_id,min_feature_size_um,tolerance_um,max_part_size_mm,throughput_units_per_h,
                wavelengths_nm,pulse_duration_fs,materials_qualified,batch_size_range,source_url,as_of_date,
+               min_feature_size_um_source_url,tolerance_um_source_url,max_part_size_mm_source_url,
+               throughput_units_per_h_source_url,wavelengths_nm_source_url,pulse_duration_fs_source_url,
+               materials_qualified_source_url,batch_size_range_source_url,
                created_at,updated_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (actor_id,) + values + (stamp,),
     )
     return 1
@@ -332,7 +387,7 @@ def collect_capability_specs() -> dict:
         for actor_id, sources in by_actor.items():
             meta = actor_meta[actor_id]
             actors_scanned += 1
-            block_texts: list[str] = []
+            page_texts: list[tuple[str, str]] = []
             primary_source_url: str | None = None
             for source in sources[:MAX_PAGES_PER_ACTOR]:
                 try:
@@ -353,27 +408,29 @@ def collect_capability_specs() -> dict:
                     pages_analyzed += 1
                     if primary_source_url is None:
                         primary_source_url = source["url"]
-                    block_texts.extend(_block_text(block) for block in blocks)
+                    page_texts.extend((source["url"], _block_text(block)) for block in blocks)
                 except Exception:
                     errors += 1
                     continue
-            if not block_texts or primary_source_url is None:
+            if not page_texts or primary_source_url is None:
                 continue
-            fields = _extract_capabilities(block_texts)
-            certifications = _extract_certifications(block_texts)
-            cleanroom_class = _extract_cleanroom_class(block_texts)
-            if not any(fields.values()) and not certifications and not cleanroom_class:
+            fields = _extract_capabilities(page_texts)
+            certifications = _extract_certifications(page_texts)
+            cleanroom_class, cleanroom_source = _extract_cleanroom_class(page_texts)
+            has_capability_field = any(fields[key] for key in fields if not key.endswith("_source_url"))
+            if not has_capability_field and not certifications and not cleanroom_class:
                 continue
             with connect(ACTORS_DB) as db:
-                if any(fields.values()):
+                if has_capability_field:
                     created = _upsert_capability_spec(db, actor_id, fields, primary_source_url)
                     profiles_added += created
                     profiles_updated += int(not created)
-                for label in certifications:
-                    certifications_added += _upsert_actor_fact(db, actor_id, "certification", label, primary_source_url)
+                for label, source_url in certifications.items():
+                    certifications_added += _upsert_actor_fact(db, actor_id, "certification", label, source_url)
                 if cleanroom_class:
                     cleanroom_facts_added += _upsert_actor_fact(
-                        db, actor_id, "differentiator", f"Salle blanche {cleanroom_class}", primary_source_url,
+                        db, actor_id, "differentiator", f"Salle blanche {cleanroom_class}",
+                        cleanroom_source or primary_source_url,
                     )
 
     return {
