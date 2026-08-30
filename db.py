@@ -77,6 +77,19 @@ ACTORS = [
     ("Laser Zentrum Hannover", "Allemagne", "Institut technologique - micromachining USP", 0, "https://www.lzh.de/en"),
     ("FEMTOprint", "Suisse", "CDMO de microfabrication 3D du verre par femtoseconde/SLE", 0, "https://www.femtoprint.ch"),
     ("LightPulse Laser Precision", "Allemagne", "Développement / échantillonnage & micro-usinage USP", 0, "https://www.light-pulse.de/en-gb/"),
+    # Audit P1 "acteurs manquants" (30/08/2026) : HAILTEC, MICROMACH GmbH et laserKRAFTwerk
+    # avaient déjà été ajoutés directement en base via create_actor()/l'API (donc absents de
+    # cette liste statique bien qu'actifs et crawlés) -- reportés ici pour qu'une installation
+    # neuve les inclue aussi, avec exactement les valeurs déjà en base (ne rien réécrire).
+    ("HAILTEC", "Allemagne", "Sous-traitance laser femtoseconde", 0, "https://www.hailtec.de/"),
+    ("MICROMACH GmbH", "Allemagne", "Contract manufacturing laser femtoseconde/picoseconde", 0, "https://micromach.de/"),
+    # laserKRAFTwerk : crawl actif mais site en 403 face à notre User-Agent auto-déclaré
+    # (voir USER_AGENT ci-dessus) -- couverture actuellement limitée à la page d'accueil.
+    ("laserKRAFTwerk", "Allemagne", "Marquage/gravure laser pico/femtoseconde", 0, "https://www.laserkraftwerk.de/"),
+    # ACunity : spin-off Fraunhofer ILT (Aix-la-Chapelle). Activité principale = EHLA (dépôt
+    # laser haute vitesse, hors périmètre USP) ; seule la ligne "Micro/Nano Processing" (perçage
+    # hélicoïdal, impulsions <15 ps -- voir SEED_SOURCES) relève du laser ultra-rapide suivi ici.
+    ("ACunity", "Allemagne", "Perçage/micro-usinage laser USP (Helical Drilling Optics, <15 ps)", 0, "https://acunity.de/en/"),
 ]
 
 # Quelques URLs de pages connues, injectées d'office dans actor_sources au démarrage (avant
@@ -88,6 +101,9 @@ SEED_SOURCES = [
     ("LightFab", "https://lightfab.de/", "application"),
     ("FEMTO Engineering", "https://www.femto-engineering.fr/en/", "service"),
     ("MANUTECH USD", "https://www.manutech-usd.fr/en/", "official"),
+    # ACunity's homepage is dominated by EHLA (off-topic, see ACTORS above) -- seed the actual
+    # USP-relevant product page directly so the crawler doesn't have to find it on its own.
+    ("ACunity", "https://acunity.de/micro-nano-processing/?lang=en_us", "application"),
 ]
 
 # Seed values are now kept as canonical dimensions. Generation/application detail belongs in stage/quote,
