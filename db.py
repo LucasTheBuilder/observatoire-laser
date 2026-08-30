@@ -127,9 +127,72 @@ LEGACY_SEED_GROUPS = (
     "glacier-optical-glass",
 )
 
-# v3.3.1 no longer injects synthetic/curated market facts at startup.
-# Market facts must come from the strict extraction pipeline; legacy seeds are kept only as review material.
-SEED_EVIDENCE: list[dict[str, Any]] = []
+# Audit veille du 30/08/2026 (§10.2) : régénéré depuis les 40 lignes réellement en base
+# (extraction_mode IS NULL, fact_status="validated" avant correctif) -- ce ne sont PAS des
+# faits extraits par le pipeline, mais des notes de lecture saisies à la main entre le 25 et le
+# 27/08/2026 (source_group in batch2-2026/deep5-2026/femtoprint-fiche-2026/optek-deep-2026/
+# optionc-batch, plus 3 lignes unitaires), reformulées en français à partir de pages en anglais.
+# Un exemple concret (voir l'audit) : "Sous-rubriques sur les guides d'onde en verre, ferrules
+# de fibres, réseaux de trous..." pour femtoprint.ch/applications/photonics.asp -- une note de
+# lecture, pas une citation extraite (aucune garantie que le texte apparaisse mot pour mot
+# dans la page source, contrairement à une extraction réelle du pipeline).
+#
+# Régénérée pour la reproductibilité (SEED_EVIDENCE était vidée en v3.3.1 -- "legacy seeds are
+# kept only as review material", un commentaire qui ne correspondait déjà plus à la réalité : la
+# liste était vide, pas "gardée" -- une réinstallation ou un reset de market.db perdait ces 40
+# faits en silence, sans que rien ne l'indique). MAIS : contrairement à l'ancien mécanisme,
+# cette liste n'est plus appliquée automatiquement à chaque démarrage (voir init_databases, qui
+# ne l'appelle plus) -- un même mécanisme sans garde empoisonnait aussi toute base FRAÎCHE (un
+# nouveau déploiement, ou n'importe quel test de la suite qui appelle init_databases() se
+# retrouvait avec 40 faits sur des acteurs précis qu'il n'a jamais collectés). Utiliser
+# restore_seed_evidence() explicitement, à la main, seulement en cas de perte réelle de
+# market.db pour CETTE installation. review_status='review' (plus 'accepted' comme avant ce
+# correctif, voir _upsert_seed_evidence) : reproduire ces items les fait repasser par une vraie
+# validation humaine plutôt que d'entrer validés d'office. is_verbatim=0 est appliqué
+# automatiquement (voir la migration "is_verbatim=0 WHERE extraction_mode IS NULL" plus bas),
+# jamais fixé ici.
+SEED_EVIDENCE: list[dict[str, Any]] = [
+    {"actor": 'FEMTOprint', "bucket": 'existing', "market": 'Quantum', "component": 'Pièges à ions', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://www.femtoprint.ch/applications/quantum.asp', "title": 'FEMTOprint — page officielle', "date": None, "quote": 'La page dédiée présente la microfabrication quantique et cite les pièges à ions, les capteurs quantiques, ainsi que des applications pour le calcul et la cryptographie.'},
+    {"actor": 'FEMTOprint', "bucket": 'existing', "market": 'Spatial', "component": 'Composants en verre', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://www.femtoprint.ch/applications/space.asp', "title": 'FEMTOprint — page officielle', "date": None, "quote": "Composants de mécanique de précision, d'optique et de photonique pour satellites, télescopes et missions d'espace profond."},
+    {"actor": 'FEMTOprint', "bucket": 'existing', "market": 'Optique', "component": 'Interposeurs en verre', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://www.femtoprint.ch/applications/optics.asp', "title": 'FEMTOprint — page officielle', "date": None, "quote": "Sous-rubriques sur l'optique miniaturisée, la micro-optique, le DFM, la métallisation/revêtement optique et les interposeurs en verre."},
+    {"actor": 'FEMTOprint', "bucket": 'existing', "market": 'Photonique', "component": "Guides d'onde", "operation": "Écriture de guide d'onde", "stage": 'Production', "url": 'https://www.femtoprint.ch/applications/photonics.asp', "title": 'FEMTOprint — page officielle', "date": None, "quote": "Sous-rubriques sur les guides d'onde en verre, ferrules de fibres, réseaux de trous, éléments micro-optiques et microcomposants en verre."},
+    {"actor": 'FEMTOprint', "bucket": 'existing', "market": 'Médical', "component": 'Dispositifs microfluidiques', "operation": 'Fonctionnalisation de surface', "stage": 'Production', "url": 'https://www.femtoprint.ch/applications/medtech.asp', "title": 'FEMTOprint — page officielle', "date": None, "quote": "Sous-rubriques consacrées à l'encapsulation en verre, la microfabrication du verre, les MEMS biocompatibles, l'étanchéité hermétique et les biocapteurs microfluidiques."},
+    {"actor": 'FEMTOprint', "bucket": 'existing', "market": 'Sciences de la vie', "component": 'Dispositifs microfluidiques', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://www.femtoprint.ch/applications/life-sciences.asp', "title": 'FEMTOprint — page officielle', "date": None, "quote": "Renvoie notamment vers la découverte de médicaments, le diagnostic, les masters en verre, l'isolement d'anticorps, les thérapies cellulaires et l'analyse single-cell."},
+    {"actor": '3D-Micromac', "bucket": 'existing', "market": 'Semi-conducteurs', "component": 'Wafers', "operation": 'Microdécoupe', "stage": 'Production', "url": 'https://3d-micromac.com/laser-micromachining/markets/', "title": '3D-Micromac — page officielle', "date": None, "quote": 'Ohmic contact formation (OCF) on SiC power device backsides; magnetic sensor (GMR/TMR) production; chip trimming and link cutting on silicon, SiC, germanium and GaAs wafers.'},
+    {"actor": '3D-Micromac', "bucket": 'existing', "market": 'Photovoltaïque', "component": 'Wafers', "operation": 'Microdécoupe', "stage": 'Production', "url": 'https://3d-micromac.com/laser-micromachining/markets/', "title": '3D-Micromac — page officielle', "date": None, "quote": 'Ultra-high-speed Thermal Laser Separation for particle-free cutting of full-size silicon solar wafers into half cells or quarter cells.'},
+    {"actor": '3D-Micromac', "bucket": 'existing', "market": 'Photonique', "component": "Guides d'onde", "operation": 'Microdécoupe', "stage": 'Production', "url": 'https://3d-micromac.com/laser-micromachining/markets/', "title": '3D-Micromac — page officielle', "date": None, "quote": 'AR waveguide and eyepiece singulation on borosilicate, aluminum silicate (Gorilla), quartz and specialty glass.'},
+    {"actor": 'MeKo', "bucket": 'existing', "market": 'Médical', "component": 'Stents', "operation": 'Microdécoupe', "stage": 'Production', "url": 'https://www.meko.de/en/medtech', "title": 'MeKo — page officielle', "date": None, "quote": 'NiTi Stents (Nitinol) manufactured with highly precise laser cutting combined with reliable shaping processes for perfect geometry.'},
+    {"actor": 'MeKo', "bucket": 'existing', "market": 'Médical', "component": 'Implants', "operation": 'Microdécoupe', "stage": 'Production', "url": 'https://www.meko.de/en/medtech', "title": 'MeKo — page officielle', "date": None, "quote": 'Heart Valve Frames, Drug Delivery Balloons, Surgical Instruments and Bone Nails, manufactured in 316L/316LVM stainless steel, CoCr alloys (L605, MP35N, Phynox) and magnesium (Resoloy).'},
+    {"actor": 'KMLT', "bucket": 'existing', "market": 'Médical', "component": 'Implants', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://kmlt.de/en/services/usp-laser-processing/', "title": 'KMLT — page officielle', "date": None, "quote": 'USP laser processing on titanium, nitinol and technical ceramics for medical device components.'},
+    {"actor": 'KMLT', "bucket": 'existing', "market": 'Semi-conducteurs', "component": 'Wafers', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://kmlt.de/en/services/usp-laser-processing/', "title": 'KMLT — page officielle', "date": None, "quote": 'Precision processing of flexible printed circuit boards, ceramic substrates and wafers for microelectronics and semiconductor applications.'},
+    {"actor": 'OpTek Systems', "bucket": 'existing', "market": 'Semi-conducteurs', "component": 'Wafers', "operation": 'Dicing', "stage": 'Production', "url": 'https://optek.humaneticsgroup.com/products-services/laser-processing-services/material-processing-services/cutting-dicing', "title": 'OpTek Systems — page officielle', "date": None, "quote": 'Target markets include EV components, sensor manufacturing, semiconductor & PV manufacturing, and biomedical materials.'},
+    {"actor": 'OpTek Systems', "bucket": 'existing', "market": 'Photovoltaïque', "component": 'Wafers', "operation": 'Dicing', "stage": 'Production', "url": 'https://optek.humaneticsgroup.com/products-services/laser-processing-services/material-processing-services/cutting-dicing', "title": 'OpTek Systems — page officielle', "date": None, "quote": 'Target markets include EV components, sensor manufacturing, semiconductor & PV manufacturing, and biomedical materials.'},
+    {"actor": 'OpTek Systems', "bucket": 'existing', "market": 'Photonique', "component": 'Fibres optiques', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://optek.humaneticsgroup.com/products-services/laser-processing-services/optical-processing-services/cleaving', "title": 'OpTek Systems — page officielle', "date": None, "quote": 'Adoption across telecoms, datacoms, fiber lasers, biomedical, and sensing applications; processes single fibers, ribbons and arrays across a wide range of fiber types and waveguides.'},
+    {"actor": 'FEMTOprint', "bucket": 'existing', "market": 'Médical', "component": 'Dispositifs microfluidiques', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://www.femtoprint.ch/applications/medtech.asp', "title": 'FEMTOprint — page officielle', "date": None, "quote": 'Microfluidic channels with channel widths in the 30-50 µm range; tolerances XY ±1 µm / Z ±2 µm; minimum feature <5 µm.'},
+    {"actor": 'FEMTOprint', "bucket": 'existing', "market": 'Médical', "component": 'MEMS', "operation": 'Fonctionnalisation de surface', "stage": 'Production', "url": 'https://www.femtoprint.ch/applications/medtech.asp', "title": 'FEMTOprint — page officielle', "date": None, "quote": 'Micro-optics and biocompatible MEMS, hermetic packages, micro-tweezers and grippers for minimally invasive surgery.'},
+    {"actor": 'FEMTOprint', "bucket": 'existing', "market": 'Optique', "component": 'Interposeurs en verre', "operation": 'Ablation', "stage": 'Production', "url": 'https://www.femtoprint.ch/applications/optics.asp', "title": 'FEMTOprint — page officielle', "date": None, "quote": 'Monolithic integration of several optical and non-optical functions into a single monolithic glass part; wafer-scale production of glass microdevices with optical surface finish.'},
+    {"actor": '3D-Micromac', "bucket": 'existing', "market": 'Médical', "component": 'Dispositifs microfluidiques', "operation": 'Fonctionnalisation de surface', "stage": 'Production', "url": 'https://3d-micromac.com/laser-micromachining/applications-laser-micromachining/laser-structuring/', "title": '3D-Micromac — page officielle', "date": None, "quote": 'Surface modification in medical device technology and microfluidics.'},
+    {"actor": '3D-Micromac', "bucket": 'existing', "market": 'Photovoltaïque', "component": 'Wafers', "operation": 'Gravure', "stage": 'Production', "url": 'https://3d-micromac.com/laser-micromachining/applications-laser-micromachining/laser-structuring/', "title": '3D-Micromac — page officielle', "date": None, "quote": 'Scribing and patterning in semiconductor and photovoltaics industry; no laser damage to underlying silicon layers.'},
+    {"actor": 'IREPA LASER', "bucket": 'existing', "market": 'Médical', "component": 'Implants', "operation": 'Fabrication additive', "stage": 'Production', "url": 'https://www.irepa-laser.com/applications/fabrication-additive', "title": 'IREPA LASER — page officielle', "date": None, "quote": 'Marchés automobile, aérospatial et médical (prothèses, implants) ; pièces légères, résistantes et complexes, accès à des géométries impossibles par les méthodes traditionnelles.'},
+    {"actor": 'KMLT', "bucket": 'existing', "market": 'Médical', "component": 'Implants', "operation": 'Microdécoupe', "stage": 'Production', "url": 'https://kmlt.de/en/services/laser-micro-cutting/', "title": 'KMLT — page officielle', "date": None, "quote": 'Serves medical technology with surgical instruments, implants, microscalpels; materials include titanium and shape-memory alloys like nitinol.'},
+    {"actor": 'KMLT', "bucket": 'existing', "market": 'Luxe', "component": 'Composants en verre', "operation": 'Microdécoupe', "stage": 'Production', "url": 'https://kmlt.de/en/services/laser-micro-cutting/', "title": 'KMLT — page officielle', "date": None, "quote": 'Applications/Markets: medical technology, microelectronics, the watchmaking industry, and aerospace; materials include glass, ceramics and various plastics.'},
+    {"actor": 'Fraunhofer IPT', "bucket": 'existing', "market": 'Semi-conducteurs', "component": 'Substrats', "operation": 'Texturation', "stage": 'Production', "url": 'https://www.ipt.fraunhofer.de/en/technologies/laser-technologies/laser-structuring.html', "title": 'Fraunhofer IPT — page officielle', "date": None, "quote": 'Semiconductors: substrate texturing for crystal layer growth.'},
+    {"actor": 'Fraunhofer IWS', "bucket": 'existing', "market": 'Batteries', "component": 'Collecteurs de courant', "operation": 'Texturation', "stage": 'Production', "url": 'https://www.iws.fraunhofer.de/en/technologyfields/cutting-and-joining/laser-precision-processing.html', "title": 'Fraunhofer IWS — page officielle', "date": None, "quote": 'DLIP applied for current conducting foils in battery technology.'},
+    {"actor": 'Micreon', "bucket": 'existing', "market": 'Médical', "component": 'Stents', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://www.micreon.de/service?language=en_EN', "title": 'Micreon — page officielle', "date": None, "quote": 'Damage-free laser micromachining project example: bio-stents.'},
+    {"actor": 'Micreon', "bucket": 'existing', "market": 'Quantum', "component": 'Pièges à ions', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://www.micreon.de/service?language=en_EN', "title": 'Micreon — page officielle', "date": None, "quote": 'Damage-free laser micromachining project example: ion traps.'},
+    {"actor": 'LASEA', "bucket": 'existing', "market": 'Médical', "component": 'Dispositifs microfluidiques', "operation": 'Soudage', "stage": 'Production', "url": 'https://lasea.com/applications/micro-welding-for-microfluidic-devices/', "title": 'LASEA — page officielle', "date": None, "quote": 'Primary use in diagnostics, biotech, and analytical chemistry; microfluidic devices requiring contamination-free, hermetic, high-strength seals.'},
+    {"actor": 'Blueacre Technology', "bucket": 'existing', "market": 'Médical', "component": 'Stents', "operation": 'Microdécoupe', "stage": 'Production', "url": 'https://blueacretechnology.com', "title": 'Blueacre Technology — page officielle', "date": None, "quote": 'Advanced processing for state-of-the-art medical devices including medical tubing, stents, implants, microneedles and catheters.'},
+    {"actor": 'Blueacre Technology', "bucket": 'existing', "market": 'Médical', "component": 'Implants', "operation": 'Microdécoupe', "stage": 'Production', "url": 'https://blueacretechnology.com', "title": 'Blueacre Technology — page officielle', "date": None, "quote": 'Advanced processing for state-of-the-art medical devices including medical tubing, stents, implants, microneedles and catheters.'},
+    {"actor": 'Tekniker', "bucket": 'existing', "market": 'Médical', "component": 'Implants', "operation": 'Micro-usinage', "stage": 'Production', "url": 'https://www.tekniker.es/en/research-areas/advanced-manufacturing-technologies', "title": 'Tekniker — page officielle', "date": None, "quote": 'Medical devices: peripheral nerve implants, surgical equipment.'},
+    {"actor": 'FEMTO Engineering', "bucket": 'existing', "market": 'Médical', "component": 'Stents', "operation": 'Microdécoupe', "stage": 'Production', "url": 'https://www.femto-engineering.fr/realisation/ingenierie-biomedicale/', "title": 'FEMTO Engineering — page officielle', "date": None, "quote": 'Découpe laser de stents.'},
+    {"actor": 'FEMTO Engineering', "bucket": 'existing', "market": 'Médical', "component": 'Dispositifs microfluidiques', "operation": 'Microperçage', "stage": 'Production', "url": 'https://www.femto-engineering.fr/realisation/ingenierie-biomedicale/', "title": 'FEMTO Engineering — page officielle', "date": None, "quote": 'Canaux microfluidiques de 100 µm de diamètre dans matériaux biocompatibles ; lab-on-chips et réacteurs microfluidiques.'},
+    {"actor": 'MANUTECH USD', "bucket": 'existing', "market": 'Médical', "component": 'Implants', "operation": 'Fonctionnalisation de surface', "stage": 'Production', "url": 'https://www.manutech-usd.fr/applications-manutech/', "title": 'MANUTECH USD — page officielle', "date": None, "quote": 'Ti64Al4V titanium alloy for stem cell applications; dental and bone implants; biocompatibility enhancement.'},
+    {"actor": 'Femtika', "bucket": 'existing', "market": 'Médical', "component": 'Implants', "operation": 'Fonctionnalisation de surface', "stage": 'Production', "url": 'https://femtika.com/application/surface-structuring/', "title": 'Femtika — page officielle', "date": None, "quote": 'Femtosecond laser texturing for medical implant osseointegration support; contact angle between hydrophobic surface and a water drop of 150 degrees.'},
+    {"actor": 'Yalosys AG', "bucket": 'existing', "market": 'Médical', "component": 'Capteurs', "operation": 'Ablation', "stage": 'Pré-industrialisation', "url": 'https://yalosys.com/rd-projects/', "title": 'Yalosys AG — page officielle', "date": None, "quote": 'Implantable biosensors for bladder monitoring and fertility hormone tracking; scaleup throughput up to 50k parts/year.'},
+    {"actor": 'CEIT', "bucket": 'radar', "market": 'Batteries', "component": 'Collecteurs de courant', "operation": 'Texturation', "stage": 'Pré-industrialisation', "url": 'https://cicenergigune.com/es/noticias/cicenergigune-ceit-tecnologia-laser-superficies-cobre-baterias-litio', "title": 'CEIT y CIC energiGUNE - tecnologia laser cobre baterias litio', "date": None, "quote": 'optimizar el proceso láser de texturización del cobre a velocidades que nos permiten implementarlo a nivel industrial; colectores de corriente que posibilitan una mejor adhesión entre el electrodo y el colector'},
+    {"actor": 'Yalosys AG', "bucket": 'radar', "market": 'Médical', "component": 'Implants', "operation": 'Soudage', "stage": 'R&D', "url": 'https://www.ntnphotonics.ch/project/ultrasonic-enhanced-fs-laser-welding-of-glass-to-metal/', "title": 'Ultrasonic-enhanced fs-laser welding of glass to metal - NTN Photonics Booster', "date": None, "quote": '"combine the energy application of US-welding and the very local energy delivery of fs-Laser" for "Medical devices assembly including Type III implants"; "Yalosys is doing the fs-Laser welding" and manufacturing the glass side of the samples.'},
+    {"actor": 'Yalosys AG', "bucket": 'radar', "market": 'Semi-conducteurs', "component": 'Wafers', "operation": 'Microdécoupe', "stage": 'R&D', "url": 'https://www.researchgate.net/publication/379698938_Precision_Photonic_Systems_2023_Macro_pleasure_with_Microprocessing_Laser_Solutions_Yalosys_AG', "title": 'Precision Photonic Systems 2023 - Macro pleasure with Microprocessing Laser Solutions Yalosys AG (Calabrese, Mol Schneider)', "date": None, "quote": '[Source-indexed abstract, publication page returns HTTP 403 to automated fetch] IN GLASS Technology: wafer-based and efficient production of microsystems in photonics, microfluidics and MEMS for implants, thanks to USP-laser processing and modified glass wafer handling; core processes of dicing, welding and drilling in glass enabling 2.5D or 3D packaging; challenges include USP-laser processes as well as wafer handling, qualification and metrology.'},
+]
 
 
 def utc_now() -> str:
@@ -604,6 +667,12 @@ def _dedupe_source_rows(db: sqlite3.Connection, table: str, fact_id_col: str) ->
 
 
 def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: str) -> None:
+    """Audit veille §10.2 (30/08/2026) : ces faits ne viennent pas du pipeline d'extraction --
+    saisis à la main, is_verbatim=0 les marque déjà comme tels (via la migration qui suit,
+    is_verbatim=0 WHERE extraction_mode IS NULL, jamais rempli ici). review_status='review'
+    (plutôt que l'ancien 'accepted' hardcodé) pour la même raison : un fait de seed doit
+    repasser par une validation humaine réelle avant de compter comme "validé" nulle part
+    (scores, matrice marché) -- jamais publié d'office simplement parce qu'il a été saisi."""
     key = market_fact_key(item["actor"], item["bucket"], item["market"], item["component"], item["operation"])
     source_fingerprint = hashlib.sha256(f"{item['url']}|{item['quote']}".encode()).hexdigest()
     row = db.execute("SELECT id FROM evidence WHERE fact_key=?", (key,)).fetchone()
@@ -615,7 +684,7 @@ def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: s
             """INSERT INTO evidence(
                    actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,source_date,
                    quote,source_group,fingerprint,fact_key,evidence_kind,language,review_status,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,'accepted',?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,'review',?,?)""",
             (
                 item["actor"], item["bucket"], item["market"], item["component"], item["operation"], item["stage"],
                 item["url"], item["title"], item["date"], item["quote"], key, fact_fingerprint, key,
@@ -630,6 +699,31 @@ def _upsert_seed_evidence(db: sqlite3.Connection, item: dict[str, Any], stamp: s
            ) VALUES(?,?,?,?,?,?,?,?)""",
         (evidence_id, item["url"], item["title"], item["date"], item["quote"], language_from_url(item["url"]), source_fingerprint, stamp),
     )
+
+
+def restore_seed_evidence() -> int:
+    """Recovery explicite, JAMAIS appelé automatiquement (voir init_databases ci-dessous, qui ne
+    l'appelle plus depuis le correctif du 30/08/2026 -- audit veille §10.2).
+
+    SEED_EVIDENCE existe pour que ces 40 faits ne soient pas perdus si market.db est un jour
+    réinitialisée/reconstruite pour CETTE installation précise -- ce n'est PAS un jeu de données
+    de démarrage générique à injecter dans n'importe quelle base fraîche (un nouveau
+    déploiement, ou toute base de test créée par init_databases(), n'a aucune raison de se
+    retrouver avec 40 faits sur des acteurs précis qu'il n'a jamais collectés lui-même).
+    L'ancienne version appelait _upsert_seed_evidence pour chaque item à CHAQUE démarrage --
+    correct pour préserver les données de cette installation, mais un même mécanisme sans garde
+    empoisonnait aussi toute base fraîche (dont chaque test de la suite qui appelle
+    init_databases()). À invoquer à la main (script/console) seulement en cas de perte réelle de
+    market.db. Renvoie le nombre de faits effectivement (ré)insérés."""
+    stamp = utc_now()
+    inserted = 0
+    with connect(MARKET_DB) as db:
+        for item in SEED_EVIDENCE:
+            before = db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0]
+            _upsert_seed_evidence(db, item, stamp)
+            after = db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0]
+            inserted += after - before
+    return inserted
 
 
 def init_databases() -> None:
@@ -1267,9 +1361,6 @@ def init_databases() -> None:
                 ON offers(date_confidence,created_at);
             """
         )
-        stamp = utc_now()
-        for item in SEED_EVIDENCE:
-            _upsert_seed_evidence(db, item, stamp)
 
     with connect(TECH_DB) as db:
         db.executescript(
