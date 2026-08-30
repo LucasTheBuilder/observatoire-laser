@@ -164,7 +164,7 @@ class SitemapDiscoveryTests(unittest.TestCase):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def get(self, url: str, timeout: float | None = None):
+        def get(self, url: str, timeout: float | None = None, headers=None):
             if url not in self.pages:
                 return SitemapDiscoveryTests.FakeResponse(b"", status_code=404)
             return SitemapDiscoveryTests.FakeResponse(self.pages[url])

@@ -155,6 +155,12 @@ class ParsedDocument:
     # déterminable (voir _extract_published_date) -- None si la page n'en expose aucune,
     # auquel cas l'appelant retombe sur la date d'observation (scrapers.scrape_market).
     published_date: str | None = None
+    # Diagnostic JS (plan d'action web-scraping, priorité #4) : True quand l'extraction quasi
+    # vide coexiste avec des marqueurs d'application JS (voir _render_required_signal) --
+    # distingue "ce site n'a presque rien à dire" de "ce site ne dit rien sans exécuter de
+    # JavaScript, que nous n'exécutons jamais". Jamais corrigé automatiquement ici (pas de
+    # Playwright), seulement signalé pour qu'un humain sache où chercher.
+    render_required: bool = False
 
 
 
@@ -793,6 +799,46 @@ def _quality_metrics(root: Tag | BeautifulSoup, blocks: list[ContentBlock], prof
     }
 
 
+# Ids conventionnels du conteneur racine des frameworks SPA les plus courants (React, Next.js,
+# Nuxt/Vue, Angular) -- un conteneur vide avec un de ces ids, sur une page dont on n'a presque
+# rien extrait, est un signal bien plus spécifique qu'une page "juste courte".
+_SPA_ROOT_IDS = ("root", "app", "__next", "__nuxt", "app-root")
+
+
+def _render_required_signal(root: Tag | BeautifulSoup, blocks: list[ContentBlock], external_script_count: int) -> bool:
+    """Diagnostic JS (plan d'action web-scraping, priorité #4) : distingue une page qui n'a
+    RIEN à dire d'une page qui ne dit RIEN sans exécuter de JavaScript -- que ce parseur ne fait
+    jamais (pas de Playwright ici, volontairement, voir le §"ce que je ne reprendrais pas" de la
+    revue web-scraping). Jamais un correctif, seulement un signal exposé sur actor_sources pour
+    qu'un humain sache où regarder plutôt que de conclure à tort "ce site n'a pas de contenu".
+
+    ``external_script_count`` doit être compté sur le `soup` AVANT _remove_noise_zones (qui
+    retire les <script> comme tout le reste du bruit structurel) -- le compter sur `root` ici
+    renverrait toujours 0.
+
+    Deux conditions ensemble (ni l'une ni l'autre seule) pour rester spécifique :
+    1. Presque rien n'a été extrait (<=1 bloc) ET le texte brut de la page est lui-même quasi
+       vide (<300 caractères) -- une page réellement courte mais servie statiquement aurait du
+       texte brut même si notre découpage en blocs échoue à le segmenter.
+    2. Un marqueur d'application JS classique : soit un conteneur racine connu (#root, #app,
+       #__next, #__nuxt) lui-même quasi vide, soit une page dominée par des <script src=...>
+       externes (>=3) plutôt que par du texte.
+    """
+    if len(blocks) > 1:
+        return False
+    body_text = _clean(root.get_text(" ", strip=True)) if hasattr(root, "get_text") else ""
+    if len(body_text) > 300:
+        return False
+    if hasattr(root, "find"):
+        for root_id in _SPA_ROOT_IDS:
+            container = root.find(id=root_id)
+            if container is not None and len(_clean(container.get_text(" ", strip=True))) < 50:
+                return True
+    if external_script_count >= 3 and len(body_text) < 100:
+        return True
+    return False
+
+
 def _token_coverage(root: Tag | BeautifulSoup, blocks: list[ContentBlock]) -> float:
     """Approximate how much of the cleaned main text survives extraction, without double-counting overlaps."""
     def words(value: str) -> list[str]:
@@ -1114,6 +1160,9 @@ def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = No
     # Order matters: links must be classified while <nav>/<header> are still in the tree, since
     # _meaningful_links tells navigation from content links by walking up to those very tags.
     links = _meaningful_links(soup, base_url, profile=profile)
+    # Counted before _remove_noise_zones strips every <script> tag below -- see
+    # _render_required_signal, which needs this as a JS-app marker.
+    external_script_count = sum(1 for tag in soup.find_all("script") if isinstance(tag, Tag) and tag.get("src"))
 
     _remove_noise_zones(soup)
 
@@ -1253,6 +1302,7 @@ def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = No
         noise_ratio=float(metrics["noise_ratio"]),
         oversized_blocks=int(metrics["oversized_blocks"]),
         published_date=published_date,
+        render_required=_render_required_signal(root, blocks, external_script_count),
     )
 
 

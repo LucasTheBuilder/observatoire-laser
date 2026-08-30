@@ -117,7 +117,7 @@ class DynamicCrawlIntegrationTests(unittest.TestCase):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def get(self, url):
+        def get(self, url, headers=None):
             return DynamicCrawlIntegrationTests.FakeResponse(url, self.pages[url])
 
     def test_discovered_urls_are_visited_during_same_run_by_score(self):
@@ -135,7 +135,16 @@ class DynamicCrawlIntegrationTests(unittest.TestCase):
                     last_changed_at TEXT, page_type TEXT, source_score INTEGER DEFAULT 0, discovery_depth INTEGER DEFAULT 0,
                     discovery_context TEXT, discovery_reason TEXT, parent_url TEXT, extraction_mode TEXT,
                     structure_hash TEXT, last_title TEXT, last_error TEXT, ambiguous INTEGER DEFAULT 0, blocks_json TEXT,
-                    published_date TEXT, market_extracted_hash TEXT
+                    published_date TEXT, market_extracted_hash TEXT, anomaly_detected_at TEXT,
+                    anomaly_detail TEXT, render_required INTEGER DEFAULT 0, etag TEXT, last_modified_header TEXT
+                );
+                CREATE TABLE source_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, block_count INTEGER,
+                    text_chars INTEGER, captured_at TEXT
+                );
+                CREATE TABLE page_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, content_hash TEXT,
+                    blocks_json TEXT, title TEXT, captured_at TEXT, archived_at TEXT
                 );
                 CREATE TABLE collection_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, finished_at TEXT, status TEXT,
@@ -205,7 +214,16 @@ class DynamicCrawlIntegrationTests(unittest.TestCase):
                     last_changed_at TEXT, page_type TEXT, source_score INTEGER DEFAULT 0, discovery_depth INTEGER DEFAULT 0,
                     discovery_context TEXT, discovery_reason TEXT, parent_url TEXT, extraction_mode TEXT,
                     structure_hash TEXT, last_title TEXT, last_error TEXT, ambiguous INTEGER DEFAULT 0, blocks_json TEXT,
-                    published_date TEXT, market_extracted_hash TEXT
+                    published_date TEXT, market_extracted_hash TEXT, anomaly_detected_at TEXT,
+                    anomaly_detail TEXT, render_required INTEGER DEFAULT 0, etag TEXT, last_modified_header TEXT
+                );
+                CREATE TABLE source_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, block_count INTEGER,
+                    text_chars INTEGER, captured_at TEXT
+                );
+                CREATE TABLE page_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, content_hash TEXT,
+                    blocks_json TEXT, title TEXT, captured_at TEXT, archived_at TEXT
                 );
                 CREATE TABLE collection_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, finished_at TEXT, status TEXT,

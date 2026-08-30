@@ -876,7 +876,46 @@ def init_databases() -> None:
             # lire sans re-télécharger/re-parser le HTML, qu'elle utilise ou non les blocs
             # mis en cache (_stored_blocks).
             "published_date": "TEXT",
+            # Détection d'anomalie de source (plan d'action web-scraping, priorité #1) :
+            # non NULL quand le dernier fetch a un nombre de blocs très inférieur à la médiane
+            # historique de cette page (voir scrapers._detect_content_anomaly / source_metrics
+            # ci-dessous) alors même que le HTTP status reste 200 -- le cas qu'aucun champ
+            # existant (last_http_status, health_score) ne couvre : une refonte HTML ou un
+            # site passé au rendu JS continue de répondre normalement, seul le CONTENU s'effondre.
+            # Effacé (remis à NULL) dès qu'un fetch ultérieur repasse au-dessus du seuil --
+            # reflète toujours l'état constaté au DERNIER crawl, jamais un historique d'alertes.
+            "anomaly_detected_at": "TEXT",
+            "anomaly_detail": "TEXT",
+            # Diagnostic JS (priorité #4) : signale qu'une extraction quasi vide coexiste avec
+            # un DOM riche en <script>, distinguant "site pauvre en contenu" de "site qui ne
+            # rend rien sans exécuter de JS" -- voir hybrid._render_required_signal. Jamais
+            # corrigé automatiquement (pas de Playwright ici), seulement signalé.
+            "render_required": "INTEGER NOT NULL DEFAULT 0",
+            # GET conditionnel (priorité #3) : ETag/Last-Modified renvoyés par le serveur au
+            # dernier fetch réussi, réutilisés au prochain passage via If-None-Match/
+            # If-Modified-Since -- un 304 Not Modified évite de retélécharger un corps de page
+            # que content_hash aurait de toute façon jugé inchangé, gain de politesse/bande
+            # passante pur (voir scrapers._fetch).
+            "etag": "TEXT",
+            "last_modified_header": "TEXT",
         })
+        # Historique du nombre de blocs extraits à CHAQUE crawl réussi (contrairement à
+        # page_versions, qui n'archive qu'au moment d'un changement de content_hash -- une page
+        # stable pendant des mois n'y génère donc aucune profondeur d'historique). C'est cette
+        # table qui fournit la médiane de référence pour anomaly_detected_at ci-dessus. Retention
+        # bornée par scrapers.SOURCE_METRICS_RETENTION.
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS source_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL REFERENCES actor_sources(id) ON DELETE CASCADE,
+                block_count INTEGER NOT NULL,
+                text_chars INTEGER NOT NULL,
+                captured_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS source_metrics_source_idx ON source_metrics(source_id);
+            """
+        )
         _add_columns(db, "site_profiles", {
             "coverage_json": "TEXT NOT NULL DEFAULT '{}'",
             "coverage_ready": "INTEGER NOT NULL DEFAULT 0",

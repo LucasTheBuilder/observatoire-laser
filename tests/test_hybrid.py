@@ -145,7 +145,7 @@ class HybridExtractionTests(unittest.TestCase):
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
-            def get(self, url: str):
+            def get(self, url: str, headers=None):
                 return FakeResponse(url)
 
         with TemporaryDirectory() as directory:

@@ -31,6 +31,7 @@ import itertools
 import json
 import os
 import re
+import statistics
 import time
 import unicodedata
 from collections import defaultdict
@@ -100,6 +101,15 @@ ROBOTS_CACHE_TTL_SECONDS = 6 * 3600
 # === Bloc 1/6 : HTTP poli (robots.txt, throttle par host, retries) ===
 _robots_cache: dict[str, tuple[float, "robotparser.RobotFileParser | None"]] = {}
 _last_request_at: dict[str, float] = {}
+# Plan d'action web-scraping, ce qu'on garde de "ce que je ne reprendrais pas" (Scrapy) :
+# "Prenez plutôt les deux idées isolées : crawl_delay lu depuis robots.txt (robotparser
+# l'expose déjà, vous l'ignorez) et un délai adaptatif à la latence." _last_latency_at n'est
+# qu'un signal de congestion grossier (dernière latence observée par host), volontairement
+# borné (ADAPTIVE_DELAY_CAP_SECONDS) pour qu'une seule requête lente ne fige jamais tout le
+# crawl sur ce host.
+_last_latency_seconds: dict[str, float] = {}
+ADAPTIVE_DELAY_FACTOR = 0.5
+ADAPTIVE_DELAY_CAP_SECONDS = 5.0
 
 
 def _robots_parser(client: httpx.Client, origin: str) -> "robotparser.RobotFileParser | None":
@@ -137,37 +147,67 @@ def _robots_allowed(client: httpx.Client, url: str) -> bool:
         return True
 
 
+def _robots_crawl_delay(origin: str) -> float | None:
+    """Reads the Crawl-delay directive robots.txt may declare for our user-agent. Reuses the
+    parser _robots_allowed already cached via _robots_parser (always called before _throttle
+    inside _fetch) -- no extra network round-trip just to read this."""
+    cached = _robots_cache.get(origin)
+    if cached is None or cached[1] is None:
+        return None
+    try:
+        delay = cached[1].crawl_delay(HEADERS["User-Agent"])
+    except Exception:
+        return None
+    return float(delay) if delay is not None else None
+
+
 def _throttle(url: str) -> None:
-    """Enforce a minimum delay between two requests to the same host."""
-    if CRAWL_DELAY_SECONDS <= 0:
-        return
-    host = urlparse(url).netloc.lower()
+    """Enforce a minimum delay between two requests to the same host -- the largest of our own
+    default (CRAWL_DELAY_SECONDS), whatever Crawl-delay robots.txt asks our user-agent for, and
+    an adaptive component that backs off further right after a slow response from that host."""
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
     if not host:
+        return
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    robots_delay = _robots_crawl_delay(origin) or 0.0
+    adaptive_delay = min(_last_latency_seconds.get(host, 0.0) * ADAPTIVE_DELAY_FACTOR, ADAPTIVE_DELAY_CAP_SECONDS)
+    delay = max(CRAWL_DELAY_SECONDS, robots_delay, adaptive_delay)
+    if delay <= 0:
         return
     now = time.monotonic()
     last = _last_request_at.get(host)
     if last is not None:
-        remaining = CRAWL_DELAY_SECONDS - (now - last)
+        remaining = delay - (now - last)
         if remaining > 0:
             time.sleep(remaining)
     _last_request_at[host] = time.monotonic()
 
 
-def _fetch(client: httpx.Client, url: str) -> httpx.Response:
-    """GET one URL while respecting robots.txt, per-host throttling and transient-error retries."""
+def _fetch(client: httpx.Client, url: str, *, headers: dict[str, str] | None = None) -> httpx.Response:
+    """GET one URL while respecting robots.txt, per-host throttling and transient-error retries.
+
+    ``headers`` carries the conditional-GET pair (If-None-Match/If-Modified-Since, see
+    scrape_actors) for this one request only, merged on top of the client's defaults -- a 304
+    Not Modified is returned as-is (httpx only raises on 4xx/5xx), the caller decides what to
+    do with it.
+    """
     if not _robots_allowed(client, url):
         raise PermissionError(f"robots.txt interdit: {url}")
     attempt = 0
     while True:
         _throttle(url)
+        host = urlparse(url).netloc.lower()
+        started = time.monotonic()
         try:
-            response = client.get(url)
+            response = client.get(url, headers=headers)
         except (httpx.TimeoutException, httpx.TransportError):
             if attempt >= CRAWL_MAX_RETRIES:
                 raise
             time.sleep(2 ** attempt)
             attempt += 1
             continue
+        _last_latency_seconds[host] = time.monotonic() - started
         if response.status_code in RETRYABLE_STATUS_CODES and attempt < CRAWL_MAX_RETRIES:
             time.sleep(2 ** attempt)
             attempt += 1
@@ -1799,6 +1839,48 @@ def _source_coverage(actor_id: int, profile: dict | None = None) -> dict[str, di
     return coverage
 
 
+# Détection d'anomalie de source (plan d'action web-scraping, priorité #1) : voir
+# db.actor_sources.anomaly_detected_at et le commentaire de source_metrics pour le contexte
+# complet -- un site qui refond son HTML continue de répondre HTTP 200 tout en effondrant
+# silencieusement l'extraction, sans qu'aucun signal existant (last_http_status, health_score)
+# ne le détecte.
+SOURCE_METRICS_RETENTION = 20
+ANOMALY_MIN_HISTORY = 3
+ANOMALY_MIN_BASELINE_BLOCKS = 3
+ANOMALY_DROP_RATIO = 0.3
+
+
+def _detect_content_anomaly(db, source_id: int, block_count: int) -> tuple[str | None, str | None]:
+    """Compare le nombre de blocs de ce fetch à la médiane historique de la MÊME page
+    (source_metrics, écrit à CHAQUE fetch réussi -- contrairement à page_versions, qui n'archive
+    qu'au moment d'un changement de content_hash et n'a donc aucune profondeur d'historique pour
+    une page restée visuellement stable pendant des mois).
+
+    Renvoie (anomaly_detected_at, anomaly_detail) à écrire dans actor_sources, ou (None, None)
+    si rien n'est détecté -- ce qui couvre aussi bien "pas encore assez d'historique pour juger"
+    que "l'anomalie précédemment signalée s'est résorbée" : l'appelant écrase toujours ces deux
+    colonnes avec le résultat de cet appel, jamais un patch conditionnel.
+    """
+    history = [
+        row["block_count"] for row in db.execute(
+            "SELECT block_count FROM source_metrics WHERE source_id=? ORDER BY id DESC LIMIT ?",
+            (source_id, SOURCE_METRICS_RETENTION),
+        ).fetchall()
+    ]
+    if len(history) < ANOMALY_MIN_HISTORY:
+        return None, None
+    baseline = statistics.median(history)
+    if baseline < ANOMALY_MIN_BASELINE_BLOCKS:
+        return None, None
+    if block_count < baseline * ANOMALY_DROP_RATIO:
+        detail = (
+            f"{block_count} bloc(s) extrait(s) contre une médiane historique de {baseline:.0f} "
+            f"sur {len(history)} passages -- possible refonte HTML ou contenu rendu en JS."
+        )
+        return utc_now(), detail
+    return None, None
+
+
 def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str] | None = None) -> dict:
     """Crawle chaque acteur actif l'un après l'autre. Pour chaque acteur :
     1. Charge son profil de crawl (site_profiles.get_site_profile) et son budget de pages.
@@ -1920,8 +2002,38 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                     continue
 
                 try:
-                    response = _fetch(client, url)
+                    with connect(ACTORS_DB) as db:
+                        previous = db.execute(
+                            """SELECT content_hash,blocks_json,last_title,last_checked_at,etag,last_modified_header
+                               FROM actor_sources WHERE id=?""",
+                            (source_id,),
+                        ).fetchone()
+                    # GET conditionnel (plan d'action web-scraping, priorité #3) : envoyer
+                    # If-None-Match/If-Modified-Since quand un fetch précédent nous a laissé de
+                    # quoi -- un 304 réutilise ce qu'on a déjà, sans corps à retélécharger.
+                    conditional_headers: dict[str, str] = {}
+                    if previous and previous["etag"]:
+                        conditional_headers["If-None-Match"] = previous["etag"]
+                    if previous and previous["last_modified_header"]:
+                        conditional_headers["If-Modified-Since"] = previous["last_modified_header"]
+                    response = _fetch(client, url, headers=conditional_headers or None)
                     resolved_url = str(response.url)
+                    new_etag = response.headers.get("etag")
+                    new_last_modified = response.headers.get("last-modified")
+
+                    if response.status_code == 304:
+                        # Rien n'a changé côté serveur -- on ne reparse rien, on garde tout le
+                        # reste (content_hash, blocks_json, anomaly_detected_at...) tel quel.
+                        stamp = utc_now()
+                        with connect(ACTORS_DB) as db:
+                            db.execute(
+                                "UPDATE actor_sources SET last_http_status=304,last_checked_at=?,last_error=NULL WHERE id=?",
+                                (stamp, source_id),
+                            )
+                        scanned += 1
+                        successful_visits += 1
+                        continue
+
                     if is_pdf_response(response.headers.get("content-type", ""), resolved_url):
                         document = parse_pdf_document(response.content, resolved_url, profile=site_profile)
                     else:
@@ -1929,11 +2041,6 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                     documents.append((resolved_url, document))
                     digest = hashlib.sha256("|".join(block.fingerprint for block in document.blocks).encode()).hexdigest()
 
-                    with connect(ACTORS_DB) as db:
-                        previous = db.execute(
-                            "SELECT content_hash,blocks_json,last_title,last_checked_at FROM actor_sources WHERE id=?",
-                            (source_id,),
-                        ).fetchone()
                     previous_hash = previous["content_hash"] if previous else None
                     is_changed = bool(previous_hash and previous_hash != digest)
                     blocks_json = json.dumps([block_payload(block) for block in document.blocks[:40]], ensure_ascii=False)
@@ -1947,6 +2054,11 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                     )
                     fetched_score = max(int(fetched_score), int(document.page_score))
                     visited_by_type[fetched_type] += 1
+
+                    # Named distinctly from the per-actor `block_count` computed after this loop
+                    # (line ~2155) -- this one is per-page, feeding source_metrics/anomaly detection.
+                    page_block_count = len(document.blocks)
+                    text_chars = sum(len(block.text) for block in document.blocks)
 
                     with connect(ACTORS_DB) as db:
                         if is_changed:
@@ -1963,16 +2075,30 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                                    )""",
                                 (source_id, source_id, PAGE_VERSIONS_RETENTION),
                             )
+                        anomaly_at, anomaly_detail = _detect_content_anomaly(db, source_id, page_block_count)
+                        db.execute(
+                            "INSERT INTO source_metrics(source_id,block_count,text_chars,captured_at) VALUES(?,?,?,?)",
+                            (source_id, page_block_count, text_chars, stamp),
+                        )
+                        db.execute(
+                            """DELETE FROM source_metrics WHERE source_id=? AND id NOT IN (
+                                   SELECT id FROM source_metrics WHERE source_id=? ORDER BY id DESC LIMIT ?
+                               )""",
+                            (source_id, source_id, SOURCE_METRICS_RETENTION),
+                        )
                         db.execute(
                             """UPDATE actor_sources SET content_hash=?,last_http_status=?,last_checked_at=?,last_title=?,
                                       page_type=?,source_score=?,extraction_mode=?,structure_hash=?,blocks_json=?,last_error=NULL,
                                       ambiguous=?,discovery_depth=?,parent_url=COALESCE(parent_url,?),discovery_reason=COALESCE(discovery_reason,?),
-                                      published_date=?,
+                                      published_date=?,anomaly_detected_at=?,anomaly_detail=?,render_required=?,
+                                      etag=?,last_modified_header=?,
                                       last_changed_at=CASE WHEN ? THEN ? ELSE last_changed_at END WHERE id=?""",
                             (
                                 digest, response.status_code, stamp, document.title, fetched_type, fetched_score,
                                 document.extraction_method, document.structure_hash, blocks_json, int(not document.blocks),
                                 depth, item.get("parent_url"), item.get("reason"), document.published_date,
+                                anomaly_at, anomaly_detail, int(document.render_required),
+                                new_etag, new_last_modified,
                                 int(is_changed), stamp, source_id,
                             ),
                         )

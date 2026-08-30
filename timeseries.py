@@ -45,7 +45,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from db import ACTORS_DB, MARKET_DB, TECH_DB, _INDUSTRIAL_STAGE_CANONICAL, connect, utc_now
+from db import _INDUSTRIAL_STAGE_CANONICAL, ACTORS_DB, MARKET_DB, TECH_DB, connect, utc_now
 
 DIMENSIONS = ("actor", "market", "technology", "maturity", "signal")
 GLOBAL_KEY = "__global__"

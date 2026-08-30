@@ -48,7 +48,7 @@ class FakeClient:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def get(self, url):
+    def get(self, url, headers=None):
         return FakeResponse(url, self.pages[url])
 
 
