@@ -426,6 +426,14 @@ def classify_evidence_type(quote: str | None) -> str:
     return "claim"
 
 
+def numeric_spec_tokens(text: str | None) -> set[str]:
+    """Les specs chiffrées (nombre + unité technique) présentes dans ``text``, au sens exact de
+    _PROOF_NUMBER_RE déjà utilisé par classify_evidence_type -- réutilisé par
+    scrapers._diff_page_blocks (§5.E.1 audit veille) pour détecter qu'une spec a changé entre
+    deux versions d'une page, sans dupliquer la définition de ce qui compte comme une spec."""
+    return {match.group(0).strip() for match in _PROOF_NUMBER_RE.finditer(text or "")}
+
+
 _ARCHITECTURE_STAGE_RE = re.compile(r"Architecture:\s*([^|]+)")
 
 
@@ -884,6 +892,29 @@ def init_databases() -> None:
                 archived_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS page_versions_source_idx ON page_versions(source_id);
+            -- Diff sémantique entre deux versions d'une page (§5.E.1/§8.3 audit veille,
+            -- 30/08/2026) : la majorité du corpus (pages service/application/product) n'a
+            -- aucune date de publication exploitable (voir date_confidence) -- le diff entre le
+            -- blocks_json archivé dans page_versions et le nouveau est la SEULE date fiable que
+            -- ce crawler puisse produire pour ces pages. Transforme "quand je l'ai vu"
+            -- (created_at) en "quand ils l'ont écrit" (detected_at, borné par la fréquence de
+            -- crawl). Voir scrapers._diff_page_blocks. Pas de purge par rétention ici,
+            -- contrairement à page_versions/source_metrics : c'est un journal d'événements
+            -- datés destiné au digest et aux séries temporelles, pas un instantané à remplacer.
+            CREATE TABLE IF NOT EXISTS page_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL REFERENCES actor_sources(id) ON DELETE CASCADE,
+                change_type TEXT NOT NULL CHECK(change_type IN (
+                    'block_added', 'block_removed', 'lexicon_term_appeared', 'numeric_spec_changed'
+                )),
+                term TEXT,
+                detail TEXT,
+                old_value TEXT,
+                new_value TEXT,
+                detected_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS page_changes_source_idx ON page_changes(source_id);
+            CREATE INDEX IF NOT EXISTS page_changes_detected_idx ON page_changes(detected_at);
             -- Historique des lancements de collecte (une ligne par clic sur "Lancer le crawl
             -- acteurs" -- voir app.py: start_scrape / _run_job).
             CREATE TABLE IF NOT EXISTS collection_runs (

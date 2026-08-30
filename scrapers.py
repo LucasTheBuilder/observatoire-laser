@@ -56,6 +56,7 @@ from db import (
     connect,
     language_from_url,
     market_fact_key,
+    numeric_spec_tokens,
     offer_fact_key,
     utc_now,
 )
@@ -1945,6 +1946,79 @@ def _detect_content_anomaly(db, source_id: int, block_count: int) -> tuple[str |
     return None, None
 
 
+def _diff_page_blocks(previous_blocks_json: str | None, new_blocks_json: str | None) -> list[dict]:
+    """§5.E.1/§8.3 audit veille (30/08/2026) : page_versions archive déjà le blocks_json d'avant
+    un changement de contenu détecté, mais rien ne le comparait. Pour la majorité du corpus
+    (pages service/application/product, sans date de publication exploitable -- voir
+    date_confidence), ce diff est la SEULE date fiable que ce crawler puisse produire : il
+    transforme "quand je l'ai vu" (created_at) en "quand ils l'ont écrit" (borné par la
+    fréquence de crawl). Volontairement fondé sur des ensembles (empreinte de bloc, libellé de
+    lexique, token numérique), pas un vrai diff ligne à ligne -- cohérent avec le reste du
+    module (lexique déterministe, sans dépendance NLP). Renvoie une liste de dicts prêts à
+    insérer dans page_changes (change_type/term/detail/old_value/new_value)."""
+    try:
+        previous_blocks = json.loads(previous_blocks_json) if previous_blocks_json else []
+    except (TypeError, ValueError):
+        previous_blocks = []
+    try:
+        new_blocks = json.loads(new_blocks_json) if new_blocks_json else []
+    except (TypeError, ValueError):
+        new_blocks = []
+    if not previous_blocks and not new_blocks:
+        return []
+
+    changes: list[dict] = []
+
+    previous_by_fp = {b["fingerprint"]: b for b in previous_blocks if b.get("fingerprint")}
+    new_by_fp = {b["fingerprint"]: b for b in new_blocks if b.get("fingerprint")}
+    for fp, block in new_by_fp.items():
+        if fp not in previous_by_fp:
+            changes.append({
+                "change_type": "block_added", "term": None,
+                "detail": (block.get("text") or block.get("heading") or "")[:200],
+                "old_value": None, "new_value": None,
+            })
+    for fp, block in previous_by_fp.items():
+        if fp not in new_by_fp:
+            changes.append({
+                "change_type": "block_removed", "term": None,
+                "detail": (block.get("text") or block.get("heading") or "")[:200],
+                "old_value": None, "new_value": None,
+            })
+
+    previous_text = " ".join(filter(None, (b.get("text") for b in previous_blocks)))
+    new_text = " ".join(filter(None, (b.get("text") for b in new_blocks)))
+    previous_labels: set[str] = set()
+    new_labels: set[str] = set()
+    for lexicon in (MARKETS, COMPONENTS, OPERATIONS, PROCESS_TECHNOLOGIES, MATERIALS, PERFORMANCE_TERMS):
+        previous_labels |= {label for label, _ in _match_all_labels(previous_text, lexicon)}
+        new_labels |= {label for label, _ in _match_all_labels(new_text, lexicon)}
+    for label in sorted(new_labels - previous_labels):
+        changes.append({
+            "change_type": "lexicon_term_appeared", "term": label,
+            "detail": None, "old_value": None, "new_value": None,
+        })
+
+    # Numeric specs are compared per matching block path (same editorial slot), not globally --
+    # a spec appearing in a NEW block is already covered by block_added above; this is only for
+    # a spec changing INSIDE a block that persisted across both versions.
+    previous_by_path = {b["path"]: b for b in previous_blocks if b.get("path")}
+    new_by_path = {b["path"]: b for b in new_blocks if b.get("path")}
+    for path, new_block in new_by_path.items():
+        previous_block = previous_by_path.get(path)
+        if not previous_block or previous_block.get("text") == new_block.get("text"):
+            continue
+        old_specs = numeric_spec_tokens(previous_block.get("text"))
+        new_specs = numeric_spec_tokens(new_block.get("text"))
+        if old_specs != new_specs and (old_specs or new_specs):
+            changes.append({
+                "change_type": "numeric_spec_changed", "term": path, "detail": None,
+                "old_value": ", ".join(sorted(old_specs)) or None,
+                "new_value": ", ".join(sorted(new_specs)) or None,
+            })
+    return changes
+
+
 def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str] | None = None) -> dict:
     """Crawle chaque acteur actif l'un après l'autre. Pour chaque acteur :
     1. Charge son profil de crawl (site_profiles.get_site_profile) et son budget de pages.
@@ -2139,6 +2213,15 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                                    )""",
                                 (source_id, source_id, PAGE_VERSIONS_RETENTION),
                             )
+                            for change in _diff_page_blocks(previous["blocks_json"], blocks_json):
+                                db.execute(
+                                    """INSERT INTO page_changes(source_id,change_type,term,detail,old_value,new_value,detected_at)
+                                       VALUES(?,?,?,?,?,?,?)""",
+                                    (
+                                        source_id, change["change_type"], change["term"], change["detail"],
+                                        change["old_value"], change["new_value"], stamp,
+                                    ),
+                                )
                         anomaly_at, anomaly_detail = _detect_content_anomaly(db, source_id, page_block_count)
                         db.execute(
                             "INSERT INTO source_metrics(source_id,block_count,text_chars,captured_at) VALUES(?,?,?,?)",

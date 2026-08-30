@@ -130,5 +130,59 @@ class PageVersionsArchivalTests(unittest.TestCase):
             self.assertEqual(scrapers.PAGE_VERSIONS_RETENTION, count)
 
 
+class PageChangesDiffIntegrationTests(unittest.TestCase):
+    """Lot 1 §1.6 (audit veille §5.E.1/§8.3, 30/08/2026): scrape_actors() must diff the archived
+    page_versions row against the new content and populate page_changes -- see
+    scrapers._diff_page_blocks for the pure-function unit tests."""
+
+    def _crawl_once(self, actors_db: Path, paragraph: str) -> dict:
+        FakeClient.pages = {"https://example.test/": _page(paragraph)}
+        with (
+            patch.object(scrapers, "ACTORS_DB", actors_db),
+            patch.object(scrapers.httpx, "Client", FakeClient),
+            patch.object(scrapers.OllamaClient, "available", return_value=False),
+        ):
+            return scrapers.scrape_actors(max_pages_per_actor=1, actor_names=["Test Actor"])
+
+    def _setup(self, tmp: str) -> Path:
+        actors_db = Path(tmp) / "actors.db"
+        with (
+            patch.object(dbmod, "ACTORS_DB", actors_db),
+            patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+            patch.object(dbmod, "TECH_DB", Path(tmp) / "technology.db"),
+        ):
+            dbmod.init_databases()
+            dbmod.create_actor("Test Actor", "France", "Test", "https://example.test/", priority=False)
+        return actors_db
+
+    def test_first_crawl_produces_no_page_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._setup(tmp)
+            self._crawl_once(actors_db, "customer segment 1")
+            with dbmod.connect(actors_db) as db:
+                count = db.execute("SELECT COUNT(*) FROM page_changes").fetchone()[0]
+            self.assertEqual(0, count)
+
+    def test_second_crawl_with_changed_content_records_page_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._setup(tmp)
+            self._crawl_once(actors_db, "customer segment 1")
+            self._crawl_once(actors_db, "a very different customer segment 2")
+            with dbmod.connect(actors_db) as db:
+                changes = db.execute("SELECT change_type,detected_at FROM page_changes").fetchall()
+            self.assertGreaterEqual(len(changes), 1)
+            for change in changes:
+                self.assertIsNotNone(change["detected_at"])
+
+    def test_unchanged_content_on_recrawl_records_no_page_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = self._setup(tmp)
+            self._crawl_once(actors_db, "the exact same customer segment")
+            self._crawl_once(actors_db, "the exact same customer segment")
+            with dbmod.connect(actors_db) as db:
+                count = db.execute("SELECT COUNT(*) FROM page_changes").fetchone()[0]
+            self.assertEqual(0, count)
+
+
 if __name__ == "__main__":
     unittest.main()
