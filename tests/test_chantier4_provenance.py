@@ -117,6 +117,104 @@ class UpsertPersistenceTests(unittest.TestCase):
             self.assertEqual(1, row["is_verbatim"])
 
 
+class OfferStructuralRoutingTests(unittest.TestCase):
+    """§10.7 audit veille (30/08/2026, correction de §9.9) : field_confidence n'a pas la
+    résolution nécessaire pour piloter la file de revue des offres -- review_status est
+    désormais calculé sur des critères structurels (_offer_review_reasons), plus jamais
+    'accepted' d'office à l'insertion."""
+
+    def _fresh_market_db(self, tmp: Path) -> Path:
+        market_db = Path(tmp) / "market.db"
+        with (
+            patch.object(dbmod, "ACTORS_DB", Path(tmp) / "actors.db"),
+            patch.object(dbmod, "MARKET_DB", market_db),
+            patch.object(dbmod, "TECH_DB", Path(tmp) / "technology.db"),
+        ):
+            dbmod.init_databases()
+        return market_db
+
+    def _confirmed_block(self) -> ContentBlock:
+        # Predicate present ("we provide"), operation present (drilling), page_type will be
+        # "service" (passed separately) -- carries none of the 4 non-source-count reasons, so
+        # only the source-count criterion decides review vs accepted here.
+        return ContentBlock(
+            heading="Services",
+            text="We provide femtosecond laser drilling services for medical customers.",
+            path="main > article",
+        )
+
+    def test_brand_new_offer_with_a_single_source_is_routed_to_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            market_db = self._fresh_market_db(tmp)
+            offer = _offer_candidates(
+                "Example", "https://example.test/services", "Services", self._confirmed_block(), page_type="service",
+            )[0]
+            with dbmod.connect(market_db) as db:
+                _upsert_offer_candidate(db, offer)
+                row = db.execute("SELECT review_status FROM offers WHERE fact_key=?", (offer["fact_key"],)).fetchone()
+            self.assertEqual("review", row["review_status"])
+
+    def test_a_second_independent_source_promotes_the_offer_to_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            market_db = self._fresh_market_db(tmp)
+            first = _offer_candidates(
+                "Example", "https://example.test/services", "Services", self._confirmed_block(), page_type="service",
+            )[0]
+            second = _offer_candidates(
+                "Example", "https://example.test/en/services", "Services (EN)", self._confirmed_block(), page_type="service",
+            )[0]
+            with dbmod.connect(market_db) as db:
+                _upsert_offer_candidate(db, first)
+                _upsert_offer_candidate(db, second)
+                row = db.execute("SELECT review_status FROM offers WHERE fact_key=?", (first["fact_key"],)).fetchone()
+            self.assertEqual("accepted", row["review_status"])
+
+    def test_recrawling_the_same_url_does_not_count_as_a_second_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            market_db = self._fresh_market_db(tmp)
+            offer = _offer_candidates(
+                "Example", "https://example.test/services", "Services", self._confirmed_block(), page_type="service",
+            )[0]
+            with dbmod.connect(market_db) as db:
+                _upsert_offer_candidate(db, offer)
+                # Same URL, slightly higher confidence (e.g. re-crawled, refined match) --
+                # must not be mistaken for independent corroboration.
+                again = dict(offer)
+                again["confidence"] = min(0.97, offer["confidence"] + 0.05)
+                _upsert_offer_candidate(db, again)
+                row = db.execute("SELECT review_status FROM offers WHERE fact_key=?", (offer["fact_key"],)).fetchone()
+            self.assertEqual("review", row["review_status"])
+
+    def test_quote_without_predicate_stays_in_review_even_with_two_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            market_db = self._fresh_market_db(tmp)
+            block = ContentBlock(heading="Services", text="Femtosecond laser drilling services.", path="main > article")
+            first = _offer_candidates("Example", "https://example.test/a", "Services", block, page_type="service")[0]
+            second = _offer_candidates("Example", "https://example.test/b", "Services", block, page_type="service")[0]
+            with dbmod.connect(market_db) as db:
+                _upsert_offer_candidate(db, first)
+                _upsert_offer_candidate(db, second)
+                row = db.execute("SELECT review_status FROM offers WHERE fact_key=?", (first["fact_key"],)).fetchone()
+            self.assertEqual("review", row["review_status"])
+
+    def test_homepage_citation_stays_in_review_even_with_two_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            market_db = self._fresh_market_db(tmp)
+            first = _offer_candidates(
+                "Example", "https://example.test/services", "Services", self._confirmed_block(), page_type="service",
+            )[0]
+            # Second citation confirms a distinct source, but is itself a homepage citation --
+            # reasons are recomputed from THIS pass's candidate, so it must not flip to accepted.
+            second = _offer_candidates(
+                "Example", "https://example.test/", "Home", self._confirmed_block(), page_type="service",
+            )[0]
+            with dbmod.connect(market_db) as db:
+                _upsert_offer_candidate(db, first)
+                _upsert_offer_candidate(db, second)
+                row = db.execute("SELECT review_status FROM offers WHERE fact_key=?", (first["fact_key"],)).fetchone()
+            self.assertEqual("review", row["review_status"])
+
+
 class LegacySeedBackfillTests(unittest.TestCase):
     def test_manually_entered_rows_are_backfilled_as_not_verbatim(self):
         with tempfile.TemporaryDirectory() as tmp:

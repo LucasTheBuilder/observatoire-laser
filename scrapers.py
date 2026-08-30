@@ -2593,15 +2593,47 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
     return fact_added, source_added
 
 
+def _offer_review_reasons(candidate: dict, source_count_after: int) -> list[str]:
+    """§10.7 audit veille (30/08/2026, correction de la recommandation §9.9) : field_confidence
+    n'a pas la résolution nécessaire pour piloter la file de revue des offres -- 72% de la masse
+    tient sur deux valeurs (0.78/0.83), 19% sont NULL. Un seuil ne peut produire que deux régimes
+    inutilisables (flaguer 19 offres ou 274). Route vers la revue sur des critères STRUCTURELS,
+    explicables et corrélés aux modes d'échec observés, au lieu d'un score continu déguisé.
+    ``source_count_after`` est le nombre de source_url DISTINCTES sur cette offre en comptant
+    celle en cours d'ajout -- une offre encore vue sur une seule page n'est jamais "confirmée",
+    même si on la revoit plusieurs fois sur cette même page."""
+    reasons: list[str] = []
+    if not _has_predicate(candidate["quote"]):
+        reasons.append("no_predicate")
+    if not candidate.get("page_type"):
+        reasons.append("page_type_null")
+    if urlparse(candidate["url"]).path in ("", "/"):
+        reasons.append("homepage_citation")
+    if not candidate.get("operation"):
+        reasons.append("operation_null")
+    if source_count_after <= 1:
+        reasons.append("single_unconfirmed_source")
+    return reasons
+
+
 def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
     """Même logique que _upsert_market_candidate mais pour la table `offers` (clé fact_key
     directe, sans distinction bucket/application_key puisqu'une offre n'a pas de maturité
-    "métier" à faire progresser). Renvoie (1 si nouvelle offre créée, 1 si nouvelle preuve créée)."""
+    "métier" à faire progresser). review_status est calculé à chaque passage (insertion, et
+    mise à jour quand la confiance augmente) via _offer_review_reasons -- §10.7 audit veille,
+    plus jamais 'accepted' d'office. Renvoie (1 si nouvelle offre créée, 1 si nouvelle preuve
+    créée)."""
     stamp = utc_now()
     row = db.execute(
         "SELECT id,field_confidence,date_confidence,created_at FROM offers WHERE fact_key=?", (candidate["fact_key"],)
     ).fetchone()
     fact_added = 0
+    existing_urls = (
+        {r[0] for r in db.execute("SELECT DISTINCT source_url FROM offer_sources WHERE offer_id=?", (int(row["id"]),))}
+        if row else set()
+    )
+    source_count_after = len(existing_urls | {candidate["url"]})
+    review_status = "review" if _offer_review_reasons(candidate, source_count_after) else "accepted"
     if row:
         offer_id = int(row["id"])
         if float(candidate.get("confidence", 0)) > float(row["field_confidence"] or 0):
@@ -2642,18 +2674,21 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
                    actor_name,offer_type,capability,operation,laser_process,material,performance,industrial_stage,page_type,
                    source_url,source_title,source_date,quote,is_verbatim,evidence_type,date_confidence,is_backfill,
                    fact_key,fingerprint,review_status,field_confidence,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 candidate["actor"], candidate["offer_type"], candidate["capability"], candidate.get("operation"), candidate.get("process"),
                 candidate.get("material"), candidate.get("performance"), candidate["stage"], candidate["page_type"], candidate["url"],
                 candidate["title"], candidate.get("source_date"), candidate["quote"], int(candidate.get("is_verbatim", True)),
                 candidate.get("evidence_type"), candidate.get("date_confidence"), is_backfill,
-                candidate["fact_key"], candidate["fingerprint"], candidate["confidence"], stamp, stamp,
+                candidate["fact_key"], candidate["fingerprint"], review_status, candidate["confidence"], stamp, stamp,
             ),
         ).lastrowid
         fact_added = 1
 
-    db.execute("UPDATE offers SET last_seen_at=? WHERE id=?", (stamp, offer_id))
+    # review_status is recomputed here regardless of the confidence branch above: source_count_
+    # after can cross the single-source threshold (the dominant _offer_review_reasons signal)
+    # even when this pass's own confidence doesn't beat the stored field_confidence.
+    db.execute("UPDATE offers SET last_seen_at=?,review_status=? WHERE id=?", (stamp, review_status, offer_id))
 
     before = db.total_changes
     db.execute(
