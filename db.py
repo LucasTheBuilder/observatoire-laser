@@ -1115,6 +1115,27 @@ def init_databases() -> None:
                 created_at TEXT NOT NULL,
                 UNIQUE(dimension, label)
             );
+
+            -- Séries temporelles (audit Horizon 2 #12 : "Construire séries temporelles par
+            -- acteur, marché, technologie, maturité et signal") -- voir timeseries.py pour le
+            -- calcul (capture_metric_snapshot, appelée après chaque collecte, voir
+            -- app._run_job) et la lecture (read_timeseries/list_timeseries_keys). Une ligne =
+            -- un instantané mensuel agrégé pour une clé donnée d'une dimension ; regroupée ici
+            -- (MARKET_DB) plutôt que répartie dans les 3 bases, y compris pour la dimension
+            -- 'technology' dont les compteurs sources viennent de TECH_DB, pour que
+            -- /api/timeseries n'ait jamais à ouvrir plus d'un fichier SQLite en lecture.
+            CREATE TABLE IF NOT EXISTS metric_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dimension TEXT NOT NULL CHECK(dimension IN ('actor','market','technology','maturity','signal')),
+                dimension_key TEXT NOT NULL,
+                period TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                metrics_json TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS metric_snapshots_uq
+                ON metric_snapshots(dimension, dimension_key, period);
+            CREATE INDEX IF NOT EXISTS metric_snapshots_lookup_idx
+                ON metric_snapshots(dimension, period);
             """
         )
         _add_columns(db, "offers", {

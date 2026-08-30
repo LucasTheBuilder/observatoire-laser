@@ -75,6 +75,7 @@ from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from openalex import collect_openalex_publications
 from press import collect_press_mentions
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
+from timeseries import capture_metric_snapshot, list_timeseries_keys, read_timeseries
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -661,6 +662,38 @@ def pipeline_funnel():
     }
 
 
+@app.get("/api/timeseries/keys")
+def timeseries_keys(dimension: Literal["actor", "market", "technology", "maturity", "signal"] = Query(...)):
+    """Toutes les clés connues d'une dimension (noms d'acteurs, libellés de marché, axes
+    technologiques...), pour peupler un sélecteur côté front avant de choisir quelle courbe
+    tracer avec /api/timeseries. 'maturity' et 'signal' n'exposent en pratique que
+    '__global__' (+ un libellé de marché par marché pour 'maturity')."""
+    return {"dimension": dimension, "keys": list_timeseries_keys(dimension)}
+
+
+@app.get("/api/timeseries")
+def timeseries(
+    dimension: Literal["actor", "market", "technology", "maturity", "signal"] = Query(...),
+    key: str = Query(..., description="Nom d'acteur / libellé de marché / axe technologique, ou '__global__' pour maturity/signal/technology."),
+):
+    """Séries temporelles (audit Horizon 2 #12, voir timeseries.py) : historique mensuel d'une
+    clé, du plus ancien au plus récent -- ce que le front trace en courbe. Un instantané est
+    capturé après chaque collecte terminée (voir _run_job) ; POST /api/timeseries/capture en
+    déclenche un manuellement sans attendre la prochaine collecte."""
+    points = read_timeseries(dimension, key)
+    if not points:
+        raise HTTPException(status_code=404, detail=f"Aucun instantané pour {dimension}={key!r} -- lancez une collecte ou POST /api/timeseries/capture.")
+    return {"dimension": dimension, "key": key, "points": points}
+
+
+@app.post("/api/timeseries/capture")
+def timeseries_capture():
+    """Déclenche un instantané immédiat sans attendre la prochaine collecte (ex: après une
+    correction manuelle en base) -- même fonction que celle appelée automatiquement par
+    _run_job."""
+    return capture_metric_snapshot()
+
+
 # --- CRUD acteurs : les modèles Pydantic ci-dessous valident/documentent automatiquement le
 # corps JSON attendu par FastAPI pour chaque endpoint POST/PATCH. ---
 class ActorCreateRequest(BaseModel):
@@ -1100,6 +1133,14 @@ def _run_job(kind: str) -> None:
         except Exception:
             pass  # a backup failure (e.g. disk full) must never block the collection itself
         result = collectors[kind]()
+        try:
+            # Séries temporelles (audit Horizon 2 #12, voir timeseries.py) : un instantané réel
+            # par cycle de collecte, quel que soit le type -- une capture ratée ne doit jamais
+            # faire échouer la collecte elle-même (même logique de tolérance que backup_all_databases
+            # ci-dessus).
+            capture_metric_snapshot()
+        except Exception:
+            pass
         with job_lock:
             jobs[kind] = {"status": "completed", "result": result, "error": None}
     except Exception as exc:
