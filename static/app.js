@@ -143,22 +143,23 @@ function groupByMarket(rows) {
   return [...map.entries()].sort((a, b) => b[1].total - a[1].total);
 }
 
-// Score d'attractivité marché (audit Horizon 2 #14, voir scoring.py:
-// compute_market_attractiveness_scores) : traction prouvée + pipeline radar + acteurs actifs +
-// part de faits proches de la Production. Absent (pas de badge) pour un marché sans faits
-// validés -- jamais un score fabriqué à 0 pour "pas encore de données".
-function attractivenessLevel(score) {
+// Score d'intensité concurrentielle par marché (audit Horizon 2 #14, voir scoring.py:
+// compute_competitive_intensity_scores ; renommé depuis "attractivité" le 30/08/2026, audit
+// veille §10.4 -- ce score ne mesure que l'offre concurrente déjà présente, un marché encombré
+// y ressort "haut", ce qui est l'inverse d'une attractivité business). Absent (pas de badge)
+// pour un marché sans faits validés -- jamais un score fabriqué à 0 pour "pas encore de données".
+function intensityLevel(score) {
   if (score >= 55) return "good";
   if (score >= 25) return "partial";
   return "weak";
 }
 
-function attractivenessBadge(market) {
+function intensityBadge(market) {
   const entry = (state.marketScores || []).find(m => m.market === market);
   if (!entry) return "";
-  const level = attractivenessLevel(entry.attractiveness_score);
-  const title = `Attractivité : ${entry.existing} fait(s) existant(s), ${entry.radar} radar, ${entry.actors_count} acteur(s) actif(s), ${Math.round(entry.production_share * 100)}% en stade Production/Industrialisation.`;
-  return `<span class="attractiveness-badge lvl-${level}" title="${esc(title)}">${Math.round(entry.attractiveness_score)} attractivité</span>`;
+  const level = intensityLevel(entry.intensity_score);
+  const title = `Intensité concurrentielle : ${entry.existing} fait(s) existant(s), ${entry.radar} radar, ${entry.actors_count} acteur(s) actif(s), ${Math.round(entry.production_share * 100)}% en stade Production/Industrialisation. Mesure l'offre déjà présente, pas la demande.`;
+  return `<span class="attractiveness-badge lvl-${level}" title="${esc(title)}">${Math.round(entry.intensity_score)} intensité</span>`;
 }
 
 function marketFamilyCards(rows) {
@@ -167,7 +168,7 @@ function marketFamilyCards(rows) {
   return `<div class="market-fam-grid">${groups.map(([market, bucket]) => {
     const chips = [...bucket.subthemes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
       .map(([label, count]) => `<span class="subtheme-chip">${esc(label)}<b>${count}</b></span>`).join("");
-    return `<button class="market-fam-card market-fam-card-link" data-drill-market="${esc(market)}"><header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${bucket.total} faits</b></div></header>${attractivenessBadge(market)}<div class="subtheme-chips">${chips}</div></button>`;
+    return `<button class="market-fam-card market-fam-card-link" data-drill-market="${esc(market)}"><header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${bucket.total} faits</b></div></header>${intensityBadge(market)}<div class="subtheme-chips">${chips}</div></button>`;
   }).join("")}</div>`;
 }
 
@@ -1736,10 +1737,23 @@ function evidenceTypeBadge(type) {
   return `<span class="evidence-type-badge et-${esc(type)}">${esc(EVIDENCE_TYPE_LABELS[type] || type)}</span>`;
 }
 
+// Audit veille §10.2 (30/08/2026) : is_verbatim était déjà renvoyé par l'API mais jamais
+// affiché -- 40 des 71 faits marché "validés" étaient en réalité des notes de lecture saisies
+// à la main (SEED_EVIDENCE, aujourd'hui vidé dans db.py), indistinguables à l'écran d'une
+// citation extraite et vérifiée caractère par caractère. Silencieux dans le cas normal
+// (is_verbatim=1, l'immense majorité) pour ne pas ajouter de bruit visuel à chaque preuve --
+// seul le cas exceptionnel est signalé, même logique que evidence_confirmed===false ailleurs.
+function verbatimBadge(isVerbatim) {
+  if (isVerbatim === 0 || isVerbatim === false) {
+    return `<span class="evidence-type-badge et-manual" title="Note de lecture saisie à la main, pas une citation extraite du site par le pipeline.">Saisie manuelle</span>`;
+  }
+  return "";
+}
+
 async function showProofs(row) {
   const qs=new URLSearchParams({bucket:row.bucket,market:row.market,component:row.component,operation:row.operation});
   const proofs=await api(`/api/market/proofs?${qs}`);
-  document.querySelector("#proof-content").innerHTML=`<p class="eyebrow">${esc(row.market)}</p><h2>${esc(row.component)}</h2><p class="dialog-operation">${esc(row.operation)}</p>${proofs.map(p=>`<article class="proof"><div><strong>${esc(p.actor_name)}</strong><span>${esc(p.industrial_stage)}</span>${evidenceTypeBadge(p.evidence_type)}</div>${p.language?`<small class="source-language">${esc(String(p.language).toUpperCase())}</small>`:''}${p.block_heading?`<small class="block-label">Bloc : ${esc(p.block_heading)}</small>`:''}${[p.laser_process,p.material,p.performance].filter(Boolean).length?`<small class="block-label">${[p.laser_process,p.material,p.performance].filter(Boolean).map(esc).join(' · ')}</small>`:''}${p.relation_strength?`<small class="block-label">Relation : ${esc(p.relation_strength==='direct'?'directe':'contextuelle')}${p.source_role?` · source : ${esc(p.source_role)}`:''}</small>`:''}<blockquote>${esc(p.quote)}</blockquote><a href="${esc(p.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a></article>`).join("")}`;
+  document.querySelector("#proof-content").innerHTML=`<p class="eyebrow">${esc(row.market)}</p><h2>${esc(row.component)}</h2><p class="dialog-operation">${esc(row.operation)}</p>${proofs.map(p=>`<article class="proof"><div><strong>${esc(p.actor_name)}</strong><span>${esc(p.industrial_stage)}</span>${evidenceTypeBadge(p.evidence_type)}${verbatimBadge(p.is_verbatim)}</div>${p.language?`<small class="source-language">${esc(String(p.language).toUpperCase())}</small>`:''}${p.block_heading?`<small class="block-label">Bloc : ${esc(p.block_heading)}</small>`:''}${[p.laser_process,p.material,p.performance].filter(Boolean).length?`<small class="block-label">${[p.laser_process,p.material,p.performance].filter(Boolean).map(esc).join(' · ')}</small>`:''}${p.relation_strength?`<small class="block-label">Relation : ${esc(p.relation_strength==='direct'?'directe':'contextuelle')}${p.source_role?` · source : ${esc(p.source_role)}`:''}</small>`:''}<blockquote>${esc(p.quote)}</blockquote><a href="${esc(p.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a></article>`).join("")}`;
   dialog.classList.remove("wide");
   dialog.showModal();
 }
@@ -1753,7 +1767,7 @@ async function showOfferProofs(offerId) {
     return;
   }
   const first = proofs[0];
-  document.querySelector("#proof-content").innerHTML=`<p class="eyebrow">${esc(first.actor_name)}</p><h2>${esc(first.capability)}</h2><p class="dialog-operation">${esc(offerTypeLabel(first.offer_type))}</p>${proofs.map(p=>`<article class="proof"><div><strong>${esc(p.operation || p.laser_process || p.capability)}</strong><span>${esc(p.industrial_stage || '')}</span>${evidenceTypeBadge(p.evidence_type)}</div>${p.language?`<small class="source-language">${esc(String(p.language).toUpperCase())}</small>`:''}${p.block_heading?`<small class="block-label">Bloc : ${esc(p.block_heading)}</small>`:''}${[p.laser_process,p.material,p.performance].filter(Boolean).length?`<small class="block-label">${[p.laser_process,p.material,p.performance].filter(Boolean).map(esc).join(' · ')}</small>`:''}${p.relation_strength?`<small class="block-label">Relation : ${esc(p.relation_strength==='direct'?'directe':'contextuelle')}${p.source_role?` · source : ${esc(p.source_role)}`:''}</small>`:''}<blockquote>${esc(p.quote)}</blockquote><a href="${esc(p.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a></article>`).join("")}`;
+  document.querySelector("#proof-content").innerHTML=`<p class="eyebrow">${esc(first.actor_name)}</p><h2>${esc(first.capability)}</h2><p class="dialog-operation">${esc(offerTypeLabel(first.offer_type))}</p>${proofs.map(p=>`<article class="proof"><div><strong>${esc(p.operation || p.laser_process || p.capability)}</strong><span>${esc(p.industrial_stage || '')}</span>${evidenceTypeBadge(p.evidence_type)}${verbatimBadge(p.is_verbatim)}</div>${p.language?`<small class="source-language">${esc(String(p.language).toUpperCase())}</small>`:''}${p.block_heading?`<small class="block-label">Bloc : ${esc(p.block_heading)}</small>`:''}${[p.laser_process,p.material,p.performance].filter(Boolean).length?`<small class="block-label">${[p.laser_process,p.material,p.performance].filter(Boolean).map(esc).join(' · ')}</small>`:''}${p.relation_strength?`<small class="block-label">Relation : ${esc(p.relation_strength==='direct'?'directe':'contextuelle')}${p.source_role?` · source : ${esc(p.source_role)}`:''}</small>`:''}<blockquote>${esc(p.quote)}</blockquote><a href="${esc(p.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a></article>`).join("")}`;
   dialog.classList.remove("wide");
   dialog.showModal();
 }

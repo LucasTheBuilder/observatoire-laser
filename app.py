@@ -79,7 +79,7 @@ from firmographics import collect_french_registry
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from openalex import collect_openalex_publications
 from press import collect_press_mentions
-from scoring import compute_confidence_scores, compute_market_attractiveness_scores, compute_threat_scores
+from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 from timeseries import capture_metric_snapshot, list_timeseries_keys, read_timeseries
 
@@ -624,11 +624,16 @@ def list_actors():
         row["actor_name"]
         for row in rows(TECH_DB, "SELECT DISTINCT actor_name FROM documents WHERE actor_name IS NOT NULL")
     }
+    # Audit veille §3.1 (30/08/2026) : ces deux tables ont un review_status (pending/verified/
+    # rejected -- press.py écrit 'pending' explicitement, en documentant qu'un matching par
+    # mot-clé sur un titre d'article est un signal faible) mais rien ne le filtrait ici avant
+    # cette date -- un événement presse jamais relu s'affichait à égalité avec un événement
+    # sourcé CORDIS. 'rejected' est explicitement exclu aussi (jamais affiché après un rejet).
     facts_by_actor: dict[int, list[dict[str, Any]]] = {}
-    for row in rows(ACTORS_DB, "SELECT actor_id,dimension,value,source_url FROM actor_facts ORDER BY dimension,id"):
+    for row in rows(ACTORS_DB, "SELECT actor_id,dimension,value,source_url FROM actor_facts WHERE review_status='verified' ORDER BY dimension,id"):
         facts_by_actor.setdefault(row["actor_id"], []).append(row)
     events_by_actor: dict[int, list[dict[str, Any]]] = {}
-    for row in rows(ACTORS_DB, "SELECT actor_id,event_type,description,event_date,source_url FROM actor_events ORDER BY event_date DESC,id"):
+    for row in rows(ACTORS_DB, "SELECT actor_id,event_type,description,event_date,source_url FROM actor_events WHERE review_status='verified' ORDER BY event_date DESC,id"):
         events_by_actor.setdefault(row["actor_id"], []).append(row)
     # Scores séparés (audit Horizon 2 #14, voir scoring.py) : confidence_score répond à "peut-on
     # faire confiance aux données de cette fiche" (distinct de completeness_score, qui ne
@@ -735,10 +740,12 @@ def timeseries(
 
 @app.get("/api/market-scores")
 def market_scores():
-    """Score d'attractivité par marché (audit Horizon 2 #14, voir scoring.py) : traction
-    prouvée, pipeline radar, nombre d'acteurs actifs, part de faits en stade Production/
-    Industrialisation. Trié du plus attractif au moins attractif."""
-    return compute_market_attractiveness_scores()
+    """Score d'intensité concurrentielle par marché (audit Horizon 2 #14, voir scoring.py ;
+    renommé depuis "attractivité" le 30/08/2026, audit veille §10.4) : traction prouvée,
+    pipeline radar, nombre d'acteurs actifs, part de faits en stade Production/Industrialisation.
+    Trié du plus disputé au moins disputé -- ce n'est PAS une mesure d'attractivité business,
+    seulement de l'offre concurrente déjà présente."""
+    return compute_competitive_intensity_scores()
 
 
 @app.post("/api/timeseries/capture")

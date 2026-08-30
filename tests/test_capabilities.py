@@ -76,6 +76,30 @@ class ExtractCapabilitiesTests(unittest.TestCase):
         fields = _extract_capabilities(_pages("System A: 290 fs pulse duration.", "System B: 900 fs pulse duration."))
         self.assertEqual(290.0, fields["pulse_duration_fs"])
 
+    def test_pulse_duration_outside_audit_range_is_rejected(self):
+        # Audit veille §10.12 (0.8), 100-1500fs. Values outside are not written at all rather
+        # than kept -- silence is preferable to a number nobody can defend.
+        too_short = _extract_capabilities(_pages("Ultra-short 30 fs pulse duration."))
+        too_long = _extract_capabilities(_pages("System operates at 5000 fs pulse duration."))
+        self.assertIsNone(too_short["pulse_duration_fs"])
+        self.assertIsNone(too_long["pulse_duration_fs"])
+
+    def test_wavelength_far_from_any_known_laser_line_is_rejected(self):
+        # Audit veille §9.4, real production example: an actor's page yielded
+        # [200, 206, 250, 257, 258, 300, 330, 343, 515, 1030, 1064, 2000] -- only
+        # 257/343/515/1030/1064 are plausible ultrafast laser lines, the rest match no known
+        # gain-medium fundamental or harmonic.
+        fields = _extract_capabilities(_pages(
+            "Laser wavelengths available: 200 nm, 206 nm, 250 nm, 258 nm, 300 nm, 330 nm, "
+            "343 nm, 515 nm, 1030 nm, 1064 nm, 2000 nm."
+        ))
+        self.assertEqual([258, 343, 515, 1030, 1064], fields["wavelengths_nm"])
+
+    def test_wavelength_within_tolerance_of_a_known_line_is_accepted(self):
+        # 258nm is within 5nm of the real 257nm (4th harmonic of 1030nm) line.
+        fields = _extract_capabilities(_pages("Laser output at 258 nm."))
+        self.assertEqual([258], fields["wavelengths_nm"])
+
     def test_tolerance_uses_plus_minus_marker(self):
         fields = _extract_capabilities(_pages("Positioning accuracy of ±2 µm on all axes."))
         self.assertEqual(2.0, fields["tolerance_um"])
@@ -87,17 +111,29 @@ class ExtractCapabilitiesTests(unittest.TestCase):
         self.assertEqual(8.0, with_context["min_feature_size_um"])
         self.assertIsNone(without_context["min_feature_size_um"])
 
+    def test_feature_size_outside_audit_range_is_rejected(self):
+        # Audit veille §10.12 (0.8), 0.5-200µm.
+        too_small = _extract_capabilities(_pages("Minimum feature size achievable: 0.05 µm."))
+        too_large = _extract_capabilities(_pages("Minimum feature size achievable: 500 µm."))
+        self.assertIsNone(too_small["min_feature_size_um"])
+        self.assertIsNone(too_large["min_feature_size_um"])
+        plausible = _extract_capabilities(_pages("Minimum feature size achievable: 10 µm."))
+        self.assertEqual(10.0, plausible["min_feature_size_um"])
+
     def test_part_size_requires_context_word_and_takes_largest(self):
         fields = _extract_capabilities(_pages("X-Y travel of 300 mm.", "X-Y travel up to 600 mm on the large-format stage."))
         self.assertEqual(600.0, fields["max_part_size_mm"])
 
     def test_implausible_part_size_for_micromachining_is_rejected(self):
-        # Audit v8 §2.4, real production example: Femtika max_part_size_mm=2680 (2.68 m) was
-        # kept by the old 5000mm bound despite not being plausible for this segment.
+        # Audit veille §9.4/§10.12, real production examples: Femtika max_part_size_mm=2680
+        # (2.68 m) and Oxford Lasers 983mm were both kept by the old 1500mm bound despite not
+        # being plausible for this segment -- tightened to 600mm on 30/08/2026.
         fields = _extract_capabilities(_pages("Work envelope up to 2680 mm for large panels."))
         self.assertIsNone(fields["max_part_size_mm"])
-        plausible = _extract_capabilities(_pages("Work envelope up to 900 mm for large panels."))
-        self.assertEqual(900.0, plausible["max_part_size_mm"])
+        fields = _extract_capabilities(_pages("Work envelope up to 983 mm for large panels."))
+        self.assertIsNone(fields["max_part_size_mm"])
+        plausible = _extract_capabilities(_pages("Work envelope up to 300 mm for large panels."))
+        self.assertEqual(300.0, plausible["max_part_size_mm"])
 
     def test_throughput_pattern_and_largest_kept(self):
         fields = _extract_capabilities(_pages("Standard line: 1200 parts/hour.", "Fast line: 3000 parts per hour."))

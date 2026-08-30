@@ -153,5 +153,64 @@ class ListActorsCompletenessIntegrationTests(unittest.TestCase):
             self.assertGreaterEqual(actor["completeness_present"], 1)
 
 
+class ActorFactsEventsReviewStatusFilterTests(unittest.TestCase):
+    """Audit veille §3.1 (30/08/2026) : press.py crée ses actor_events avec review_status=
+    'pending' en documentant explicitement pourquoi (matching par mot-clé = signal faible),
+    mais /api/actors les lisait sans filtrer -- un événement jamais relu s'affichait à égalité
+    avec un événement sourcé CORDIS ('verified'). Même défaut sur actor_facts."""
+
+    def test_pending_and_rejected_facts_and_events_are_excluded_from_the_fiche(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+            market_db = Path(tmp) / "market.db"
+            tech_db = Path(tmp) / "technology.db"
+            with (
+                patch.object(dbmod, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "MARKET_DB", market_db),
+                patch.object(dbmod, "TECH_DB", tech_db),
+            ):
+                dbmod.init_databases()
+                with dbmod.connect(actors_db) as db:
+                    db.execute("DELETE FROM actors")
+                actor_id = dbmod.create_actor("Review Status Actor", "France", "Test", "https://review.example/", priority=False)
+                stamp = dbmod.utc_now()
+                with dbmod.connect(actors_db) as db:
+                    db.execute(
+                        "INSERT INTO actor_facts(actor_id,dimension,value,review_status,created_at) VALUES(?,?,?,?,?)",
+                        (actor_id, "certification", "ISO 9001 (verified)", "verified", stamp),
+                    )
+                    db.execute(
+                        "INSERT INTO actor_facts(actor_id,dimension,value,review_status,created_at) VALUES(?,?,?,?,?)",
+                        (actor_id, "certification", "ISO 9001 (pending)", "pending", stamp),
+                    )
+                    db.execute(
+                        "INSERT INTO actor_events(actor_id,event_type,description,review_status,created_at) VALUES(?,?,?,?,?)",
+                        (actor_id, "press_mention", "Verified event", "verified", stamp),
+                    )
+                    db.execute(
+                        "INSERT INTO actor_events(actor_id,event_type,description,review_status,created_at) VALUES(?,?,?,?,?)",
+                        (actor_id, "press_mention", "Pending press mention", "pending", stamp),
+                    )
+                    db.execute(
+                        "INSERT INTO actor_events(actor_id,event_type,description,review_status,created_at) VALUES(?,?,?,?,?)",
+                        (actor_id, "press_mention", "Rejected press mention", "rejected", stamp),
+                    )
+
+            with (
+                patch.object(appmod, "ACTORS_DB", actors_db),
+                patch.object(appmod, "MARKET_DB", market_db),
+                patch.object(appmod, "TECH_DB", tech_db),
+                patch.object(scoring, "ACTORS_DB", actors_db),
+                patch.object(scoring, "MARKET_DB", market_db),
+            ):
+                actors = appmod.list_actors()
+
+            actor = next(a for a in actors if a["name"] == "Review Status Actor")
+            fact_values = {f["value"] for f in actor["facts"]}
+            event_descriptions = {e["description"] for e in actor["events"]}
+            self.assertEqual({"ISO 9001 (verified)"}, fact_values)
+            self.assertEqual({"Verified event"}, event_descriptions)
+
+
 if __name__ == "__main__":
     unittest.main()

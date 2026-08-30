@@ -1,4 +1,4 @@
-"""Scores séparés confiance / menace / attractivité marché (audit Horizon 2 #14 : "Créer
+"""Scores séparés confiance / menace / intensité concurrentielle (audit Horizon 2 #14 : "Créer
 scores séparés : confiance, menace, attractivité marché").
 
 Distinct du score de complétude déjà en place (app._completeness) : celui-ci mesure la
@@ -21,15 +21,35 @@ ci-dessous répondent chacun à une question différente :
   la vélocité récente (nouveaux faits/offres sur les 60 derniers jours -- signal d'accélération,
   cohérent avec BACKFILL_THRESHOLD_DAYS de db.py). Un acteur de référence interne
   (is_reference=1) n'est structurellement jamais une menace : forcé à 0.
-- market_attractiveness_score (par marché, 0-100) : ce marché mérite-t-il de l'attention
-  business ? Combine la traction prouvée (faits existants), le pipeline (faits radar), le
-  nombre d'acteurs actifs dessus, et la part de faits en stade Production/Industrialisation
-  (proximité du "passage prototype -> production" que l'audit citait comme mesure manquante).
+- competitive_intensity_score (par marché, 0-100 -- renommé depuis "market_attractiveness" le
+  30/08/2026, audit veille §10.4) : combien de concurrents se disputent déjà ce marché ? Combine
+  la traction prouvée (faits existants), le pipeline (faits radar), le nombre d'acteurs actifs
+  dessus, et la part de faits en stade Production/Industrialisation. L'audit a raison sur le
+  fond : ce que ce score mesure est une INTENSITÉ concurrentielle (un marché encombré = score
+  haut), pas une attractivité business -- rien ici ne vient de la taille du marché, de sa
+  croissance ou de la demande. Le nom disait le contraire de ce qu'il mesurait ; corrigé plutôt
+  que ré-interprété, en attendant qu'un vrai score d'attractivité existe (chantier §4.B,
+  market_sizing + signaux de demande).
 
 Chaque score est recalculé à la volée depuis les données déjà validées (jamais stocké, jamais
 saisi à la main) -- il ne peut donc jamais dériver des faits réels, même logique que
 app._completeness/_coverage_level/_freshness_factor, dont les seuils ci-dessous s'inspirent
 directement (des choix éditoriaux documentés, pas une mesure physique).
+
+Audit veille du 30/08/2026 (§10.2, §10.3) a trouvé deux défauts mesurés sur les données réelles,
+corrigés ici :
+- **is_verbatim** n'était pas exclu du calcul : 40 des 71 faits marché "validés" étaient en
+  réalité des notes de lecture saisies à la main (`is_verbatim=0`, `SEED_EVIDENCE` -- aujourd'hui
+  une liste vide dans db.py -- ne peut donc plus les reproduire), et gonflaient les trois scores
+  sans qu'aucun flag ne les distingue d'un fait réellement extrait. Chaque requête ci-dessous
+  filtre maintenant `is_verbatim=1` en plus de `fact_status='validated'`/`review_status='accepted'`.
+- **La vélocité mesurait la date d'INSERTION, pas la date de PUBLICATION**, et le corpus entier
+  tenait dans une seule fenêtre de collecte de 7 jours (23->30 août 2026) : `_is_recent` lisait
+  `created_at`, alors que la latence réelle mesurée sur les offres datées va jusqu'à p90 = 1636
+  jours -- une page de plusieurs années comptait comme "signal récent de vélocité concurrentielle".
+  `_is_recent` lit maintenant `COALESCE(source_date, created_at)`, et le bonus de vélocité est
+  neutralisé (forcé à 0) tant que `metric_snapshots` ne couvre qu'une seule période : avec un
+  seul point de mesure, "récent" ne peut être distingué de "vu pour la première fois".
 """
 
 from __future__ import annotations
@@ -46,16 +66,26 @@ def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
 
 
-def _is_recent(created_at: str | None, now: datetime) -> bool:
-    if not created_at:
+def _is_recent(effective_date: str | None, now: datetime) -> bool:
+    """``effective_date`` should already be COALESCE(source_date, created_at) at the call site
+    -- see the module docstring for why created_at alone overstates velocity."""
+    if not effective_date:
         return False
     try:
-        stamp = datetime.fromisoformat(created_at)
+        stamp = datetime.fromisoformat(effective_date)
     except ValueError:
         return False
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
     return (now - stamp.astimezone(timezone.utc)).days <= RECENT_WINDOW_DAYS
+
+
+def _single_collection_window(db) -> bool:
+    """True s'il n'existe encore qu'une seule période dans metric_snapshots (ou aucune) --
+    voir le docstring du module : le bonus de vélocité de compute_threat_scores n'a aucun sens
+    tant qu'il n'y a rien à comparer dans le temps."""
+    count = db.execute("SELECT COUNT(DISTINCT period) FROM metric_snapshots").fetchone()[0]
+    return int(count) <= 1
 
 
 def compute_confidence_scores() -> dict[str, float | None]:
@@ -67,17 +97,20 @@ def compute_confidence_scores() -> dict[str, float | None]:
         stats.setdefault(actor_name, {"validated": 0, "total": 0, "verbatim": 0, "cited": 0, "published": 0, "dated": 0})[field] += amount
 
     with connect(MARKET_DB) as db:
-        for row in db.execute("SELECT actor_name,fact_status,date_confidence FROM evidence WHERE evidence_kind='market_application'"):
+        # is_verbatim=1 required to count as "validated" (audit veille §10.2, voir le docstring
+        # du module) : un fait/offre saisi à la main plutôt qu'extrait ne doit jamais gonfler la
+        # confiance qu'on peut avoir dans le pipeline lui-même.
+        for row in db.execute("SELECT actor_name,fact_status,date_confidence,is_verbatim FROM evidence WHERE evidence_kind='market_application'"):
             bump(row["actor_name"], "total")
-            if row["fact_status"] == "validated":
+            if row["fact_status"] == "validated" and row["is_verbatim"]:
                 bump(row["actor_name"], "validated")
                 if row["date_confidence"] is not None:
                     bump(row["actor_name"], "dated")
                     if row["date_confidence"] == "published":
                         bump(row["actor_name"], "published")
-        for row in db.execute("SELECT actor_name,review_status,date_confidence FROM offers"):
+        for row in db.execute("SELECT actor_name,review_status,date_confidence,is_verbatim FROM offers"):
             bump(row["actor_name"], "total")
-            if row["review_status"] == "accepted":
+            if row["review_status"] == "accepted" and row["is_verbatim"]:
                 bump(row["actor_name"], "validated")
                 if row["date_confidence"] is not None:
                     bump(row["actor_name"], "dated")
@@ -140,15 +173,24 @@ def compute_threat_scores() -> dict[str, float]:
         evidence_by_actor.setdefault(actor_name, {"demonstrated": 0, "recent": 0})[field] += 1
 
     with connect(MARKET_DB) as db:
+        neutralize_velocity = _single_collection_window(db)
+        # is_verbatim=1 requis (audit veille §10.2, voir le docstring du module) : mêmes 40
+        # faits de seed qui gonflaient confidence_score gonflent aussi celui-ci sans le filtre.
+        # COALESCE(source_date,created_at) (§10.3) : la latence réelle observée va jusqu'à
+        # p90=1636 jours sur les offres datées -- created_at seul dit seulement "quand nous
+        # l'avons vu", pas "quand c'est devenu vrai".
         for row in db.execute(
-            "SELECT actor_name,created_at FROM evidence WHERE fact_status='validated' AND evidence_kind='market_application'"
+            """SELECT actor_name,COALESCE(source_date,created_at) AS effective_date FROM evidence
+               WHERE fact_status='validated' AND evidence_kind='market_application' AND is_verbatim=1"""
         ):
             bump(row["actor_name"], "demonstrated")
-            if _is_recent(row["created_at"], now):
+            if _is_recent(row["effective_date"], now):
                 bump(row["actor_name"], "recent")
-        for row in db.execute("SELECT actor_name,created_at FROM offers WHERE review_status='accepted'"):
+        for row in db.execute(
+            "SELECT actor_name,COALESCE(source_date,created_at) AS effective_date FROM offers WHERE review_status='accepted' AND is_verbatim=1"
+        ):
             bump(row["actor_name"], "demonstrated")
-            if _is_recent(row["created_at"], now):
+            if _is_recent(row["effective_date"], now):
                 bump(row["actor_name"], "recent")
 
     scores: dict[str, float] = {}
@@ -161,21 +203,36 @@ def compute_threat_scores() -> dict[str, float]:
         # Capped, pas linéaire à l'infini : au-delà de 15 faits démontrés / 5 faits récents,
         # un fait de plus ne rend pas l'acteur structurellement plus menaçant.
         demonstrated_bonus = min(25, demo["demonstrated"] * 1.5)
-        velocity_bonus = min(20, demo["recent"] * 4)
+        # Neutralisé tant qu'une seule période de collecte existe (voir _single_collection_window
+        # ci-dessus) : sans deuxième fenêtre à comparer, "récent" ne peut pas être distingué de
+        # "vu pour la première fois" -- le bonus vaudrait 20 pour quasi tout acteur ayant >= 5
+        # faits, 0 bit d'information pour 20 points de score (audit veille §10.3.b).
+        velocity_bonus = 0 if neutralize_velocity else min(20, demo["recent"] * 4)
         inactive_penalty = 15 if not actor["active"] else 0
         scores[actor_name] = round(_clamp(base + demonstrated_bonus + velocity_bonus - inactive_penalty), 1)
     return scores
 
 
-def compute_market_attractiveness_scores() -> list[dict[str, Any]]:
-    """[{market, attractiveness_score, existing, radar, actors_count, production_share}], trié
-    du plus attractif au moins attractif. Un marché absent de evidence n'apparaît simplement
-    pas (rien à évaluer), plutôt qu'un score fabriqué à 0."""
+def compute_competitive_intensity_scores() -> list[dict[str, Any]]:
+    """[{market, intensity_score, existing, radar, actors_count, production_share}], trié du
+    plus disputé au moins disputé. Un marché absent de evidence n'apparaît simplement pas (rien
+    à évaluer), plutôt qu'un score fabriqué à 0.
+
+    Renommé depuis compute_market_attractiveness_scores (audit veille §10.4, 30/08/2026) : ce
+    score est composé à 100% de mesures de l'offre concurrente (faits existants/radar, nombre
+    d'acteurs, part en stade Production) -- aucune composante ne vient de la demande, de la
+    taille du marché ou de sa croissance. Un marché encombré y ressort comme "attractif", ce qui
+    est l'inverse de l'information utile pour du business development. Le nom mesure maintenant
+    ce que le calcul mesure réellement ; un vrai score d'attractivité reste à construire séparément
+    une fois market_sizing et les signaux de demande disponibles (chantier §4.B)."""
     with connect(MARKET_DB) as db:
+        # is_verbatim=1 (audit veille §10.2) : ce score était calculé sur une base dont 56% des
+        # faits (marché "Médical" en tête) étaient de la donnée saisie à la main, sélectionnée
+        # selon des intuitions de marché déjà formées -- la boucle se refermait sur elle-même.
         market_rows = db.execute(
             """SELECT market,bucket,industrial_stage,actor_name FROM evidence
                WHERE market IS NOT NULL AND market<>'' AND fact_status='validated'
-               AND evidence_kind='market_application'"""
+               AND evidence_kind='market_application' AND is_verbatim=1"""
         ).fetchall()
 
     by_market: dict[str, dict[str, Any]] = {}
@@ -200,11 +257,11 @@ def compute_market_attractiveness_scores() -> list[dict[str, Any]]:
         score = 100 * (0.35 * existing_component + 0.15 * radar_component + 0.25 * actors_component + 0.25 * production_share)
         results.append({
             "market": market,
-            "attractiveness_score": round(_clamp(score), 1),
+            "intensity_score": round(_clamp(score), 1),
             "existing": entry["existing"],
             "radar": entry.get("radar", 0),
             "actors_count": len(entry["actors"]),
             "production_share": round(production_share, 2),
         })
-    results.sort(key=lambda item: item["attractiveness_score"], reverse=True)
+    results.sort(key=lambda item: item["intensity_score"], reverse=True)
     return results

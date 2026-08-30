@@ -41,6 +41,8 @@ dialog::backdrop{background:#102734a8;transition:background-color .28s allow-dis
 .evidence-type-badge.et-proof{background:#e9f5f3;color:var(--teal)}
 .evidence-type-badge.et-claim{background:#eef2f1;color:#5c7986}
 .evidence-type-badge.et-third_party{background:#f0ecfa;color:#6b4fb3}
+/* Audit veille §10.2 : distingue une note de lecture saisie à la main d'une citation extraite. */
+.evidence-type-badge.et-manual{background:#fdf3ee;color:#a8622f}
 .proof blockquote{margin:14px 0;color:#4d5a63;font:italic 14px/1.6 Georgia,serif}
 .proof a{color:var(--teal);font-size:12px;text-decoration:none}
 

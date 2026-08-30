@@ -114,17 +114,45 @@ _PART_SIZE_CONTEXT = (
 # faisceau (résolution d'un axe, épaisseur d'un revêtement...).
 _WAVELENGTH_CONTEXT = ("laser", "wavelength", "longueur d'onde", "longueur d onde", "wavelengths")
 
-_WAVELENGTH_MIN_NM = 200
-_WAVELENGTH_MAX_NM = 2200
-_PULSE_MIN_FS = 5
-_PULSE_MAX_FS = 100_000
-# Bornes de plausibilité pour le micro-usinage laser (audit v8 §2.4) : une "taille de pièce
-# max." de plusieurs mètres n'a plus rien de "micro" -- exemple concret trouvé en production,
-# Femtika max_part_size_mm=2680 (2,68 m), retenu par l'ancienne borne (5000mm) sans être
-# vérifiable ni plausible pour ce segment. 1500mm reste généreux (verre/panneaux grand format)
-# tout en excluant ce type de valeur aberrante.
-_FEATURE_SIZE_MAX_UM = 5000
-_PART_SIZE_MAX_MM = 1500
+# Audit veille §9.4/§10.12 (30/08/2026) : la borne de plage seule (200-2200nm) ne suffisait pas
+# -- un acteur en production porte [200, 206, 250, 257, 258, 300, 330, 343, 515, 1030, 1064,
+# 2000], et seuls 257/343/515/1030/1064 sont des raies plausibles d'un laser ultrafast
+# industriel ; 206/250/300/330/2000 ne correspondent à aucune source courante. Restreint aux
+# raies connues (fondamentale + harmoniques des milieux à gain les plus courants en laser
+# ultrafast industriel : Yb/Nd, Er, Ti:Saphir), ±5nm de tolérance pour l'arrondi/la mesure du
+# site -- pas une liste exhaustive de toute raie laser existante, seulement de celles qu'on peut
+# raisonnablement attendre sur ce segment.
+_KNOWN_LASER_LINES_NM = (
+    # Fondamentale Yb/Nd -- la plus répandue en laser ultrafast industriel
+    1030, 1035, 1040, 1045, 1053, 1064, 1080,
+    # Harmonique 2 (vert)
+    515, 517, 520, 522, 526, 527, 532, 540,
+    # Harmonique 3 (UV proche)
+    343, 345, 347, 349, 351, 355, 360,
+    # Harmonique 4 (UV profond)
+    257, 258, 261, 262, 266,
+    # Er (télécom/fibre)
+    1550, 1560, 1565,
+    # Ti:Saphir (recherche, certains systèmes industriels)
+    780, 790, 800, 810,
+)
+_LASER_LINE_TOLERANCE_NM = 5
+# Durée d'impulsion (audit §10.12, 0,8) : 100-1500 fs. Volontairement le chiffre proposé par
+# l'audit tel quel plutôt qu'un ajustement sur ma seule mémoire de valeurs vues plus tôt cette
+# session (25-50 fs chez certains acteurs) -- ces valeurs n'avaient jamais été recroisées avec
+# la plage réellement annoncée par l'acteur lui-même (ex: Fraunhofer ILT annonce "100 fs à 100
+# ns" comme plage de sa flotte, pas 25 fs), donc pas une base plus fiable que la recommandation
+# de l'audit pour trancher.
+_PULSE_MIN_FS = 100
+_PULSE_MAX_FS = 1500
+# Bornes de plausibilité pour le micro-usinage laser (audit v8 §2.4, resserré par l'audit veille
+# §9.4/§10.12 le 30/08/2026) : une "taille de pièce max." de plusieurs mètres, ou une "taille de
+# motif minimale" de plusieurs mm, n'ont plus rien de "micro" -- exemples concrets trouvés en
+# production, Femtika max_part_size_mm=2680 (2,68 m) et Oxford Lasers 983mm, tous deux retenus
+# par l'ancienne borne (1500mm) sans être vérifiables ni plausibles pour ce segment.
+_FEATURE_SIZE_MIN_UM = 0.5
+_FEATURE_SIZE_MAX_UM = 200
+_PART_SIZE_MAX_MM = 600
 
 # §3.2 : "Certification et capacité industrielle sont les deux critères d'achat de ce segment
 # ... 9 certifications en base." Chaque code est un motif dédié (pas une regex générique type
@@ -197,7 +225,7 @@ def _extract_capabilities(page_texts: list[tuple[str, str]]) -> dict[str, Any]:
         if _contains_any(text, _WAVELENGTH_CONTEXT):
             for match in _WAVELENGTH_RE.finditer(text):
                 nm_value = int(match.group(1))
-                if _WAVELENGTH_MIN_NM <= nm_value <= _WAVELENGTH_MAX_NM:
+                if any(abs(nm_value - line) <= _LASER_LINE_TOLERANCE_NM for line in _KNOWN_LASER_LINES_NM):
                     wavelengths.add(nm_value)
                     wavelength_source = wavelength_source or source_url
         for match in _PULSE_FS_RE.finditer(text):
@@ -217,7 +245,7 @@ def _extract_capabilities(page_texts: list[tuple[str, str]]) -> dict[str, Any]:
                 if any(match.start() < end and match.end() > start for start, end in tolerance_spans):
                     continue
                 value = _parse_number(match.group(1))
-                if value is not None and 0 < value <= _FEATURE_SIZE_MAX_UM:
+                if value is not None and _FEATURE_SIZE_MIN_UM <= value <= _FEATURE_SIZE_MAX_UM:
                     feature_candidates.append((value, source_url))
         if _contains_any(text, _PART_SIZE_CONTEXT):
             for match in _MM_VALUE_RE.finditer(text):
