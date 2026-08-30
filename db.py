@@ -726,6 +726,18 @@ def restore_seed_evidence() -> int:
     return inserted
 
 
+def _reconcile_orphaned_runs(db: sqlite3.Connection) -> None:
+    """Audit veille §9.2 (30/08/2026) : si le process meurt en cours de collecte (crash, OOM,
+    redéploiement en plein run), la ligne collection_runs correspondante reste à status='running'
+    pour toujours -- _run_job (app.py) ne met à jour cette ligne qu'à la FIN normale d'un run,
+    jamais si l'exécution est interrompue avant. Constaté en production : le run n°16 était
+    resté à status='running' depuis le 30/08 13:03. Appelé à chaque démarrage (voir
+    init_databases, une fois par base -- les 3 bases ont chacune leur propre collection_runs) :
+    toute ligne encore 'running' au moment où ce code s'exécute ne peut être qu'un run mort
+    d'un process précédent, jamais le run en cours (celui-ci ne s'insère qu'après ce point)."""
+    db.execute("UPDATE collection_runs SET status='interrupted' WHERE status='running'")
+
+
 def init_databases() -> None:
     """Crée/actualise le schéma des 3 bases (appelée à chaque démarrage, voir app.py: lifespan).
 
@@ -1070,6 +1082,7 @@ def init_databases() -> None:
                    VALUES(?,?,?,?) ON CONFLICT(actor_id) DO UPDATE SET strategy=excluded.strategy""",
                 (actor_id, "adaptive" if priority else "generic", "pending", "bootstrap"),
             )
+        _reconcile_orphaned_runs(db)
 
     with connect(MARKET_DB) as db:
         db.executescript(
@@ -1361,6 +1374,7 @@ def init_databases() -> None:
                 ON offers(date_confidence,created_at);
             """
         )
+        _reconcile_orphaned_runs(db)
 
     with connect(TECH_DB) as db:
         db.executescript(
@@ -1444,6 +1458,7 @@ def init_databases() -> None:
                 ON documents(date_confidence,created_at);
             """
         )
+        _reconcile_orphaned_runs(db)
 
 
 def _backup_dir() -> Path:

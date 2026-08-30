@@ -39,6 +39,7 @@ import json
 import os
 import threading
 import webbrowser
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -957,6 +958,91 @@ def scheduler_status():
         if job and job.next_run_time:
             next_run = job.next_run_time.isoformat()
     return {"enabled": SCHEDULER_ENABLED, "cron": SCHEDULER_CRON if SCHEDULER_ENABLED else None, "next_run_at": next_run}
+
+
+# Santé de collecte (audit veille §9.2, Lot 1 item 1.5, 30/08/2026) : health_score/failure_count
+# existaient déjà (site_profiles) mais rien ne les exposait au-delà de /api/profiles (des
+# nombres bruts, pas une vue triée par gravité), et aucune vue ne montrait le taux d'erreur par
+# run ni la cause dominante des échecs. Cas trouvé en production : Workshop of Photonics, le
+# 2e acteur le mieux documenté de la base, échouait aussi le plus (72 échecs 403 Forbidden) sans
+# que rien ne le signale à la lecture de sa fiche.
+_COLLECTION_RUN_SOURCES: tuple[tuple[str, str], ...] = (
+    ("actors", "collection_runs"),
+    ("market", "collection_runs"),
+    ("technology", "collection_runs"),
+)
+
+
+@app.get("/api/collection-health")
+def collection_health():
+    """Vue de santé de collecte par acteur (health_score/failure_count/dernière erreur, triés du
+    pire au meilleur) et historique récent des runs des 3 collectes avec leur taux d'erreur."""
+    with connect(ACTORS_DB) as db:
+        profiles = db.execute(
+            """SELECT a.id,a.name,a.priority,p.health_score,p.failure_count,p.last_error,
+                      p.status AS profile_status,p.needs_reprofile
+               FROM actors a LEFT JOIN site_profiles p ON p.actor_id=a.id
+               WHERE a.active=1 ORDER BY COALESCE(p.health_score,1) ASC,a.name"""
+        ).fetchall()
+        source_rows = db.execute(
+            "SELECT actor_id,last_http_status FROM actor_sources WHERE active=1 AND last_http_status IS NOT NULL"
+        ).fetchall()
+
+    errors_by_actor: dict[int, Counter] = defaultdict(Counter)
+    total_by_actor: dict[int, int] = defaultdict(int)
+    for row in source_rows:
+        actor_id = row["actor_id"]
+        total_by_actor[actor_id] += 1
+        status = row["last_http_status"]
+        if not (200 <= status < 400):
+            errors_by_actor[actor_id][status] += 1
+
+    actors = []
+    for p in profiles:
+        actor_id = p["id"]
+        errors = errors_by_actor.get(actor_id, Counter())
+        sources_total = total_by_actor.get(actor_id, 0)
+        sources_failed = sum(errors.values())
+        top_error = errors.most_common(1)[0] if errors else None
+        actors.append({
+            "actor_id": actor_id,
+            "name": p["name"],
+            "priority": bool(p["priority"]),
+            "health_score": p["health_score"],
+            "failure_count": p["failure_count"],
+            "last_error": p["last_error"],
+            "profile_status": p["profile_status"],
+            "needs_reprofile": bool(p["needs_reprofile"]),
+            "sources_total": sources_total,
+            "sources_failed": sources_failed,
+            "error_rate": round(sources_failed / sources_total, 2) if sources_total else 0.0,
+            "top_error_status": top_error[0] if top_error else None,
+            "top_error_count": top_error[1] if top_error else None,
+        })
+
+    recent_runs = []
+    for source, table in _COLLECTION_RUN_SOURCES:
+        db_path = {"actors": ACTORS_DB, "market": MARKET_DB, "technology": TECH_DB}[source]
+        for run in rows(
+            db_path,
+            f"SELECT id,started_at,finished_at,status,scanned,errors,message FROM {table} ORDER BY id DESC LIMIT 10",
+        ):
+            scanned = run["scanned"] or 0
+            errors = run["errors"] or 0
+            recent_runs.append({
+                "source": source,
+                "id": run["id"],
+                "started_at": run["started_at"],
+                "finished_at": run["finished_at"],
+                "status": run["status"],
+                "scanned": scanned,
+                "errors": errors,
+                "error_rate": round(errors / scanned, 2) if scanned else 0.0,
+                "message": run["message"],
+            })
+    recent_runs.sort(key=lambda item: item["started_at"] or "", reverse=True)
+
+    return {"actors": actors, "recent_runs": recent_runs[:20]}
 
 
 @app.get("/api/profiles/{actor_id}/sources")
