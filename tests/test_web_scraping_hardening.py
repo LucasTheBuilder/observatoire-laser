@@ -164,7 +164,12 @@ class FakeResponse304:
         self.headers: dict[str, str] = {}
 
     def raise_for_status(self):
-        return None
+        # Mirrors real httpx: raise_for_status() raises for ANY non-2xx, 304 included (a real
+        # production run caught _fetch() not accounting for this -- a stub that always no-ops
+        # here would hide the exact same regression again).
+        if not (200 <= self.status_code < 300):
+            import httpx as _httpx
+            raise _httpx.HTTPStatusError("fake non-2xx", request=None, response=self)  # type: ignore[arg-type]
 
 
 class FakeClientConditional:
@@ -204,7 +209,10 @@ class ConditionalGetCrawlIntegrationTests(unittest.TestCase):
             self.headers = {"etag": etag} if status_code == 200 else {}
 
         def raise_for_status(self):
-            return None
+            # Same real-httpx behavior as FakeResponse304 above -- see its comment.
+            if not (200 <= self.status_code < 300):
+                import httpx as _httpx
+                raise _httpx.HTTPStatusError("fake non-2xx", request=None, response=self)  # type: ignore[arg-type]
 
     class FakeClient:
         page_text = (

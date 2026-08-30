@@ -212,7 +212,12 @@ def _fetch(client: httpx.Client, url: str, *, headers: dict[str, str] | None = N
             time.sleep(2 ** attempt)
             attempt += 1
             continue
-        response.raise_for_status()
+        # httpx.raise_for_status() treats ANY non-2xx as an error, 304 included ("Redirect
+        # response" per its own error_types) -- confirmed against real sites (ALPHANOV, KMLT)
+        # after this module first shipped conditional GET, where every 304 was being counted
+        # as a crawl error instead of the valid "nothing changed" outcome it is.
+        if response.status_code != 304:
+            response.raise_for_status()
         return response
 
 
