@@ -20,6 +20,14 @@ registre officiel ou une affiliation de publication scientifique. Chaque événe
 entre donc avec ``review_status='pending'`` -- jamais publié tel quel sans relecture humaine.
 Les noms d'acteurs trop courts/génériques (voir MIN_ACTOR_NAME_LENGTH) sont exclus du matching
 pour éviter un faux positif sur un mot ordinaire dans un titre d'article.
+
+Near-duplicate (revue web-scraping, priorité #5) : le dédoublonnage sur (actor_id, source_url)
+suffit pour les pages acteurs (une URL = une page), mais pas ici -- un même communiqué repris
+par Laser Focus World ET Photonics Spectra a deux source_url distinctes pour le même événement
+réel. _is_near_duplicate() compare le nouveau titre aux titres déjà en base pour cet acteur par
+similarité de Jaccard sur des trigrammes de mots (résistant à une reformulation légère entre
+deux médias, contrairement à une comparaison de chaînes exactes) ; au-dessus du seuil, l'item
+est considéré comme déjà couvert et n'est pas réinséré.
 """
 
 from __future__ import annotations
@@ -112,6 +120,51 @@ SIGNAL_KEYWORDS: dict[str, tuple[str, ...]] = {
 SIGNAL_EVENT_LABELS = {"patent": "Brevet", "investment": "Investissement", "recruitment": "Recrutement", "press_mention": "Mention presse"}
 
 
+# Near-duplicate (priorité #5) : trigrammes de mots + Jaccard, pas d'égalité de chaîne exacte
+# (voir le docstring du module). Le seuil est un choix éditorial documenté, pas une mesure.
+# 0.45 est calibré sur un exemple réaliste : "ALPHANOV unveils new femtosecond laser platform"
+# vs "ALPHANOV unveils new femtosecond laser production platform" (un second média insère un
+# seul mot) donne un Jaccard trigramme de 0.5 -- juste au-dessus. Deux articles réellement
+# distincts sur le même acteur (ex: une annonce produit vs une nomination) partagent 0 trigramme
+# en pratique, donc une marge confortable reste sous ce seuil sans avoir besoin de le pousser plus haut.
+NEAR_DUPLICATE_SHINGLE_SIZE = 3
+NEAR_DUPLICATE_JACCARD_THRESHOLD = 0.45
+
+
+def _word_shingles(text: str, size: int = NEAR_DUPLICATE_SHINGLE_SIZE) -> set[tuple[str, ...]]:
+    words = _normalize(text).split()
+    if len(words) < size:
+        return {tuple(words)} if words else set()
+    return {tuple(words[i : i + size]) for i in range(len(words) - size + 1)}
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _title_from_description(description: str) -> str:
+    """Isole le titre d'origine dans une description déjà stockée -- toujours de la forme
+    "Label (Feed) : titre" (voir collect_press_mentions), donc le premier " : " sépare
+    fiablement le préfixe du titre, quel que soit le contenu du titre lui-même."""
+    _, _, title = description.partition(" : ")
+    return title or description
+
+
+def _is_near_duplicate(title: str, existing_descriptions: list[str]) -> bool:
+    """True si `title` recoupe suffisamment un événement déjà stocké pour ce même acteur --
+    même communiqué repris par un second média, que le dédoublonnage exact sur source_url ne
+    peut pas voir puisque le lien diffère."""
+    shingles = _word_shingles(title)
+    if not shingles:
+        return False
+    return any(
+        _jaccard(shingles, _word_shingles(_title_from_description(existing))) >= NEAR_DUPLICATE_JACCARD_THRESHOLD
+        for existing in existing_descriptions
+    )
+
+
 def classify_press_event(title: str, description: str) -> str:
     """'patent'/'investment'/'recruitment' si un mot-clé structurant est détecté dans le titre
     + résumé (dans cet ordre de priorité), sinon 'press_mention' (comportement identique à
@@ -152,7 +205,7 @@ def collect_press_mentions() -> dict:
     aliases = {name: alias for name, alias in aliases.items() if len(alias) >= MIN_ACTOR_NAME_LENGTH}
     actor_ids = {actor["name"]: actor["id"] for actor in actors}
 
-    feeds_ok = events_added = errors = 0
+    feeds_ok = events_added = near_duplicates_skipped = errors = 0
     with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=FEED_TIMEOUT) as client:
         for feed_name, feed_url in FEED_URLS.items():
             try:
@@ -165,20 +218,33 @@ def collect_press_mentions() -> dict:
             feeds_ok += 1
             with connect(ACTORS_DB) as db:
                 for item in items:
-                    haystack = _normalize(f"{item['title']} {item['description']}")
-                    signal_type = classify_press_event(item["title"], item["description"])
+                    title = item["title"] or ""
+                    description_text = item["description"] or ""
+                    haystack = _normalize(f"{title} {description_text}")
+                    signal_type = classify_press_event(title, description_text)
                     for actor_name, alias in aliases.items():
                         if not _contains_whole_word(haystack, alias):
                             continue
+                        actor_id = actor_ids[actor_name]
+                        existing_descriptions = [
+                            row["description"] for row in db.execute(
+                                "SELECT description FROM actor_events WHERE actor_id=? AND source_url!=?",
+                                (actor_id, str(item["link"])),
+                            ).fetchall()
+                        ]
+                        if _is_near_duplicate(title, existing_descriptions):
+                            near_duplicates_skipped += 1
+                            continue
                         label = SIGNAL_EVENT_LABELS[signal_type]
-                        description = f"{label} ({feed_name}) : {item['title']}"
+                        description = f"{label} ({feed_name}) : {title}"
                         events_added += _upsert_press_event(
-                            db, actor_ids[actor_name], signal_type, description, item["event_date"], str(item["link"]),
+                            db, actor_id, signal_type, description, item["event_date"], str(item["link"]),
                         )
 
     return {
         "feeds_configured": len(FEED_URLS),
         "feeds_ok": feeds_ok,
         "events_added": events_added,
+        "near_duplicates_skipped": near_duplicates_skipped,
         "errors": errors,
     }

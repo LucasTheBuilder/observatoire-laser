@@ -18,7 +18,15 @@ sys.path.insert(0, str(ROOT))
 
 import db as dbmod
 import press
-from press import _contains_whole_word, _normalize, _parse_feed, classify_press_event, collect_press_mentions
+from press import (
+    _contains_whole_word,
+    _is_near_duplicate,
+    _normalize,
+    _parse_feed,
+    _word_shingles,
+    classify_press_event,
+    collect_press_mentions,
+)
 
 SAMPLE_FEED = b"""<?xml version="1.0"?>
 <rss version="2.0"><channel>
@@ -39,6 +47,30 @@ SAMPLE_FEED = b"""<?xml version="1.0"?>
   <title>Missing link item is skipped</title>
   <description>ALPHANOV mentioned again but no link tag.</description>
   <pubDate>19 Aug 2026 04:00:00 GMT</pubDate>
+</item>
+</channel></rss>"""
+
+
+REWORDED_FEED = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<title>Sample Feed 2</title>
+<item>
+  <title>ALPHANOV unveils new femtosecond laser production platform</title>
+  <link>https://otheroutlet.test/wire/alphanov-launch</link>
+  <description>French photonics firm ALPHANOV has announced a new production line for lasers.</description>
+  <pubDate>24 Aug 2026 09:00:00 GMT</pubDate>
+</item>
+</channel></rss>"""
+
+
+DISTINCT_FEED = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<title>Sample Feed 3</title>
+<item>
+  <title>ALPHANOV appoints new chief financial officer</title>
+  <link>https://otheroutlet.test/wire/alphanov-cfo</link>
+  <description>ALPHANOV has named a new CFO to lead its finance team going forward.</description>
+  <pubDate>24 Aug 2026 09:00:00 GMT</pubDate>
 </item>
 </channel></rss>"""
 
@@ -117,6 +149,9 @@ class FakeResponse:
 class FakeClient:
     feed_content: bytes = SAMPLE_FEED
     fail_urls: set[str] = set()
+    # Optional per-URL override, keyed by feed URL, for tests that need two feeds to serve
+    # different content -- falls back to feed_content when a URL has no entry.
+    feed_content_by_url: dict[str, bytes] = {}
 
     def __init__(self, *args, **kwargs):
         pass
@@ -130,10 +165,15 @@ class FakeClient:
     def get(self, url, **kwargs):
         if url in self.fail_urls:
             raise RuntimeError("network error")
-        return FakeResponse(self.feed_content)
+        return FakeResponse(self.feed_content_by_url.get(url, self.feed_content))
 
 
 class CollectPressMentionsTests(unittest.TestCase):
+    def setUp(self):
+        # feed_content_by_url is a mutable class attribute on FakeClient -- reset before every
+        # test so a per-URL override set by one test can never leak into the next.
+        FakeClient.feed_content_by_url = {}
+
     def _seed_actors(self, actors_db: Path, names: list[str]) -> None:
         with dbmod.connect(actors_db) as db:
             db.execute("DELETE FROM actors")
@@ -247,6 +287,86 @@ class CollectPressMentionsTests(unittest.TestCase):
                 self.assertEqual(1, result["feeds_ok"])
                 self.assertEqual(1, result["errors"])
                 self.assertEqual(1, result["events_added"])
+
+
+class NearDuplicateTests(unittest.TestCase):
+    def test_reworded_title_is_a_near_duplicate(self):
+        original = "ALPHANOV unveils new femtosecond laser platform"
+        reworded = "ALPHANOV unveils new femtosecond laser production platform"
+        self.assertTrue(_is_near_duplicate(reworded, [f"Mention presse (Outlet) : {original}"]))
+
+    def test_unrelated_article_about_the_same_actor_is_not_a_near_duplicate(self):
+        existing = "Mention presse (Outlet) : ALPHANOV appoints new chief financial officer"
+        new_title = "ALPHANOV unveils new femtosecond laser platform"
+        self.assertFalse(_is_near_duplicate(new_title, [existing]))
+
+    def test_empty_title_is_never_a_duplicate(self):
+        self.assertFalse(_is_near_duplicate("", ["Mention presse (Outlet) : Something"]))
+
+    def test_no_existing_events_is_never_a_duplicate(self):
+        self.assertFalse(_is_near_duplicate("ALPHANOV unveils new femtosecond laser platform", []))
+
+    def test_shingle_size_falls_back_to_whole_title_for_short_titles(self):
+        # Fewer words than the shingle size (3) must not crash or silently match everything.
+        shingles = _word_shingles("ALPHANOV wins award")
+        self.assertEqual(1, len(shingles))
+
+
+class CollectPressMentionsNearDuplicateTests(unittest.TestCase):
+    def setUp(self):
+        FakeClient.feed_content_by_url = {}
+
+    def _seed_actors(self, actors_db: Path, names: list[str]) -> None:
+        with dbmod.connect(actors_db) as db:
+            db.execute("DELETE FROM actors")
+        for name in names:
+            dbmod.create_actor(name, "France", "Test", f"https://{name.lower().replace(' ', '')}.example/", priority=False)
+
+    def test_same_story_reworded_by_a_second_outlet_is_not_double_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+            with (
+                patch.object(dbmod, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+                patch.object(dbmod, "TECH_DB", Path(tmp) / "technology.db"),
+                patch.object(press, "ACTORS_DB", actors_db),
+            ):
+                dbmod.init_databases()
+                self._seed_actors(actors_db, ["ALPHANOV"])
+                feed_urls = list(press.FEED_URLS.values())
+                FakeClient.feed_content_by_url = {feed_urls[0]: SAMPLE_FEED, feed_urls[1]: REWORDED_FEED}
+                FakeClient.fail_urls = set()
+                with patch.object(press.httpx, "Client", FakeClient):
+                    result = collect_press_mentions()
+
+                # Two distinct source_urls (real duplicate would be caught by exact dedup
+                # already) carrying near-identical titles about the same actor: only the first
+                # is kept, the second is recognized as the same underlying story.
+                self.assertEqual(1, result["events_added"])
+                self.assertGreaterEqual(result["near_duplicates_skipped"], 1)
+                with dbmod.connect(actors_db) as db:
+                    count = db.execute("SELECT COUNT(*) FROM actor_events").fetchone()[0]
+                self.assertEqual(1, count)
+
+    def test_two_genuinely_different_stories_are_both_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+            with (
+                patch.object(dbmod, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+                patch.object(dbmod, "TECH_DB", Path(tmp) / "technology.db"),
+                patch.object(press, "ACTORS_DB", actors_db),
+            ):
+                dbmod.init_databases()
+                self._seed_actors(actors_db, ["ALPHANOV"])
+                feed_urls = list(press.FEED_URLS.values())
+                FakeClient.feed_content_by_url = {feed_urls[0]: SAMPLE_FEED, feed_urls[1]: DISTINCT_FEED}
+                FakeClient.fail_urls = set()
+                with patch.object(press.httpx, "Client", FakeClient):
+                    result = collect_press_mentions()
+
+                self.assertEqual(2, result["events_added"])
+                self.assertEqual(0, result["near_duplicates_skipped"])
 
 
 if __name__ == "__main__":
