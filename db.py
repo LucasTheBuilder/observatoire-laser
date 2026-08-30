@@ -90,6 +90,16 @@ ACTORS = [
     # laser haute vitesse, hors périmètre USP) ; seule la ligne "Micro/Nano Processing" (perçage
     # hélicoïdal, impulsions <15 ps -- voir SEED_SOURCES) relève du laser ultra-rapide suivi ici.
     ("ACunity", "Allemagne", "Perçage/micro-usinage laser USP (Helical Drilling Optics, <15 ps)", 0, "https://acunity.de/en/"),
+    # Audit Horizon 2 (30/08/2026) : deux centres technologiques T1 supplémentaires identifiés
+    # comme sous-couverts (référence W6/W13 de l'audit).
+    # TWI (Cambridge, RU) : programme de recherche dédié USP picoseconde (base de données de
+    # paramètres procédé, transfert industriel) -- vérifié via twi-global.com, pas seulement cité.
+    ("TWI", "Royaume-Uni", "Centre technologique - micro-usinage & modification de surface laser USP", 0, "https://www.twi-global.com/"),
+    # BIAS (Brême, DE) : institut multi-technologie (comme Fraunhofer/Tekniker/CEIT) -- vérifié
+    # que le laser ultra-rapide y est bien utilisé, pas seulement du laser conventionnel :
+    # "Zur Anwendung kommen dabei gepulste Femtosekunden-, Pikosekunden- und Nanosekunden-Laser
+    # sowie CW-Laser" (bias.de/laserbearbeitung), pour la microstructuration/ablation.
+    ("BIAS", "Allemagne", "Institut de recherche appliquée - laser USP (structuration, ablation) & métrologie optique", 0, "https://www.bias.de/en-gb/"),
 ]
 
 # Quelques URLs de pages connues, injectées d'office dans actor_sources au démarrage (avant
@@ -104,6 +114,8 @@ SEED_SOURCES = [
     # ACunity's homepage is dominated by EHLA (off-topic, see ACTORS above) -- seed the actual
     # USP-relevant product page directly so the crawler doesn't have to find it on its own.
     ("ACunity", "https://acunity.de/micro-nano-processing/?lang=en_us", "application"),
+    ("TWI", "https://www.twi-global.com/what-we-do/research-and-technology/current-research-programmes/twi-core-research/development-of-ultrashort-laser-micromachining-and-surface-modification-database", "technology"),
+    ("BIAS", "https://www.bias.de/laserbearbeitung", "technology"),
 ]
 
 # Seed values are now kept as canonical dimensions. Generation/application detail belongs in stage/quote,
