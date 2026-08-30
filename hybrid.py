@@ -1543,6 +1543,27 @@ def estimate_anthropic_cost_usd(model: str, input_tokens: int, output_tokens: in
     return round(input_tokens / 1_000_000 * input_price + output_tokens / 1_000_000 * output_price, 4)
 
 
+# Plafond de dépense IA par run (audit veille §9.4, "prérequis de l'automatisation", 30/08/2026) :
+# tant que les collectes étaient déclenchées à la main, un run anormalement coûteux restait
+# visible immédiatement. Avec le scheduler (APScheduler, voir app.py SCHEDULER_ENABLED) qui
+# déclenche désormais des runs sans supervision, rien ne bornait plus la dépense Anthropic d'un
+# run pathologique (ex: beaucoup d'acteurs "adaptive" avec des pages bruyantes qui déclenchent
+# _ai_candidates page après page). Ce plafond est une estimation de coût cumulé, pas une
+# comptabilité exacte -- voir estimate_anthropic_cost_usd.
+AI_COST_CAP_USD_PER_RUN = float(os.getenv("AI_COST_CAP_USD_PER_RUN", "2.0"))
+
+
+def ai_cost_cap_reached(client: "OllamaClient | AnthropicClient") -> bool:
+    """Circuit breaker checked before each Anthropic call within a run. Ollama runs locally with
+    no metered cost, so this is always False for it -- the cap only applies to AnthropicClient,
+    whose token counters accumulate across an entire scrape_actors/scrape_market run (one client
+    instance is created per run and reused for every page/actor, see get_ai_client callers)."""
+    if not isinstance(client, AnthropicClient):
+        return False
+    cost = estimate_anthropic_cost_usd(client.model, client.total_input_tokens, client.total_output_tokens)
+    return cost is not None and cost >= AI_COST_CAP_USD_PER_RUN
+
+
 def build_profile(
     actor: dict[str, Any],
     documents: list[tuple[str, ParsedDocument]],
@@ -1590,7 +1611,10 @@ def build_profile(
         },
     }
     allow_ollama = bool(site_profile.get("ollama_profile_assist", False))
-    if not allow_ollama or not actor.get("priority") or not ollama or not ollama.available():
+    if (
+        not allow_ollama or not actor.get("priority") or not ollama or not ollama.available()
+        or ai_cost_cap_reached(ollama)
+    ):
         preliminary["confidence"] = 0.72 if documents and any(document.blocks for _, document in documents) else 0.25
         return preliminary, "deterministic", preliminary["confidence"]
 

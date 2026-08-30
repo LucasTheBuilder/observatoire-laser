@@ -64,6 +64,7 @@ from hybrid import (
     ContentBlock,
     OllamaClient,
     ParsedDocument,
+    ai_cost_cap_reached,
     block_payload,
     build_profile,
     canonical_url,
@@ -1568,6 +1569,9 @@ def _ai_candidates(
         return []
     if not ollama.available():
         _inc_diagnostic(diagnostics, "ai_unavailable")
+        return []
+    if ai_cost_cap_reached(ollama):
+        _inc_diagnostic(diagnostics, "ai_cost_cap_reached")
         return []
     _inc_diagnostic(diagnostics, "ai_pages_queried")
     _inc_diagnostic(diagnostics, "ai_relevant_blocks_sent", len(relevant))

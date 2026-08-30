@@ -13,7 +13,8 @@ sys.path.insert(0, str(ROOT))
 import anthropic
 
 import db as dbmod
-from hybrid import AnthropicClient, ContentBlock, OllamaClient, get_ai_client
+import hybrid as hybridmod
+from hybrid import AnthropicClient, ContentBlock, OllamaClient, ai_cost_cap_reached, build_profile, get_ai_client
 from scrapers import _ai_candidates, _upsert_vocabulary_candidate
 
 
@@ -290,6 +291,65 @@ class VocabularyCandidateUpsertTests(unittest.TestCase):
                 self.assertEqual(1, rows[0])
                 status = db.execute("SELECT review_status FROM vocabulary_candidates").fetchone()
                 self.assertEqual("pending", status[0])
+
+
+class AiCostCapTests(unittest.TestCase):
+    """Circuit breaker for Lot 1 §1.4 (audit veille, "prérequis de l'automatisation"): once a
+    run's estimated Anthropic spend crosses AI_COST_CAP_USD_PER_RUN, both AI call sites
+    (_ai_candidates for market facts, build_profile's assist pass) must fall back to
+    deterministic-only rather than keep calling the API unbounded on an unattended scheduled run."""
+
+    def test_ollama_is_never_capped_regardless_of_usage(self):
+        # Local model, no metered cost -- the cap only exists to bound Anthropic spend.
+        client = OllamaClient()
+        self.assertFalse(ai_cost_cap_reached(client))
+
+    def test_anthropic_under_cap_is_not_capped(self):
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-test-fake"}):
+            client = AnthropicClient()
+        client.total_input_tokens = 10
+        client.total_output_tokens = 10
+        self.assertFalse(ai_cost_cap_reached(client))
+
+    def test_anthropic_over_cap_is_capped(self):
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-test-fake"}):
+            client = AnthropicClient()
+        client.total_input_tokens = 1_000_000
+        client.total_output_tokens = 1_000_000
+        with patch.object(hybridmod, "AI_COST_CAP_USD_PER_RUN", 0.001):
+            self.assertTrue(ai_cost_cap_reached(client))
+
+    def test_ai_candidates_short_circuits_once_capped(self):
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            text="Femtosecond laser surface texturing of medical stents for production customers.",
+            path="main > article",
+        )
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-test-fake"}):
+            client = AnthropicClient()
+        client.total_input_tokens = 1_000_000
+        client.total_output_tokens = 1_000_000
+        diagnostics: dict[str, int] = {}
+        with patch.object(hybridmod, "AI_COST_CAP_USD_PER_RUN", 0.001), patch.object(client, "ask_json") as mocked:
+            candidates = _ai_candidates(
+                "Example", "https://example.test/medical", "Applications", [block], client, diagnostics,
+            )
+        mocked.assert_not_called()
+        self.assertEqual([], candidates)
+        self.assertEqual(1, diagnostics.get("ai_cost_cap_reached"))
+
+    def test_build_profile_falls_back_to_deterministic_once_capped(self):
+        actor = {"name": "Example", "official_url": "https://example.test/", "priority": True}
+        site_profile = {"ollama_profile_assist": True}
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-test-fake"}):
+            client = AnthropicClient()
+        client.total_input_tokens = 1_000_000
+        client.total_output_tokens = 1_000_000
+        with patch.object(hybridmod, "AI_COST_CAP_USD_PER_RUN", 0.001), patch.object(client, "ask_json") as mocked:
+            _, generated_by, _ = build_profile(actor, [], client, site_profile=site_profile)
+        mocked.assert_not_called()
+        self.assertEqual("deterministic", generated_by)
 
 
 if __name__ == "__main__":
