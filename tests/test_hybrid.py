@@ -33,10 +33,10 @@ LASEA_PAGE = """
 <main>
   <section class="applications">
     <article class="application-card"><h2>Intraocular lenses</h2>
-      <p>Femtosecond laser micromachining of intraocular lenses for medical devices.</p>
+      <p>Femtosecond laser micromachining is used for intraocular lenses in medical devices.</p>
     </article>
     <article class="application-card"><h2>Microfluidic devices</h2>
-      <p>Femtosecond laser micro-welding of microfluidic devices in a qualified production service.</p>
+      <p>Femtosecond laser micro-welding is used for microfluidic devices in a qualified production service.</p>
     </article>
   </section>
 </main></body></html>

@@ -98,9 +98,9 @@ class LocalRelationTests(unittest.TestCase):
         # publishes (e.g. FEMTOprint's applications/quantum.asp, /photonics.asp, /life-sciences.asp)
         # -- previously unrecognized, so pages about them never produced a market fact.
         cases = [
-            ("Femtosecond laser micromachining of glass ion trap components for quantum computing systems.", "Quantum"),
-            ("Femtosecond laser engraving of glass waveguide components for photonics interconnects.", "Photonique"),
-            ("Femtosecond laser micromachining of microfluidic device components for life sciences applications.", "Sciences de la vie"),
+            ("Femtosecond laser micromachining is used for glass ion trap components in quantum computing systems.", "Quantum"),
+            ("Femtosecond laser engraving is used for glass waveguide components in photonics interconnects.", "Photonique"),
+            ("Femtosecond laser micromachining is used for microfluidic device components in life sciences applications.", "Sciences de la vie"),
         ]
         for text, expected_market in cases:
             with self.subTest(market=expected_market):
@@ -120,7 +120,7 @@ class LocalRelationTests(unittest.TestCase):
         block = ContentBlock(
             heading="Applications", h1="Applications", h2="Photonics", h3="",
             path="main > section.applications",
-            text="Femtosecond laser welding of optical fiber components for photonics interconnects.",
+            text="Femtosecond laser welding is used for optical fiber components in photonics interconnects.",
         )
         fact = _candidate("Example", "https://example.test/applications/photonics", "Applications", block)
         self.assertIsNotNone(fact)

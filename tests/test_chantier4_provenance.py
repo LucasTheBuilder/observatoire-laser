@@ -71,7 +71,7 @@ class UpsertPersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             market_db = self._fresh_market_db(tmp)
             block = ContentBlock(
-                heading="Stents", text="Femtosecond laser drilling of medical stents on a pilot line.", path="main > a",
+                heading="Stents", text="Femtosecond laser drilling of medical stents is performed on a pilot line.", path="main > a",
             )
             candidate = _candidate("Example", "https://example.test/medical", "Medical", block, source_date="2024-05-01")
             with dbmod.connect(market_db) as db:
@@ -87,7 +87,7 @@ class UpsertPersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             market_db = self._fresh_market_db(tmp)
             block = ContentBlock(
-                heading="Stents", text="Femtosecond laser drilling of medical stents on a pilot line.", path="main > a",
+                heading="Stents", text="Femtosecond laser drilling of medical stents is performed on a pilot line.", path="main > a",
             )
             first = _candidate("Example", "https://example.test/medical", "Medical", block, source_date="2024-05-01")
             with dbmod.connect(market_db) as db:

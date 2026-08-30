@@ -20,7 +20,7 @@ class V341AntiCrossContaminationTests(unittest.TestCase):
                 heading="TGV wafers",
                 h1="Applications",
                 h2="Applications",
-                text="Femtosecond laser dicing of semiconductor wafers for advanced packaging.",
+                text="Femtosecond laser dicing is used for semiconductor wafers in advanced packaging.",
                 path="html > body > main > section.apps > div.card::repeated",
             ),
         ]

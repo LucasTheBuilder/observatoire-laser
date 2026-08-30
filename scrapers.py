@@ -581,6 +581,37 @@ NEGATION_CUES = (
     "n'est pas encore", "ne sont pas encore",
 )
 
+# Contrastive markers introducing what the ACTOR'S COMPETITORS/predecessors do, not the actor
+# itself (§10.6 audit veille, 30/08/2026, cas Pulsar Photonics: "With the classic laser dicing
+# [...] are mostly used wafer saws or laser-based fixed optics systems" attribuait à Pulsar une
+# opération décrite comme celle du repoussoir dont il se démarque). "unlike"/"instead of" sont
+# déjà dans NEGATION_CUES ; le reste complète la liste donnée par l'audit. Vérifié avec le même
+# garde que la négation (_is_negated), pas séparément.
+CONTRAST_CUES = (
+    "classic", "classique", "conventional", "conventionnel", "conventionnelle",
+    "traditional", "traditionnel", "traditionnelle", "whereas", "herkömmlich", "herkommlich",
+)
+
+# Marqueurs assertifs requis pour qu'une fenêtre de relation compte comme une AFFIRMATION plutôt
+# qu'un fragment de menu/titre/liste (§10.6 audit veille) : sur les 71 faits acceptés analysés à
+# la main, 54 (76%) ne contenaient aucun de ces marqueurs -- ce sont des titres de page ("Laser
+# Micro Drilling") ou des fragments de liste ("Applications/Markets: medical technology,
+# microelectronics..."), pas des phrases affirmant un lien composant->opération. Comme pour
+# NEGATION_CUES, c'est un proxy syntaxique lexical (présence d'un marqueur), pas une analyse
+# grammaticale réelle du prédicat -- volontairement conservateur : listé au lieu d'inféré.
+PREDICATE_CUES = (
+    "is", "are", "was", "were", "provides", "provide", "offers", "offer", "enables", "enable",
+    "uses", "use", "using", "used", "performs", "perform", "delivers", "deliver",
+    "produces", "produce", "manufactures", "manufacture", "specializes", "specialises",
+    "enters", "enter", "reaches", "reach", "achieves", "achieve", "features", "feature",
+    "includes", "include", "combines", "combine", "supports", "support",
+    "we", "our", "develops", "develop",
+    "propose", "proposons", "offre", "offrons", "fournit", "fournissons",
+    "utilise", "utilisons", "permet", "permettent", "réalise", "realise", "réalisons", "realisons",
+    "assure", "assurons", "produisons", "fabrique", "fabriquons", "développe", "developpe",
+    "bietet", "ermöglicht", "ermoglicht", "verwendet", "liefert", "nutzt",
+)
+
 # Conservative market inference used only for display when the market is not explicit.
 # Inferred values never count as an independent acceptance signal.
 MARKET_INFERENCE = {
@@ -887,7 +918,15 @@ def _is_negated(text: str) -> bool:
     """Conservative negation/contrast guard for one relation window (sentence, heading+sentence
     pair, or combined structured unit). Kept lexicon-based, like the rest of this module, rather
     than attempting real negation-scope parsing."""
-    return any(_contains_term(text, cue) for cue in NEGATION_CUES)
+    return any(_contains_term(text, cue) for cue in (*NEGATION_CUES, *CONTRAST_CUES))
+
+
+def _has_predicate(text: str) -> bool:
+    """§10.6 audit veille: require an assertive marker (verb or first-person possessive) in the
+    accepted window, so a relation isn't built from a bare menu fragment or page title that
+    happens to contain market+component+operation terms with nothing actually asserting the
+    link between them."""
+    return any(_contains_term(text, cue) for cue in PREDICATE_CUES)
 
 
 def _section_role(block: ContentBlock) -> str:
@@ -1036,9 +1075,11 @@ def _relation_evidence(
     ``direct`` is sentence-local; ``contextual`` uses only the block's immediate heading or a
     two-sentence window; ``structured`` may cross blocks only when they share the exact
     ``editorial_group_id``. Repeated cards/list items are isolated micro-contexts. A window
-    carrying an explicit negation/contrast cue (see NEGATION_CUES) is skipped even when it
-    would otherwise satisfy the lexical relation, since the sentence is denying or contrasting
-    the claim rather than making it (e.g. "unlike laser cutting, we use...").
+    carrying an explicit negation/contrast cue (see NEGATION_CUES/CONTRAST_CUES) is skipped even
+    when it would otherwise satisfy the lexical relation, since the sentence is denying or
+    contrasting the claim rather than making it (e.g. "unlike laser cutting, we use..."). A
+    window with no assertive marker at all (see PREDICATE_CUES, §10.6 audit veille) is skipped
+    too: it is far more likely a menu fragment or page title than an actual claim.
 
     ``page_market`` (chantier 2 item 1, see _url_market_hint) is tried last, only once steps
     1-4 have all failed to find an in-block market: it lets an unambiguous page-level market
@@ -1057,6 +1098,9 @@ def _relation_evidence(
             if _is_negated(sentence):
                 _inc_diagnostic(diagnostics, "relation_negated_rejected")
                 continue
+            if not _has_predicate(sentence):
+                _inc_diagnostic(diagnostics, "relation_no_predicate_rejected")
+                continue
             return "direct", sentence[:900]
 
     multi_context = _is_multi_context_block(block)
@@ -1074,6 +1118,9 @@ def _relation_evidence(
                     if _is_negated(sentence) or _is_negated(local_heading):
                         _inc_diagnostic(diagnostics, "relation_negated_rejected")
                         continue
+                    if not _has_predicate(evidence):
+                        _inc_diagnostic(diagnostics, "relation_no_predicate_rejected")
+                        continue
                     return "contextual", evidence[:900]
 
     # 3) Adjacent sentence windows are allowed only inside a single-purpose block.
@@ -1089,6 +1136,9 @@ def _relation_evidence(
                 if density >= 2:
                     if _is_negated(window):
                         _inc_diagnostic(diagnostics, "relation_negated_rejected")
+                        continue
+                    if not _has_predicate(window):
+                        _inc_diagnostic(diagnostics, "relation_no_predicate_rejected")
                         continue
                     return "contextual", window[:900]
 
@@ -1114,6 +1164,8 @@ def _relation_evidence(
         ):
             if _is_negated(combined):
                 _inc_diagnostic(diagnostics, "relation_negated_rejected")
+            elif not _has_predicate(combined):
+                _inc_diagnostic(diagnostics, "relation_no_predicate_rejected")
             else:
                 return "structured", combined[:1400]
 
@@ -1126,6 +1178,9 @@ def _relation_evidence(
             if component and operation and not _relation_window_is_ambiguous(sentence):
                 if _is_negated(sentence):
                     _inc_diagnostic(diagnostics, "relation_negated_rejected")
+                    continue
+                if not _has_predicate(sentence):
+                    _inc_diagnostic(diagnostics, "relation_no_predicate_rejected")
                     continue
                 return "page_context", sentence[:900]
 

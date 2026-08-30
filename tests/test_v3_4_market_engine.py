@@ -77,7 +77,7 @@ class V34MarketEngineTests(unittest.TestCase):
         block = ContentBlock(
             heading="Medical stents",
             h2="Medical",
-            text="Femtosecond laser surface texturing of medical stents.",
+            text="Femtosecond laser surface texturing is used for medical stents.",
             path="main > article",
         )
         candidate = _candidate("Example", "https://example.test/medical", "Applications", block)
@@ -145,6 +145,54 @@ class NegationGuardTests(unittest.TestCase):
         candidate = _candidate("Example", "https://example.test/medical", "Applications", block)
         self.assertIsNotNone(candidate)
         self.assertEqual("direct", candidate["relation_strength"])
+
+
+class PredicateAndContrastGuardTests(unittest.TestCase):
+    """§10.6 audit veille (30/08/2026): a relation window must carry a predicate, and a
+    contrastive marker (CONTRAST_CUES) must block attribution the same way negation does."""
+
+    def test_pulsar_style_contrast_sentence_does_not_attribute_the_competitor_operation(self):
+        # Reproduces the exact failure mode from the audit (Pulsar Photonics): a sentence
+        # describing what CLASSIC/CONVENTIONAL competing methods do must not be attributed to
+        # the actor just because it lexically contains market+component+operation terms.
+        diagnostics: dict[str, int] = {}
+        block = ContentBlock(
+            heading="Ceramic substrates",
+            h2="Medical",
+            text=(
+                "With the classic femtosecond laser dicing of thin ceramic substrates, "
+                "mostly used are mechanical saws or conventional cutting tools."
+            ),
+            path="main > article",
+        )
+        candidate = _candidate("Example", "https://example.test/medical", "Applications", block, diagnostics=diagnostics)
+        self.assertIsNone(candidate)
+        self.assertGreaterEqual(diagnostics.get("relation_negated_rejected", 0), 1)
+
+    def test_menu_fragment_with_no_predicate_is_rejected(self):
+        # The audit's own aggregate finding: 76% of the facts it manually rejected as unreliable
+        # carried no verb/assertive marker at all -- menu/list fragments, not real claims.
+        diagnostics: dict[str, int] = {}
+        block = ContentBlock(
+            heading="Applications",
+            h2="Medical",
+            text="Applications: medical stents, femtosecond laser texturing, production customers.",
+            path="main > article",
+        )
+        candidate = _candidate("Example", "https://example.test/medical", "Applications", block, diagnostics=diagnostics)
+        self.assertIsNone(candidate)
+        self.assertGreaterEqual(diagnostics.get("relation_no_predicate_rejected", 0), 1)
+        self.assertNotIn("candidate_valid", diagnostics)
+
+    def test_sentence_with_predicate_still_validates(self):
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            text="Femtosecond laser texturing is used for medical stents for production customers.",
+            path="main > article",
+        )
+        candidate = _candidate("Example", "https://example.test/medical", "Applications", block)
+        self.assertIsNotNone(candidate)
 
 
 class ApplicationKeyBucketTransitionTests(unittest.TestCase):
