@@ -14,6 +14,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import app as appmod
 import db as dbmod
 import scrapers
 from hybrid import DEFAULT_SITE_PROFILE, parse_document
@@ -273,6 +274,32 @@ class ConditionalGetCrawlIntegrationTests(unittest.TestCase):
             self.assertEqual(after_first["content_hash"], after_second["content_hash"])
             # The second GET must have carried the etag stored after the first crawl.
             self.assertTrue(any(h and h.get("If-None-Match") == '"v1"' for h in self.FakeClient.received_headers))
+
+
+class SchedulerTests(unittest.TestCase):
+    def test_disabled_by_default(self):
+        # A fresh import (no SCHEDULER_ENABLED in the environment) must never start crawling
+        # automatically on an existing deployment that just picked up this change.
+        self.assertFalse(appmod.SCHEDULER_ENABLED)
+
+    def test_scheduler_status_endpoint_reports_disabled(self):
+        with patch.object(appmod, "SCHEDULER_ENABLED", False):
+            result = appmod.scheduler_status()
+        self.assertEqual({"enabled": False, "cron": None, "next_run_at": None}, result)
+
+    def test_scheduled_run_is_skipped_when_a_job_is_already_running(self):
+        with patch.object(appmod, "jobs", {"monthly": {"status": "running", "result": None, "error": None}, "actors": {"status": "idle", "result": None, "error": None}}):
+            with patch.object(appmod.executor, "submit") as submit:
+                appmod._scheduled_monthly_run()
+            submit.assert_not_called()
+
+    def test_scheduled_run_submits_when_idle(self):
+        fresh_jobs = {"monthly": {"status": "idle", "result": None, "error": None}}
+        with patch.object(appmod, "jobs", fresh_jobs):
+            with patch.object(appmod.executor, "submit") as submit:
+                appmod._scheduled_monthly_run()
+            submit.assert_called_once_with(appmod._run_job, "monthly")
+        self.assertEqual("running", fresh_jobs["monthly"]["status"])
 
 
 if __name__ == "__main__":

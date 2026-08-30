@@ -21,6 +21,8 @@ Organisation des endpoints (tous préfixés /api/, sauf `/` qui sert index.html)
 - /api/page-versions/{source_id} : historique des versions archivées d'une page (chantier 6).
 - /api/scrape/{kind} : démarre/consulte une collecte (actors/market/technology/cordis/
   firmographics/openalex/press/capabilities/monthly).
+- /api/scheduler : état de la planification automatique (SCHEDULER_ENABLED/SCHEDULER_CRON,
+  revue web-scraping priorité #2) -- désactivée par défaut, voir _scheduled_monthly_run.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import json
+import os
 import threading
 import webbrowser
 from collections.abc import Callable
@@ -44,6 +47,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 import uvicorn
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -213,6 +218,32 @@ collectors: dict[str, Callable[[], dict]] = {
 }
 
 
+# Planification (revue web-scraping, priorité #2) : "un observatoire qu'il faut penser à
+# lancer n'est pas un observatoire." APScheduler in-process plutôt que Prefect/un cron externe
+# -- au volume de ce projet (35+ acteurs, une collecte mensuelle), un service de plus serait
+# disproportionné (voir la revue elle-même sur Prefect+Prometheus+Grafana). Désactivé par
+# défaut (SCHEDULER_ENABLED) : ajouter cette dépendance ne doit jamais faire démarrer une
+# collecte automatique en silence sur un déploiement existant sans un choix explicite.
+SCHEDULER_ENABLED = os.getenv("SCHEDULER_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+# Format cron standard à 5 champs (minute heure jour mois jour-semaine) ; défaut : le 1er de
+# chaque mois à 3h, hors heures de bureau, même cadence que le bouton "Actualiser toute la veille".
+SCHEDULER_CRON = os.getenv("SCHEDULER_CRON", "0 3 1 * *").strip()
+scheduler = BackgroundScheduler(daemon=True)
+
+
+def _scheduled_monthly_run() -> None:
+    """Déclenché par le scheduler -- réutilise exactement le même chemin que POST
+    /api/scrape/monthly (jobs/_run_job), avec la même garde "une seule collecte à la fois" :
+    si un job tourne déjà (déclenché manuellement ou par une exécution planifiée précédente qui
+    déborde), celle-ci est sautée plutôt que mise en file, pour ne jamais empiler deux collectes
+    concurrentes sur le même exécuteur à un seul worker."""
+    with job_lock:
+        if any(job["status"] == "running" for job in jobs.values()):
+            return
+        jobs["monthly"] = {"status": "running", "result": None, "error": None}
+    executor.submit(_run_job, "monthly")
+
+
 def _jobs_snapshot() -> dict[str, dict]:
     with job_lock:
         return {kind: dict(job) for kind, job in jobs.items()}
@@ -224,9 +255,17 @@ async def lifespan(_: FastAPI):
     # jour le schéma des 3 bases. `yield` cède la main pendant toute la durée de vie du
     # serveur ; le code après `finally` s'exécute à l'arrêt (Ctrl+C, redéploiement...).
     init_databases()
+    if SCHEDULER_ENABLED:
+        scheduler.add_job(
+            _scheduled_monthly_run, CronTrigger.from_crontab(SCHEDULER_CRON),
+            id="monthly", replace_existing=True, misfire_grace_time=3600,
+        )
+        scheduler.start()
     try:
         yield
     finally:
+        if SCHEDULER_ENABLED:
+            scheduler.shutdown(wait=False)
         executor.shutdown(wait=False, cancel_futures=True)
 
 
@@ -897,6 +936,20 @@ def profiles():
         except (TypeError, ValueError):
             profile["coverage"] = {}
     return profiles
+
+
+@app.get("/api/scheduler")
+def scheduler_status():
+    """État de la planification automatique (priorité #2 de la revue web-scraping) : activée ou
+    non (SCHEDULER_ENABLED), expression cron effective, et prochaine exécution -- pour qu'un
+    "observatoire qu'il faut penser à lancer" reste vérifiable sans lire les variables d'env
+    du conteneur."""
+    next_run = None
+    if SCHEDULER_ENABLED:
+        job = scheduler.get_job("monthly")
+        if job and job.next_run_time:
+            next_run = job.next_run_time.isoformat()
+    return {"enabled": SCHEDULER_ENABLED, "cron": SCHEDULER_CRON if SCHEDULER_ENABLED else None, "next_run_at": next_run}
 
 
 @app.get("/api/profiles/{actor_id}/sources")
