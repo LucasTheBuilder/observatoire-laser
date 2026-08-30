@@ -55,6 +55,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from alerts import capture_alerts
 from capabilities import collect_capability_specs
 from cordis import collect_cordis
 from db import (
@@ -797,6 +798,32 @@ def veille_metrics_capture():
     return capture_veille_metrics()
 
 
+@app.get("/api/digest")
+def digest(since: str | None = Query(None, description="Horodatage ISO 8601 ; par défaut les 7 derniers jours.")):
+    """Restitution des alertes (§5.F audit veille, 30/08/2026) : la règle que pose l'audit est
+    que ce digest ne doit contenir QUE du changement depuis `since`, jamais un état -- voir
+    alerts.py pour les 4 règles évaluées (transition radar->existing, nouveau fait chez un
+    acteur C1/C2, incident de collecte, événement M&A/financement). Groupé par type d'alerte,
+    trié du plus récent au plus ancien."""
+    since_value = since or (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    alert_rows = rows(
+        MARKET_DB,
+        "SELECT alert_type,actor_name,summary,detail,source_url,event_at FROM alerts WHERE event_at>=? ORDER BY event_at DESC",
+        (since_value,),
+    )
+    by_type: dict[str, list[dict]] = defaultdict(list)
+    for row in alert_rows:
+        by_type[row["alert_type"]].append(row)
+    return {"since": since_value, "total": len(alert_rows), "by_type": by_type}
+
+
+@app.post("/api/digest/capture")
+def digest_capture():
+    """Déclenche une évaluation immédiate des 4 règles d'alerte -- même fonction que celle
+    appelée automatiquement par _run_job après chaque collecte."""
+    return capture_alerts()
+
+
 # --- CRUD acteurs : les modèles Pydantic ci-dessous valident/documentent automatiquement le
 # corps JSON attendu par FastAPI pour chaque endpoint POST/PATCH. ---
 class ActorCreateRequest(BaseModel):
@@ -1347,6 +1374,11 @@ def _run_job(kind: str) -> None:
             # Tableau de bord de la veille (§10.11 audit veille, 30/08/2026) : même tolérance
             # qu'au-dessus, une capture ratée ne doit jamais faire échouer la collecte.
             capture_veille_metrics()
+        except Exception:
+            pass
+        try:
+            # Alertes (§5.F audit veille, 30/08/2026) : même tolérance.
+            capture_alerts()
         except Exception:
             pass
         with job_lock:

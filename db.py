@@ -1330,6 +1330,30 @@ def init_databases() -> None:
                 captured_at TEXT NOT NULL
             );
             CREATE UNIQUE INDEX IF NOT EXISTS veille_metrics_uq ON veille_metrics(period, indicator);
+
+            -- Alertes (§5.F audit veille, 30/08/2026, Lot 1 §1.4) : règles explicites évaluées
+            -- après chaque collecte (voir alerts.capture_alerts, appelée comme
+            -- capture_metric_snapshot/capture_veille_metrics) plutôt que des requêtes ad hoc au
+            -- moment de la lecture -- l'historique des alertes doit rester consultable même
+            -- après que l'état sous-jacent a changé. fingerprint rend la capture idempotente
+            -- (INSERT OR IGNORE), comme evidence_sources/offer_sources/vocabulary_candidates.
+            -- event_at est l'horodatage de l'ÉVÉNEMENT métier (changed_at/created_at/
+            -- last_profiled_at de la ligne source), jamais celui de la capture -- c'est lui que
+            -- /api/digest?since= filtre, pour que le digest ne contienne que du changement.
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_type TEXT NOT NULL CHECK(alert_type IN (
+                    'bucket_transition_existing', 'new_fact_high_value_actor', 'collection_incident', 'ma_funding_event'
+                )),
+                actor_name TEXT,
+                summary TEXT NOT NULL,
+                detail TEXT,
+                source_url TEXT,
+                fingerprint TEXT NOT NULL UNIQUE,
+                event_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS alerts_event_at_idx ON alerts(event_at);
             """
         )
         _add_columns(db, "offers", {
