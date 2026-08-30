@@ -377,6 +377,65 @@ def _migrate_industrial_stage_concatenation(db: sqlite3.Connection) -> None:
         db.execute("UPDATE offers SET industrial_stage=? WHERE id=?", (leading, row["id"]))
 
 
+# Mirrors scrapers.MATURITY_RULES' stage labels plus the "unknown" fallback
+# (scrapers._detect_maturity's own default). Kept as a literal set rather than imported --
+# scrapers.py already imports from db.py, so the reverse import would be circular -- exactly
+# the same trade-off _migrate_industrial_stage_concatenation already makes for _ARCHITECTURE_STAGE_RE.
+_INDUSTRIAL_STAGE_CANONICAL = frozenset({
+    "Production", "Industrialisation", "Pré-industrialisation", "Prototype", "R&D",
+    "Maturité industrielle non déterminée",
+})
+
+
+def _migrate_industrial_stage_placeholder_values(db: sqlite3.Connection) -> None:
+    """One-time (idempotent) cleanup for the audit's "industrial_stage ontology" finding: rows
+    written before scrapers._validate_ai_value existed (or by a now-dead extraction path) left
+    placeholder/garbage strings in industrial_stage instead of one of the labels
+    scrapers.MATURITY_RULES defines -- observed in production: the literal '<UNKNOWN>', the
+    stringified 'None' (a Python None that got str()'d instead of staying a real NULL), the
+    English 'commercialized', and even a project name ('projet LUMEN') that leaked in from a
+    CORDIS-style page instead of a maturity label. Today's extraction paths can no longer produce
+    these -- scrapers._validate_ai_value only ever lets an AI-proposed maturity through if it
+    exactly matches a known label (see its allowlist check), and scrapers._detect_maturity's
+    output is always one of MATURITY_RULES' fixed labels or the "unknown" default -- so this only
+    ever touches historical rows; new inserts never need it.
+
+    Deliberately never re-derives a stage from the stored `quote`: that text is a short excerpt,
+    while `bucket` was computed at insertion time from the full page section, so it stays more
+    trustworthy than a fresh classification run on a fragment (re-running _detect_maturity on a
+    truncated quote mostly returns "unknown" even for rows whose bucket is confidently
+    'existing'/'radar' -- a regression, not a fix). Instead this maps the corrupted label onto the
+    one canonical stage the row's own `bucket` already implies, reusing the correspondence the
+    rest of the table already shows: bucket='existing' co-occurs with industrial_stage='Production'
+    on every clean row, so a non-canonical 'existing' row becomes 'Production'; every other bucket
+    ('radar','pending') falls back to 'Maturité industrielle non déterminée' -- already the normal
+    label for a radar-stage row whose precise sub-stage (R&D/Prototype/Pré-industrialisation/
+    Industrialisation) isn't established from the text alone. `offers` has no bucket column, so a
+    non-canonical row there (none observed in production so far) falls back to the same
+    unknown-stage label unconditionally.
+    """
+    placeholders = ",".join("?" * len(_INDUSTRIAL_STAGE_CANONICAL))
+    pending = db.execute(
+        f"SELECT id,bucket,industrial_stage FROM evidence "
+        f"WHERE industrial_stage IS NOT NULL AND industrial_stage NOT IN ({placeholders})",
+        tuple(_INDUSTRIAL_STAGE_CANONICAL),
+    ).fetchall()
+    for row in pending:
+        replacement = "Production" if row["bucket"] == "existing" else "Maturité industrielle non déterminée"
+        db.execute("UPDATE evidence SET industrial_stage=? WHERE id=?", (replacement, row["id"]))
+
+    pending_offers = db.execute(
+        f"SELECT id FROM offers "
+        f"WHERE industrial_stage IS NOT NULL AND industrial_stage NOT IN ({placeholders})",
+        tuple(_INDUSTRIAL_STAGE_CANONICAL),
+    ).fetchall()
+    for row in pending_offers:
+        db.execute(
+            "UPDATE offers SET industrial_stage=? WHERE id=?",
+            ("Maturité industrielle non déterminée", row["id"]),
+        )
+
+
 def technology_signal_key(axis: str, project_name: str | None) -> str:
     """Identity for one science->industry readiness signal: the axis plus the named project it
     was observed in (not the source URL), so the same axis/project pair merges new citations
@@ -1084,6 +1143,7 @@ def init_databases() -> None:
         db.execute("UPDATE evidence_sources SET is_verbatim=0 WHERE extraction_mode IS NULL")
         db.execute("UPDATE offer_sources SET is_verbatim=0 WHERE extraction_mode IS NULL")
         _migrate_industrial_stage_concatenation(db)
+        _migrate_industrial_stage_placeholder_values(db)
         _backfill_evidence_type(db)
         _backfill_date_confidence_market(db)
         # Both migrations run on every startup, not just once: they are idempotent (a row that

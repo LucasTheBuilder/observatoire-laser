@@ -308,6 +308,60 @@ class IndustrialStageMigrationTests(unittest.TestCase):
             self.assertEqual("Production", row["industrial_stage"])
             self.assertIsNone(row["architecture"])
 
+    def test_placeholder_stage_values_are_normalized_by_bucket(self):
+        """Regression test for the audit's ontologie marché finding: legacy rows carrying
+        '<UNKNOWN>', a stringified 'None', 'commercialized' or a stray project name in
+        industrial_stage must be normalized to a canonical MATURITY_RULES label, using the
+        row's own bucket (never the quote) to decide which one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+            market_db = Path(tmp) / "market.db"
+            with (
+                patch.object(dbmod, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "MARKET_DB", market_db),
+                patch.object(dbmod, "TECH_DB", Path(tmp) / "technology.db"),
+            ):
+                dbmod.init_databases()
+                stamp = dbmod.utc_now()
+                # Distinct `component` per row: market_fact_key() is derived from
+                # (actor,bucket,market,component,operation), and _migrate_evidence_fact_model()
+                # (already exercised by other tests) consolidates rows that share a fact_key down
+                # to one representative -- irrelevant to what this test checks, so each row here
+                # must be its own distinct fact to survive that unrelated migration untouched.
+                rows = [
+                    ("existing", "Wafers-A", "<UNKNOWN>", "fp-existing-unknown"),
+                    ("existing", "Wafers-B", "commercialized", "fp-existing-commercialized"),
+                    ("radar", "Wafers-C", "<UNKNOWN>", "fp-radar-unknown"),
+                    ("radar", "Wafers-D", "None", "fp-radar-none"),
+                    ("radar", "Wafers-E", "projet LUMEN", "fp-radar-project-name"),
+                ]
+                with dbmod.connect(market_db) as db:
+                    for bucket, component, stage, fingerprint in rows:
+                        db.execute(
+                            """INSERT INTO evidence(
+                                   actor_name,bucket,market,component,operation,industrial_stage,source_url,quote,
+                                   source_group,fingerprint,review_status,created_at,updated_at
+                               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (
+                                "Example", bucket, "Semi-conducteurs", component, "Micro-usinage",
+                                stage, "https://example.test/", "quote", "grp", fingerprint, "accepted", stamp, stamp,
+                            ),
+                        )
+                # Same idempotency requirement as the concatenation migration above.
+                dbmod.init_databases()
+                dbmod.init_databases()
+
+            with dbmod.connect(market_db) as db:
+                stages = {
+                    row["fingerprint"]: row["industrial_stage"]
+                    for row in db.execute("SELECT fingerprint,industrial_stage FROM evidence WHERE fingerprint LIKE 'fp-%'")
+                }
+            self.assertEqual("Production", stages["fp-existing-unknown"])
+            self.assertEqual("Production", stages["fp-existing-commercialized"])
+            self.assertEqual("Maturité industrielle non déterminée", stages["fp-radar-unknown"])
+            self.assertEqual("Maturité industrielle non déterminée", stages["fp-radar-none"])
+            self.assertEqual("Maturité industrielle non déterminée", stages["fp-radar-project-name"])
+
 
 if __name__ == "__main__":
     unittest.main()
