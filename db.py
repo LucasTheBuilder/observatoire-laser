@@ -629,6 +629,36 @@ def _reconcile_technology_signal_maturity(db: sqlite3.Connection) -> None:
             db.execute("UPDATE technology_signals SET bucket=? WHERE id=?", (expected, row["id"]))
 
 
+def _widen_actor_candidate_sources_type(db: sqlite3.Connection) -> None:
+    """actor_candidate_sources.source_type gagne 'patent' (connecteur EPO OPS, Lot 3 §3.4) --
+    SQLite ne sait pas ALTER un CHECK existant : seule option, reconstruire la table. Idempotent
+    (contrôle le texte du CREATE TABLE en base avant de reconstruire quoi que ce soit)."""
+    row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='actor_candidate_sources'"
+    ).fetchone()
+    if row is None or "'patent'" in (row["sql"] or ""):
+        return
+    db.executescript(
+        """
+        CREATE TABLE actor_candidate_sources_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL REFERENCES actor_candidates(id) ON DELETE CASCADE,
+            source_type TEXT NOT NULL CHECK(source_type IN ('cordis','openalex','outbound_link','patent')),
+            context TEXT,
+            source_url TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(candidate_id, source_type, source_url)
+        );
+        INSERT INTO actor_candidate_sources_new
+            (id,candidate_id,source_type,context,source_url,created_at)
+            SELECT id,candidate_id,source_type,context,source_url,created_at FROM actor_candidate_sources;
+        DROP TABLE actor_candidate_sources;
+        ALTER TABLE actor_candidate_sources_new RENAME TO actor_candidate_sources;
+        CREATE INDEX IF NOT EXISTS actor_candidate_sources_candidate_idx ON actor_candidate_sources(candidate_id);
+        """
+    )
+
+
 def technology_signal_key(axis: str, project_name: str | None) -> str:
     """Identity for one science->industry readiness signal: the axis plus the named project it
     was observed in (not the source URL), so the same axis/project pair merges new citations
@@ -950,7 +980,7 @@ def init_databases() -> None:
             CREATE TABLE IF NOT EXISTS actor_candidate_sources (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 candidate_id INTEGER NOT NULL REFERENCES actor_candidates(id) ON DELETE CASCADE,
-                source_type TEXT NOT NULL CHECK(source_type IN ('cordis','openalex','outbound_link')),
+                source_type TEXT NOT NULL CHECK(source_type IN ('cordis','openalex','outbound_link','patent')),
                 context TEXT,
                 source_url TEXT,
                 created_at TEXT NOT NULL,
@@ -1286,6 +1316,7 @@ def init_databases() -> None:
             "country": "TEXT",
             "suggested_official_url": "TEXT",
         })
+        _widen_actor_candidate_sources_type(db)
         db.executescript(
             """
             CREATE INDEX IF NOT EXISTS actor_sources_actor_active_score_idx
