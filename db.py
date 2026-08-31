@@ -900,6 +900,23 @@ def init_databases() -> None:
                 last_checked_at TEXT,
                 last_changed_at TEXT
             );
+            -- Liens sortants vers un hôte hors du domaine racine de l'acteur, jamais crawlés
+            -- (§8.2 audit veille, 30/08/2026, Lot 2 §2.4) : "un hôte externe qui revient sur
+            -- cinq sites d'acteurs différents est un candidat acteur de très bonne qualité --
+            -- bien meilleur qu'une mention presse." Alimentée au passage du crawler (voir
+            -- hybrid._meaningful_links/ParsedDocument.outbound_links, scrapers.scrape_actors),
+            -- sans jamais suivre ces liens. UNIQUE(source_id,target_url) : une même page revue
+            -- plusieurs fois ne duplique jamais la même cible, seulement first_seen_at compte.
+            CREATE TABLE IF NOT EXISTS outbound_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL REFERENCES actor_sources(id) ON DELETE CASCADE,
+                target_url TEXT NOT NULL,
+                target_host TEXT NOT NULL,
+                label TEXT,
+                first_seen_at TEXT NOT NULL,
+                UNIQUE(source_id, target_url)
+            );
+            CREATE INDEX IF NOT EXISTS outbound_links_host_idx ON outbound_links(target_host);
             -- Historique des versions d'une page (chantier 6 : "le content_hash détecte déjà
             -- le changement, il suffit de conserver l'avant"). Une ligne par changement de
             -- contenu détecté -- voir scrapers.scrape_actors, juste avant que la ligne

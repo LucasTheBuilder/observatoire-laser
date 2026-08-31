@@ -2287,6 +2287,15 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                                 signal = _extract_career_signal(block)
                                 if signal:
                                     _upsert_career_event(db, actor["id"], signal, resolved_url)
+                        # §8.2 audit veille (30/08/2026, Lot 2 §2.4) : jamais crawlés, juste
+                        # tracés -- voir hybrid._meaningful_links pour la distinction domaine
+                        # racine (admis)/externe (ici uniquement).
+                        for outbound in document.outbound_links:
+                            db.execute(
+                                """INSERT OR IGNORE INTO outbound_links(source_id,target_url,target_host,label,first_seen_at)
+                                   VALUES(?,?,?,?,?)""",
+                                (source_id, outbound["url"], outbound["host"], outbound.get("label") or None, stamp),
+                            )
                         db.execute(
                             """UPDATE actor_sources SET content_hash=?,last_http_status=?,last_checked_at=?,last_title=?,
                                       page_type=?,source_score=?,extraction_mode=?,structure_hash=?,blocks_json=?,last_error=NULL,

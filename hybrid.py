@@ -23,7 +23,7 @@ import re
 import time
 import unicodedata
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
@@ -181,6 +181,12 @@ class ParsedDocument:
     # JavaScript, que nous n'exécutons jamais". Jamais corrigé automatiquement ici (pas de
     # Playwright), seulement signalé pour qu'un humain sache où chercher.
     render_required: bool = False
+    # §8.2 audit veille (30/08/2026, Lot 2 §2.4) : liens vers un hôte hors du domaine racine de
+    # l'acteur, jamais crawlés, mais gardés en trace -- "un hôte externe qui revient sur cinq
+    # sites d'acteurs différents est un candidat acteur de très bonne qualité". Voir
+    # _meaningful_links pour la distinction domaine racine (admis, crawlé) / externe (ici, pas
+    # crawlé) -- scrapers.py écrit cette liste dans outbound_links, hybrid.py ne fait pas d'I/O.
+    outbound_links: list[dict[str, Any]] = field(default_factory=list)
 
 
 
@@ -415,17 +421,39 @@ def _path(tag: Tag) -> str:
     return " > ".join(reversed(parts))
 
 
-def _meaningful_links(soup: BeautifulSoup, base_url: str, profile: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Filtre tous les liens `<a href>` de la page pour ne garder que ceux qui valent la peine
-    d'être ajoutés à la file de crawl : même domaine, pas de type "ignore", et soit un lien de
-    navigation (menu), soit un lien de contenu qui contient un terme de découverte
-    (DISCOVERY_TERMS) ou un fragment priority_paths. Un même lien vu plusieurs fois (URL
-    canonique identique) ne garde que sa meilleure occurrence. Trié par score décroissant et
-    limité à `crawl.max_links_per_page` -- c'est cette liste que scrapers.py pousse dans sa
-    file de priorité (voir scrapers.scrape_actors)."""
+def _root_domain(netloc: str) -> str:
+    """Approximation du domaine racine (2 derniers labels, ex: "example.com" pour
+    "shop.example.com") -- volontairement sans liste de suffixes publics (aucune dépendance
+    ajoutée) : imprécis sur les TLD à 2 parties (.co.uk, .com.au), où un sous-domaine légitime
+    sera traité comme externe (faux négatif, jamais l'inverse -- jamais un vrai tiers admis
+    comme sous-domaine)."""
+    host = netloc.lower().removeprefix("www.")
+    labels = host.split(".")
+    return ".".join(labels[-2:]) if len(labels) >= 2 else host
+
+
+def _meaningful_links(
+    soup: BeautifulSoup, base_url: str, profile: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Filtre tous les liens `<a href>` de la page. Renvoie (links, outbound_links) :
+
+    - ``links`` : ceux qui valent la peine d'être ajoutés à la file de crawl -- même DOMAINE
+      RACINE (§8.2 audit veille, 30/08/2026, Lot 2 §2.4 : un sous-domaine comme shop.example.com
+      est désormais admis, plus seulement une correspondance exacte de host), pas de type
+      "ignore", et soit un lien de navigation (menu), soit un lien de contenu qui contient un
+      terme de découverte (DISCOVERY_TERMS) ou un fragment priority_paths. Un même lien vu
+      plusieurs fois (URL canonique identique) ne garde que sa meilleure occurrence. Trié par
+      score décroissant et limité à `crawl.max_links_per_page`.
+    - ``outbound_links`` : liens de contenu vers un hôte hors du domaine racine -- jamais
+      crawlés, mais gardés en trace (voir ParsedDocument.outbound_links) : "un hôte externe qui
+      revient sur cinq sites d'acteurs différents est un candidat acteur de très bonne qualité".
+      Les liens de navigation externes (réseaux sociaux, mentions légales d'un tiers...) sont
+      exclus de cette trace -- trop bruyants pour signaler un candidat acteur.
+    """
     profile = profile or DEFAULT_SITE_PROFILE
-    base_host = urlparse(base_url).netloc.lower().removeprefix("www.")
+    base_root = _root_domain(urlparse(base_url).netloc)
     found: dict[str, dict[str, Any]] = {}
+    outbound: dict[str, dict[str, Any]] = {}
     max_links = int(profile.get("crawl", {}).get("max_links_per_page", 160))
     for link in soup.select("a[href]"):
         label = _clean(link.get_text(" ", strip=True))
@@ -433,7 +461,12 @@ def _meaningful_links(soup: BeautifulSoup, base_url: str, profile: dict[str, Any
         parsed = urlparse(href)
         if parsed.scheme not in ("http", "https"):
             continue
-        if parsed.netloc.lower().removeprefix("www.") != base_host:
+        if _root_domain(parsed.netloc) != base_root:
+            context = "navigation" if link.find_parent(["nav", "header"]) else "content"
+            if context == "content":
+                outbound.setdefault(href, {
+                    "url": href, "host": parsed.netloc.lower().removeprefix("www."), "label": label[:180],
+                })
             continue
         category, score = classify_source(href, label, profile=profile)
         if category == "ignore":
@@ -461,7 +494,8 @@ def _meaningful_links(soup: BeautifulSoup, base_url: str, profile: dict[str, Any
         previous = found.get(key)
         if not previous or score > int(previous.get("score", 0)):
             found[key] = item
-    return sorted(found.values(), key=lambda item: (-int(item["score"]), item["url"]))[:max_links]
+    links = sorted(found.values(), key=lambda item: (-int(item["score"]), item["url"]))[:max_links]
+    return links, list(outbound.values())
 
 
 def _heading_hierarchy(tag: Tag) -> tuple[str, str, str, str]:
@@ -1204,7 +1238,7 @@ def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = No
     published_date = _extract_published_date(soup, base_url)
     # Order matters: links must be classified while <nav>/<header> are still in the tree, since
     # _meaningful_links tells navigation from content links by walking up to those very tags.
-    links = _meaningful_links(soup, base_url, profile=profile)
+    links, outbound_links = _meaningful_links(soup, base_url, profile=profile)
     # Counted before _remove_noise_zones strips every <script> tag below -- see
     # _render_required_signal, which needs this as a JS-app marker.
     external_script_count = sum(1 for tag in soup.find_all("script") if isinstance(tag, Tag) and tag.get("src"))
@@ -1348,6 +1382,7 @@ def parse_document(html: str, base_url: str, profile: dict[str, Any] | None = No
         oversized_blocks=int(metrics["oversized_blocks"]),
         published_date=published_date,
         render_required=_render_required_signal(root, blocks, external_script_count),
+        outbound_links=outbound_links,
     )
 
 
