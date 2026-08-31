@@ -10,6 +10,7 @@ const state = {
   profiles: [],
   vocabulary: [],
   marketReview: [],
+  actorDiscovery: [],
   network: {nodes: [], edges: []},
   duplicates: [],
   pipelineFunnel: {discovered: 0, fetched: 0, parsed: 0, evidence: 0, validated: 0},
@@ -481,6 +482,14 @@ function nextBestActions() {
       label: `Valider ${pendingVocab} terme${pendingVocab > 1 ? "s" : ""} en attente`,
       detail: "File de validation du vocabulaire.",
       view: "vocabulary",
+    });
+  }
+  const pendingCandidates = (state.actorDiscovery || []).length;
+  if (pendingCandidates > 0) {
+    actions.push({
+      label: `Trier ${pendingCandidates} acteur${pendingCandidates > 1 ? "s" : ""} candidat${pendingCandidates > 1 ? "s" : ""}`,
+      detail: "Organisations repérées automatiquement, à promouvoir ou rejeter.",
+      view: "actor-discovery",
     });
   }
   const pendingMarketReview = (state.marketReview || []).length;
@@ -1389,6 +1398,88 @@ function renderMarketReview() {
   wireActions();
 }
 
+// --- Découverte d'acteurs (Lot 3 §3.2/§3.4) : rubrique unique regroupant les candidats
+// accumulés par toutes les sources -- CORDIS, OpenAlex, brevets EPO OPS, liens sortants
+// récurrents (voir actor_discovery.py/cordis.py/openalex.py/patent.py) -- avant qu'un humain
+// ne décide de les promouvoir. Un candidat promu devient un acteur réel review_status='candidate'
+// et rejoint alors la file « En attente de validation » déjà présente sur la page Acteurs
+// (reviewActorCard plus haut) pour la décision finale -- deux étapes distinctes, jamais
+// fusionnées : un nom candidat n'est pas encore un acteur.
+const CANDIDATE_SOURCE_LABELS = {cordis: "CORDIS", openalex: "OpenAlex", outbound_link: "Lien sortant", patent: "Brevet EPO OPS"};
+
+const CANDIDATE_MAX_VISIBLE_OCCURRENCES = 4;
+
+function actorCandidateCard(item) {
+  const sources = item.sources || [];
+  const distinctTypes = [...new Set(sources.map(s => s.source_type))];
+  const sourceLine = distinctTypes.map(t => CANDIDATE_SOURCE_LABELS[t] || t).join(" · ");
+  const visible = sources.slice(0, CANDIDATE_MAX_VISIBLE_OCCURRENCES);
+  const hiddenCount = sources.length - visible.length;
+  return `<article class="vocab-card">
+    <header><span>${esc(item.name)}${item.country ? ` · ${esc(item.country)}` : ""}</span><span>${item.score} source${item.score > 1 ? "s" : ""} indépendante${item.score > 1 ? "s" : ""}</span></header>
+    ${sourceLine ? `<small class="block-label">${esc(sourceLine)}</small>` : ""}
+    ${visible.map(s => `<blockquote>${esc(s.context || "Occurrence sans contexte capturé.")}${s.source_url ? ` <a class="signal-link" href="${esc(s.source_url)}" target="_blank" rel="noopener">↗</a>` : ""}</blockquote>`).join("")}
+    ${hiddenCount > 0 ? `<small class="block-label">+ ${hiddenCount} autre${hiddenCount > 1 ? "s" : ""} occurrence${hiddenCount > 1 ? "s" : ""}</small>` : ""}
+    <div class="vocab-dims" style="margin-top:12px">
+      <button class="vocab-accept" data-promote-candidate="${item.id}">✓ Promouvoir</button>
+      <button class="vocab-reject" data-reject-candidate="${item.id}">✕ Rejeter</button>
+    </div>
+  </article>`;
+}
+
+function renderActorDiscovery() {
+  const items = state.actorDiscovery || [];
+  content.innerHTML = header(
+    "Administration",
+    "Découverte d'acteurs",
+    "Organisations repérées automatiquement -- consortiums CORDIS, co-auteurs OpenAlex, déposants de brevets EPO OPS, liens sortants revenant sur plusieurs sites d'acteurs -- mais jamais ajoutées comme acteur tant qu'un humain ne l'a pas validé. Le score compte les sources indépendantes qui citent le même nom. Promouvoir crée un acteur réel, qui rejoint ensuite la file « En attente de validation » de la page Acteurs pour la décision finale."
+  ) +
+  (items.length
+    ? `<div class="vocab-list">${items.map(actorCandidateCard).join("")}</div>`
+    : `<div class="empty">Aucun candidat en attente de revue.</div>`);
+  wireActions();
+}
+
+function showCandidatePromote(candidateId) {
+  const item = (state.actorDiscovery || []).find(c => c.id === candidateId);
+  if (!item) return;
+  document.querySelector("#proof-content").innerHTML = `<p class="eyebrow">Promouvoir en acteur</p>
+    <h2>${esc(item.name)}</h2>
+    <form id="candidate-promote-form" class="detail-form">
+      <label>Rôle<input type="text" name="role" placeholder="Rôle" required></label>
+      <label>Pays<input type="text" name="country" value="${esc(item.country || "")}" placeholder="Pays" required></label>
+      <label>Site officiel<input type="url" name="official_url" value="${esc(item.suggested_official_url || "")}" placeholder="https://site-officiel.example" required></label>
+      <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Promouvoir</button></div>
+    </form>`;
+  dialog.classList.remove("wide");
+  dialog.showModal();
+  document.querySelector("#candidate-promote-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const data = new FormData(e.target);
+    try {
+      await api(`/api/actor-candidates/${candidateId}/promote`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({role: data.get("role"), country: data.get("country"), official_url: data.get("official_url")}),
+      });
+      toast("Candidat promu en acteur.");
+      dialog.close();
+      [state.actorDiscovery, state.actors] = await Promise.all([api("/api/actor-candidates"), api("/api/actors")]);
+      renderActorDiscovery();
+    } catch (error) { toast(error.message); }
+  });
+  document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
+}
+
+async function rejectCandidate(candidateId) {
+  try {
+    await api(`/api/actor-candidates/${candidateId}/reject`, {method: "POST"});
+    toast("Candidat rejeté.");
+    state.actorDiscovery = await api("/api/actor-candidates");
+    renderActorDiscovery();
+  } catch (error) { toast(error.message); }
+}
+
 function dbCard(kind,label,file,count,detail,paused=false) {
   const last=state.overview?.[kind]?.last_run;
   const job=state.overview?.jobs?.[kind];
@@ -1685,6 +1776,7 @@ function render(){
   if(state.view==="trends") renderTrends();
   if(state.view==="vocabulary") renderVocabulary();
   if(state.view==="market-review") renderMarketReview();
+  if(state.view==="actor-discovery") renderActorDiscovery();
   if(state.view==="collections") renderCollections();
   if(state.view==="settings") renderSettings();
 }
@@ -1846,6 +1938,8 @@ function wireActions(){
   document.querySelectorAll("[data-accept-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.acceptMarketReview),"accept")));
   document.querySelectorAll("[data-reject-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.rejectMarketReview),"reject")));
   document.querySelectorAll("[data-review-actor]").forEach(button=>button.addEventListener("click",()=>decideActorReview(Number(button.dataset.reviewActor), button.dataset.reviewStatus)));
+  document.querySelectorAll("[data-promote-candidate]").forEach(button=>button.addEventListener("click",()=>showCandidatePromote(Number(button.dataset.promoteCandidate))));
+  document.querySelectorAll("[data-reject-candidate]").forEach(button=>button.addEventListener("click",()=>rejectCandidate(Number(button.dataset.rejectCandidate))));
   document.querySelectorAll("[data-actor-detail]").forEach(el=>el.addEventListener("click",()=>showActorDetail(Number(el.dataset.actorDetail))));
   document.querySelectorAll("[data-actor-edit]").forEach(el=>el.addEventListener("click",()=>showActorEdit(Number(el.dataset.actorEdit))));
   document.querySelectorAll("[data-actor-toggle-priority]").forEach(el=>el.addEventListener("click",()=>toggleActorPriority(Number(el.dataset.actorTogglePriority), el.dataset.nextPriority==="1")));
@@ -1870,7 +1964,7 @@ document.querySelector(".dialog-close").addEventListener("click",()=>dialog.clos
 dialog.addEventListener("click",e=>{if(e.target===dialog)dialog.close()});
 
 async function refresh(){
-  [state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.documents,state.actors,state.profiles,state.vocabulary,state.marketReview,state.network,state.duplicates,state.pipelineFunnel,state.marketScores]=await Promise.all([
+  [state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.documents,state.actors,state.profiles,state.vocabulary,state.marketReview,state.network,state.duplicates,state.pipelineFunnel,state.marketScores,state.actorDiscovery]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
     api("/api/market"),
@@ -1885,6 +1979,7 @@ async function refresh(){
     api("/api/actors/duplicates"),
     api("/api/pipeline-funnel"),
     api("/api/market-scores"),
+    api("/api/actor-candidates"),
   ]);
   render();
 }
