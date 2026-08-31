@@ -351,18 +351,35 @@ def _normalize_existing_page_types(db: sqlite3.Connection) -> None:
 # Public (no leading underscore): scrapers.py imports this rather than keeping its own copy,
 # so language tagging stays identical between actor_sources/evidence_sources (written here) and
 # evidence/offers (written by the crawler) instead of silently drifting apart.
+# §10.6 audit veille (30/08/2026) : "language est NULL pour 49 des 71 faits (69%) --
+# language_from_url() ne sait lire que les segments /en/, /de/. Les sites monolingues ou à
+# sous-domaine ne sont pas typés." Élargi aux langues réellement présentes chez les acteurs en
+# base (DE/CH/FR/UK/ES/IE/NL/LT/BE/CZ/IT/AT, voir la répartition géographique §10.8) et à la
+# détection par sous-domaine (ex: en.example.com), pas seulement par segment de chemin.
+_LANGUAGE_URL_CODES: dict[str, str] = {
+    "fr": "fr", "fr-fr": "fr", "france": "fr", "francais": "fr",
+    "en": "en", "en-gb": "en", "en-us": "en", "english": "en",
+    "de": "de", "de-de": "de", "deutsch": "de",
+    "es": "es", "es-es": "es", "espanol": "es",
+    "it": "it", "it-it": "it", "italiano": "it",
+    "nl": "nl", "nl-nl": "nl", "nederlands": "nl",
+    "lt": "lt", "lietuviu": "lt",
+    "cs": "cs", "cz": "cs", "cesky": "cs",
+}
+
+
 def language_from_url(url: str | None) -> str | None:
-    path = urlparse(url or "").path.casefold()
-    parts = [part for part in path.split("/") if part]
-    if not parts:
-        return None
-    first = parts[0]
-    if first in {"fr", "fr-fr", "france"}:
-        return "fr"
-    if first in {"en", "en-gb", "en-us"}:
-        return "en"
-    if first in {"de", "de-de"}:
-        return "de"
+    parsed = urlparse(url or "")
+    path_parts = [part for part in parsed.path.casefold().split("/") if part]
+    if path_parts and path_parts[0] in _LANGUAGE_URL_CODES:
+        return _LANGUAGE_URL_CODES[path_parts[0]]
+    # Sous-domaine (ex: en.example.com, de.example.com) : un site sans segment /xx/ dans le
+    # chemin peut quand même porter la langue dans son hôte. Le lookup exact contre
+    # _LANGUAGE_URL_CODES exclut déjà les sous-domaines non-langue (www, shop, docs...) sans
+    # liste d'exclusion séparée à maintenir.
+    host_parts = parsed.netloc.casefold().split(".")
+    if len(host_parts) > 2 and host_parts[0] in _LANGUAGE_URL_CODES:
+        return _LANGUAGE_URL_CODES[host_parts[0]]
     return None
 
 
