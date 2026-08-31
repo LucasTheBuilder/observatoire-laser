@@ -59,6 +59,7 @@ from db import (
     numeric_spec_tokens,
     offer_fact_key,
     purge_stale_backlog,
+    technology_signal_key,
     utc_now,
 )
 from hybrid import (
@@ -3085,6 +3086,61 @@ def scrape_market(max_pages: int | None = None, actor_names: list[str] | None = 
     }
 
 
+def upsert_document_technology_signal(
+    db, title: str, abstract: str, source_url: str, actor_name: str | None = None,
+) -> int:
+    """§4.C.2 audit veille (30/08/2026, Lot 3 §3.5) : "axe + maturité sur les documents
+    Crossref/OpenAlex -- branchement de lexiques existants." Un document est déjà filtré
+    on-topic avant d'être inséré dans `documents` (voir scrape_technology/
+    openalex.collect_openalex_publications) ; ce qui manquait était de le classer sur les MÊMES
+    lexiques que cordis.py utilise déjà pour les projets (PROCESS_TECHNOLOGIES, MATURITY_RULES)
+    plutôt que de le laisser sans axe technologique. Un document peut porter plusieurs axes.
+    Même garde-fou anti-faux-positif que is_on_topic() : un axe générique
+    (_GENERIC_PROCESS_AXES) ne compte que si un vrai terme laser est aussi présent dans le
+    texte, jamais seul. Renvoie le nombre de nouveaux signaux créés (0 si déjà connus ou aucun
+    axe détecté)."""
+    text = f"{title} {abstract or ''}"
+    labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
+    if not _laser_match(text):
+        labels -= _GENERIC_PROCESS_AXES
+    if not labels:
+        return 0
+
+    bucket, stage = _detect_maturity(text)
+    if bucket == "unknown":
+        bucket = "radar"
+    actor_names = [actor_name] if actor_name else []
+    stamp = utc_now()
+    added = 0
+    for axis in sorted(labels):
+        # Discriminant sur l'URL du document (stable, toujours disponible), pas son titre --
+        # deux documents distincts ne partagent jamais une URL, contrairement à un titre qui
+        # pourrait coïncider.
+        fact_key = technology_signal_key(axis, source_url)
+        quote = _quote(text, PROCESS_TECHNOLOGIES.get(axis, {}).get("any_of", ()))
+        row = db.execute("SELECT id,actor_names FROM technology_signals WHERE fact_key=?", (fact_key,)).fetchone()
+        if row:
+            if actor_name:
+                merged = sorted(set(json.loads(row["actor_names"] or "[]")) | {actor_name})
+                db.execute(
+                    "UPDATE technology_signals SET actor_names=?,updated_at=?,last_seen_at=? WHERE id=?",
+                    (json.dumps(merged, ensure_ascii=False), stamp, stamp, row["id"]),
+                )
+            continue
+        db.execute(
+            """INSERT INTO technology_signals(
+                   axis,maturity_stage,bucket,project_name,actor_names,source_url,source_title,quote,
+                   fact_key,fingerprint,review_status,field_confidence,created_at,updated_at,last_seen_at
+               ) VALUES(?,?,?,NULL,?,?,?,?,?,?,'accepted',0.7,?,?,?)""",
+            (
+                axis, stage, bucket, json.dumps(actor_names, ensure_ascii=False), source_url, title, quote,
+                fact_key, hashlib.sha256(fact_key.encode()).hexdigest(), stamp, stamp, stamp,
+            ),
+        )
+        added += 1
+    return added
+
+
 def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
     """Collect recent publication signals from several targeted Crossref queries.
 
@@ -3103,7 +3159,7 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
     from_date = (date.today() - timedelta(days=effective_lookback)).isoformat()
     per_query = max(5, min(40, (max(1, limit) + len(TECHNOLOGY_QUERIES) - 1) // len(TECHNOLOGY_QUERIES)))
 
-    scanned = relevant = added = errors = 0
+    scanned = relevant = added = errors = technology_signals_added = 0
     pooled: dict[str, dict] = {}
     messages: list[str] = []
 
@@ -3186,6 +3242,12 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
                             "UPDATE documents SET last_seen_at=? WHERE fingerprint=?",
                             (stamp, fingerprint),
                         )
+                    # §4.C.2 audit veille (Lot 3 §3.5) : appelé pour chaque document, nouveau ou
+                    # déjà connu -- idempotent (fact_key dédoublonne), donc sans coût à reclasser
+                    # un document déjà vu qui n'avait pas encore de signal.
+                    technology_signals_added += upsert_document_technology_signal(
+                        db, item["title"], item["abstract"], item["url"],
+                    )
                 except Exception as exc:
                     errors += 1
                     messages.append(f"{item.get('title', '?')[:60]}: {str(exc)[:140]}")
@@ -3213,6 +3275,7 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
         "scanned": scanned,
         "relevant": relevant,
         "added": added,
+        "technology_signals_added": technology_signals_added,
         "errors": errors,
         "queries": len(TECHNOLOGY_QUERIES),
         "lookback_days": effective_lookback,

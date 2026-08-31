@@ -37,7 +37,7 @@ import httpx
 
 from actor_discovery import upsert_actor_candidate
 from db import ACTORS_DB, TECH_DB, compute_is_backfill, connect, utc_now
-from scrapers import CRAWLER_CONTACT, HEADERS, is_on_topic
+from scrapers import CRAWLER_CONTACT, HEADERS, is_on_topic, upsert_document_technology_signal
 
 OPENALEX_API = "https://api.openalex.org"
 OPENALEX_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
@@ -182,7 +182,7 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
     with connect(TECH_DB) as db:
         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
 
-    matched_actors = added = attributed = off_topic = candidates_added = errors = 0
+    matched_actors = added = attributed = off_topic = candidates_added = technology_signals_added = errors = 0
     with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=OPENALEX_TIMEOUT) as client:
         for actor in actors:
             try:
@@ -203,6 +203,13 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                         inserted, was_attributed = _upsert_document(db, actor["name"], item)
                         added += inserted
                         attributed += was_attributed
+                        # §4.C.2 audit veille (Lot 3 §3.5) : titre seul, comme _work_is_on_topic
+                        # ci-dessus -- OpenAlex n'expose l'abstract qu'en index inversé, pas
+                        # demandé ici (même choix que le reste de ce module : pas de nouveau
+                        # champ API tant que le titre suffit).
+                        technology_signals_added += upsert_document_technology_signal(
+                            db, item["title"], "", item["url"], actor["name"],
+                        )
                         # §4.D audit veille (Lot 3 §3.2) : une institution co-autrice récurrente
                         # sur des travaux on-topic est un candidat acteur -- voir actor_discovery.py.
                         for co_name in _co_institutions(work, institution_id):
@@ -221,7 +228,7 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                 utc_now(), "completed", matched_actors, added, errors,
                 f"OpenAlex : {matched_actors} institutions vérifiées par domaine, {added} nouvelles publications, "
                 f"{attributed} déjà connues ré-attribuées à un acteur, {off_topic} hors sujet filtrées, "
-                f"{candidates_added} candidats acteurs (co-institutions)",
+                f"{candidates_added} candidats acteurs (co-institutions), {technology_signals_added} signaux technologiques",
                 run_id,
             ),
         )
@@ -231,5 +238,6 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
         "documents_attributed": attributed,
         "documents_off_topic": off_topic,
         "actor_candidates_added": candidates_added,
+        "technology_signals_added": technology_signals_added,
         "errors": errors,
     }
