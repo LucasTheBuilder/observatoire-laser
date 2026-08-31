@@ -66,7 +66,7 @@ from hybrid import is_pdf_response, parse_document, parse_pdf_document
 from scrapers import HEADERS, MATERIALS, TIMEOUT, _fetch, _match_all_labels, _stored_blocks
 from site_profiles import get_site_profile
 
-CAPABILITY_PAGE_TYPES = ("product", "equipment", "capability", "service", "about")
+CAPABILITY_PAGE_TYPES = ("product", "equipment", "capability", "service", "about", "datasheet")
 # Bounds capacity of work per actor -- current data (81 product + 60 equipment + 16 capability
 # pages across 34 actors) never gets close to this, it only guards against one actor's page
 # count growing unchecked as the crawl deepens over time.

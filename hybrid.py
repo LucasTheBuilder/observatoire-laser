@@ -45,6 +45,12 @@ SECTION_SCORES = {
     "case_study": 100,
     "project": 95,
     "news": 90,
+    # §8.1/§9.3 audit veille (30/08/2026) : parse_pdf_document() existe et fonctionne (27 PDF
+    # parsés en production) mais ne recevait quasiment jamais un vrai datasheet -- ceux qui
+    # passaient étaient des catalogues/rapports annuels/CGV trouvés par accident. Un datasheet
+    # est la source la plus dense en specs chiffrées (capability_spec) du corpus entier ; noté
+    # au niveau de "news" pour qu'il remonte vraiment en tête de file de crawl.
+    "datasheet": 90,
     "service": 85,
     "capability": 82,
     "technology": 80,
@@ -66,6 +72,11 @@ DISCOVERY_TERMS = (
     "news", "blog", "nouveaute", "nouveauté", "actualite", "actualité", "project", "projects",
     "projet", "market", "markets", "marche", "marché", "secteur", "secteurs", "industrie", "industry", "production", "manufacturing",
     "medical", "battery", "glass", "laser", "equipment", "equipement", "publication", "paper",
+    # §8.1 audit veille (30/08/2026) : un lien "Download datasheet (PDF)" posé dans le corps
+    # d'une page produit était jeté avant même d'être classé -- aucun de ces termes n'existait.
+    "datasheet", "data sheet", "fiche technique", "technische daten", "brochure",
+    "specification", "specifications", "spécifications", "download", "téléchargement",
+    "catalog", "catalogue", "white paper",
 )
 
 
@@ -322,7 +333,20 @@ def classify_source(
     if re.search(r"\b(contact|mentions? legales?|privacy|confidentialite|cookies?|login|careers?|recrutement|jobs?|legal notice|newsletter)\b", words):
         return "ignore", SECTION_SCORES["ignore"]
 
+    # §8.1/§9.3 audit veille (30/08/2026) : "le taux de captation des PDF utiles est proche de
+    # zéro, pas le mécanisme" -- sur 27 PDF déjà parsés en production, zéro datasheet, mais un
+    # catalogue d'entreprise, des rapports annuels, des CGV, une offre d'emploi. La règle croise
+    # donc le suffixe .pdf ET un terme datasheet-ish (label/URL/titre) plutôt que de classer
+    # tout PDF comme datasheet -- un rapport annuel ou des CGV en .pdf doivent rester classés
+    # par les règles normales ci-dessous, pas artificiellement remontés. Placée en tête de
+    # `rules` (pas un cas à part) pour hériter exactement du même calcul de score (boosts de
+    # profil, priority_paths, priority_terms) que les autres types.
+    is_pdf_url = parsed.path.lower().endswith(".pdf")
+    datasheet_rule = (
+        ("datasheet", r"\b(datasheet|data sheet|fiche technique|technische daten|specifications?|catalog(?:ue)?|brochure|white paper)\b"),
+    ) if is_pdf_url else ()
     rules = (
+        *datasheet_rule,
         ("case_study", r"\b(case stud(?:y|ies)|case-study|customer cases?|cas clients?|realisations?|success stor(?:y|ies))\b"),
         ("application", r"\b(applications?|use cases?|applications? industrielles?)\b"),
         ("project", r"\b(projects?|projets?|collaborations?|collaborative projects?)\b"),
@@ -402,7 +426,12 @@ def _meaningful_links(soup: BeautifulSoup, base_url: str, profile: dict[str, Any
         haystack = _plain(f"{label} {parsed.path}")
         has_discovery_term = any(_plain(term) in haystack for term in DISCOVERY_TERMS)
         has_priority_path = any(fragment.lower() in parsed.path.lower() for fragment in profile.get("priority_paths", ()))
-        if context != "navigation" and not has_discovery_term and not has_priority_path:
+        # §8.1 audit veille (30/08/2026) : un PDF est intrinsèquement digne d'intérêt (comme un
+        # lien de navigation), sans exiger de terme de découverte -- classify_source() a déjà
+        # le dernier mot sur son TYPE (datasheet vs autre), ce filtre ne fait que le laisser
+        # passer jusque-là au lieu de le jeter avant même d'être classé.
+        is_pdf = parsed.path.lower().endswith(".pdf")
+        if context != "navigation" and not has_discovery_term and not has_priority_path and not is_pdf:
             continue
         key = canonical_url(href)
         item = {
@@ -411,7 +440,7 @@ def _meaningful_links(soup: BeautifulSoup, base_url: str, profile: dict[str, Any
             "context": context,
             "category": category,
             "score": score,
-            "reason": "priority-path" if has_priority_path else ("navigation" if context == "navigation" else "discovery-term"),
+            "reason": "priority-path" if has_priority_path else ("navigation" if context == "navigation" else ("pdf" if is_pdf else "discovery-term")),
         }
         previous = found.get(key)
         if not previous or score > int(previous.get("score", 0)):
