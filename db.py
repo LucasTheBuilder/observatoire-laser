@@ -1282,6 +1282,10 @@ def init_databases() -> None:
             "materials_qualified_source_url": "TEXT",
             "batch_size_range_source_url": "TEXT",
         })
+        _add_columns(db, "actor_candidates", {
+            "country": "TEXT",
+            "suggested_official_url": "TEXT",
+        })
         db.executescript(
             """
             CREATE INDEX IF NOT EXISTS actor_sources_actor_active_score_idx
