@@ -56,6 +56,15 @@ NON_ACTOR_HOSTS = frozenset({
 MIN_OUTBOUND_ACTOR_RECURRENCE = 2
 
 
+def _root_domain(host: str) -> str:
+    """Même heuristique que hybrid._root_domain (2 derniers labels, sans liste de suffixes
+    publics) -- dupliquée plutôt qu'importée, ce module n'a pas d'autre lien avec hybrid.py.
+    Nécessaire ici : un hôte comme de.linkedin.com (sous-domaine pays) ne matche jamais
+    NON_ACTOR_HOSTS/known_domains en comparaison exacte, seulement en domaine racine."""
+    labels = host.lower().removeprefix("www.").split(".")
+    return ".".join(labels[-2:]) if len(labels) >= 2 else host
+
+
 def _normalize_name(value: str) -> str:
     """Majuscules, sans accents, ponctuation réduite à des espaces simples -- même principe que
     cordis._normalize_org_text, pour que deux graphies d'un même nom se déduplique."""
@@ -125,6 +134,11 @@ def _discover_from_cordis(db, known_names: set[str]) -> int:
 
 def _discover_from_outbound_links(db, known_names: set[str], known_domains: set[str]) -> int:
     added = 0
+    # Comparé par DOMAINE RACINE, pas par hôte exact : de.linkedin.com/fr.linkedin.com/...
+    # partagent tous linkedin.com comme racine, et un seul hôte exact ne recoupe jamais tous
+    # les sous-domaines pays d'une même plateforme (constaté en production, 30/08/2026).
+    non_actor_roots = {_root_domain(host) for host in NON_ACTOR_HOSTS}
+    known_roots = {_root_domain(host) for host in known_domains}
     for row in db.execute(
         """SELECT ol.target_host,ol.target_url,ol.label,COUNT(DISTINCT s.actor_id) AS actor_count
            FROM outbound_links ol JOIN actor_sources s ON s.id=ol.source_id
@@ -132,7 +146,7 @@ def _discover_from_outbound_links(db, known_names: set[str], known_domains: set[
         (MIN_OUTBOUND_ACTOR_RECURRENCE,),
     ).fetchall():
         host = row["target_host"]
-        if host in NON_ACTOR_HOSTS or host in known_domains:
+        if _root_domain(host) in non_actor_roots or _root_domain(host) in known_roots:
             continue
         name = row["label"].strip() if row["label"] and row["label"].strip() else host
         if _normalize_name(name) in known_names:

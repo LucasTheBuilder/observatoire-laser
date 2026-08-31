@@ -34,6 +34,18 @@ def _setup(tmp: str) -> Path:
     return actors_db
 
 
+class RootDomainTests(unittest.TestCase):
+    def test_subdomain_shares_root_with_bare_domain(self):
+        self.assertEqual(ad._root_domain("linkedin.com"), ad._root_domain("de.linkedin.com"))
+        self.assertEqual(ad._root_domain("linkedin.com"), ad._root_domain("fr.linkedin.com"))
+
+    def test_distinct_domains_have_distinct_roots(self):
+        self.assertNotEqual(ad._root_domain("example.com"), ad._root_domain("otherexample.com"))
+
+    def test_www_prefix_is_stripped(self):
+        self.assertEqual("example.com", ad._root_domain("www.example.com"))
+
+
 class UpsertActorCandidateTests(unittest.TestCase):
     def test_first_occurrence_creates_a_candidate_with_score_one(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -168,6 +180,24 @@ class DiscoverFromOutboundLinksTests(unittest.TestCase):
             with dbmod.connect(actors_db) as db:
                 self._insert_outbound(db, actor1, "https://one.test/", "https://linkedin.com/company/one", "linkedin.com")
                 self._insert_outbound(db, actor2, "https://two.test/", "https://linkedin.com/company/two", "linkedin.com")
+            with patch.object(ad, "ACTORS_DB", actors_db):
+                result = ad.discover_actor_candidates()
+            self.assertEqual(0, result["outbound_link_candidates"])
+
+    def test_country_subdomain_of_a_denylisted_platform_is_also_excluded(self):
+        # Real production bug (30/08/2026): de.linkedin.com slipped past the denylist because
+        # the check was an exact host match, not a root-domain comparison -- LinkedIn's
+        # country-specific subdomains (de./fr./...) are a different host string but the same
+        # root domain, and the fix must catch those too, not just the bare "linkedin.com" case
+        # already covered by test_social_media_host_is_never_a_candidate_even_if_recurrent.
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = _setup(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor1 = dbmod.create_actor("Actor One", "France", "Test", "https://one.test/")
+                actor2 = dbmod.create_actor("Actor Two", "Germany", "Test", "https://two.test/")
+            with dbmod.connect(actors_db) as db:
+                self._insert_outbound(db, actor1, "https://one.test/", "https://de.linkedin.com/company/one", "de.linkedin.com")
+                self._insert_outbound(db, actor2, "https://two.test/", "https://de.linkedin.com/company/two", "de.linkedin.com")
             with patch.object(ad, "ACTORS_DB", actors_db):
                 result = ad.discover_actor_candidates()
             self.assertEqual(0, result["outbound_link_candidates"])
