@@ -15,9 +15,21 @@ depuis la seule documentation :
   récente restait 2015) : piège trouvé puis écarté avant d'écrire ce module. Requête ODSQL
   (``where=search(objet,"phrase")``), accès anonyme, sans clé.
 
-Réutilise ``scrapers.TECHNOLOGY_QUERIES`` (déjà vérifiées pour Crossref/OpenAlex) plutôt que
-d'inventer de nouveaux termes de recherche, et ``scrapers.is_on_topic()`` en filtre final -- une
-recherche plein texte sur un intitulé d'avis peut matcher des tokens sans rapport.
+Réutilise ``scrapers.TECHNOLOGY_QUERIES`` pour TED (déjà vérifiées pour Crossref/OpenAlex, et TED
+indexe en 24 langues). BOAMP en revanche ne publie qu'en français -- interroger ``objet`` avec les
+requêtes ANGLAISES de TECHNOLOGY_QUERIES ne renvoyait donc jamais rien (0 résultat sur les 6
+requêtes en vérifiant en production, 30/08/2026), pas parce qu'aucun marché français n'existe :
+"laser femtoseconde" tout court renvoyait au même moment 3 résultats réels, dont un daté du
+2026-03-24. D'où ``BOAMP_QUERIES``, un jeu de requêtes françaises séparé (mêmes termes que
+``scrapers.LASER_RULES``/le vocabulaire déjà utilisé ailleurs dans ce projet).
+
+``scrapers.is_on_topic()`` filtre les deux sources en sortie -- une recherche plein texte peut
+matcher des tokens sans rapport. Limite connue et acceptée plutôt que contournée : TED renvoie
+souvent un ``notice-title`` bureaucratique qui ne répète pas les termes ayant fait matcher la
+requête (ex: un marché suédois réel trouvé via "femtosecond laser micromachining" s'intitule
+"Arbitrary shape laser based micromachining system" dans ses 24 traductions, sans jamais dire
+"femtosecond") -- filtré ici comme faux négatif plutôt que d'affaiblir is_on_topic() pour ce seul
+connecteur, au prix de rater occasionnellement un signal réel mais mal titré.
 
 Hors scope, volontairement : la seconde moitié du §4.B.3, "offres d'emploi des donneurs d'ordre".
 Aucune API publique fiable identifiée, et "donneur d'ordre" (client final, pas concurrent) n'est
@@ -41,6 +53,18 @@ BOAMP_SEARCH_URL = "https://boamp-datadila.opendatasoft.com/api/explore/v2.0/cat
 DEMAND_SIGNALS_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 DEMAND_SIGNALS_LOOKBACK_DAYS_DEFAULT = 180
 RESULTS_PER_QUERY = 10
+
+# BOAMP.fr ne publie qu'en français -- voir le docstring du module. "laser femtoseconde" est le
+# seul terme vérifié avec des correspondances réelles en production (30/08/2026, 3 résultats,
+# dont un du 2026-03-24) ; les autres restent des variantes plausibles du même vocabulaire
+# (scrapers.LASER_RULES) plutôt que des traductions inventées au hasard.
+BOAMP_QUERIES = (
+    "laser femtoseconde",
+    "laser ultra-rapide",
+    "micro-usinage laser",
+    "texturation laser femtoseconde",
+    "gravure laser femtoseconde",
+)
 
 
 def _ted_notice_title(notice: dict) -> str:
@@ -148,6 +172,7 @@ def collect_demand_signals(*, lookback_days: int = DEMAND_SIGNALS_LOOKBACK_DAYS_
                     ted_scanned += 1
                     ted_added += _upsert_demand_signal(db, "tender", item)
 
+        for query in BOAMP_QUERIES:
             try:
                 records = _fetch_boamp_records(client, query, from_date_iso)
             except Exception:
