@@ -30,6 +30,7 @@ scrapers.scrape_technology() le fait déjà pour Crossref -- voir audit v8 §2.1
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import date, timedelta
 from urllib.parse import urlparse
 
@@ -39,6 +40,7 @@ from actor_discovery import _known_actor_names_and_domains, _normalize_name, ups
 from db import ACTORS_DB, TECH_DB, compute_is_backfill, connect, utc_now
 from scrapers import CRAWLER_CONTACT, HEADERS, TECHNOLOGY_QUERIES, is_on_topic, upsert_document_technology_signal
 
+OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "").strip()
 OPENALEX_API = "https://api.openalex.org"
 OPENALEX_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
 OPENALEX_LOOKBACK_DAYS_DEFAULT = 365
@@ -58,8 +60,14 @@ def _domain(url: str) -> str:
 def _mailto_params() -> dict[str, str]:
     """OpenAlex's "polite pool" (faster, more reliable responses) just wants a contact email
     on every request -- reuses the same CRAWLER_CONTACT env var scrapers.py already puts in
-    its own User-Agent, rather than a second contact setting."""
-    return {"mailto": CRAWLER_CONTACT} if CRAWLER_CONTACT else {}
+    its own User-Agent, rather than a second contact setting. Since February 2026, OpenAlex also
+    requires api_key on every request under its usage-based pricing (a modest free daily budget
+    per key; unauthenticated requests hit that wall almost immediately, which is exactly the 429
+    "Insufficient budget" seen in production before OPENALEX_API_KEY was configured, 30/08/2026)."""
+    params = {"mailto": CRAWLER_CONTACT} if CRAWLER_CONTACT else {}
+    if OPENALEX_API_KEY:
+        params["api_key"] = OPENALEX_API_KEY
+    return params
 
 
 def _find_institution(client: httpx.Client, actor_name: str, official_url: str) -> dict | None:
