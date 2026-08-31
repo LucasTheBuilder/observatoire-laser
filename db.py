@@ -1639,6 +1639,14 @@ def init_databases() -> None:
             "relation_evidence": "TEXT",
             "source_role": "TEXT",
             "is_verbatim": "INTEGER NOT NULL DEFAULT 1",
+            # §5.E.2 audit veille (30/08/2026, Lot 4 §18) : "comparer le plus ancien snapshot
+            # contenant un terme au premier ne le contenant pas date l'apparition d'une offre à
+            # quelques mois près, rétroactivement" -- voir wayback_retrodating.py. NULL tant
+            # qu'aucune correspondance n'a été retrouvée dans l'historique Wayback (jamais
+            # deviné) ; distinct de source_date, qui vient de la page elle-même quand elle en
+            # affiche une (souvent absent).
+            "first_appeared_at": "TEXT",
+            "first_appeared_snapshot_url": "TEXT",
         })
         _add_columns(db, "evidence", {
             "is_verbatim": "INTEGER NOT NULL DEFAULT 1",

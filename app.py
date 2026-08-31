@@ -93,6 +93,7 @@ from scoring import compute_competitive_intensity_scores, compute_confidence_sco
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 from timeseries import capture_metric_snapshot, list_timeseries_keys, read_timeseries
 from veille_metrics import VEILLE_METRICS_THRESHOLDS, capture_veille_metrics
+from wayback_retrodating import retrodate_evidence_sources
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -200,6 +201,7 @@ jobs: dict[str, dict[str, Any]] = {
     "patents": {"status": "idle", "result": None, "error": None},
     "gleif": {"status": "idle", "result": None, "error": None},
     "demand_signals": {"status": "idle", "result": None, "error": None},
+    "wayback_retrodating": {"status": "idle", "result": None, "error": None},
     "capabilities": {"status": "idle", "result": None, "error": None},
     "monthly": {"status": "idle", "result": None, "error": None},
 }
@@ -224,6 +226,7 @@ def _collect_monthly() -> dict:
         "patents": collect_patents(),
         "gleif": collect_gleif_group_identity(),
         "demand_signals": collect_demand_signals(),
+        "wayback_retrodating": retrodate_evidence_sources(),
         "capabilities": collect_capability_specs(),
     }
 
@@ -242,6 +245,7 @@ collectors: dict[str, Callable[[], dict]] = {
     "patents": collect_patents,
     "gleif": collect_gleif_group_identity,
     "demand_signals": collect_demand_signals,
+    "wayback_retrodating": retrodate_evidence_sources,
     "capabilities": collect_capability_specs,
     "monthly": _collect_monthly,
 }
@@ -1524,7 +1528,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "capabilities", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -1539,7 +1543,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "capabilities", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 
