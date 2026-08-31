@@ -35,6 +35,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from actor_discovery import upsert_actor_candidate
 from db import ACTORS_DB, TECH_DB, compute_is_backfill, connect, utc_now
 from scrapers import CRAWLER_CONTACT, HEADERS, is_on_topic
 
@@ -86,7 +87,7 @@ def _fetch_recent_works(client: httpx.Client, institution_id: str, from_date: st
                 "filter": f"authorships.institutions.id:{institution_id},from_publication_date:{from_date}",
                 "sort": "publication_date:desc",
                 "per-page": OPENALEX_WORKS_PER_ACTOR,
-                "select": "id,doi,title,publication_date,primary_location",
+                "select": "id,doi,title,publication_date,primary_location,authorships",
                 **_mailto_params(),
             },
         )
@@ -106,6 +107,20 @@ def _work_is_on_topic(title: str) -> bool:
     §2.1 (123/203 publications hors sujet avant ce filtre).
     """
     return is_on_topic(title)
+
+
+def _co_institutions(work: dict, exclude_institution_id: str) -> list[str]:
+    """§4.D audit veille (30/08/2026, Lot 3 §3.2) : institutions co-autrices d'un travail
+    on-topic d'un acteur suivi, hors l'institution de l'acteur lui-même -- signal de découverte
+    d'acteur (voir actor_discovery.py), pas un signal marché/technologie."""
+    names: list[str] = []
+    for authorship in work.get("authorships") or []:
+        for institution in authorship.get("institutions") or []:
+            institution_id = str(institution.get("id") or "").rsplit("/", 1)[-1]
+            display_name = str(institution.get("display_name") or "").strip()
+            if display_name and institution_id != exclude_institution_id:
+                names.append(display_name)
+    return names
 
 
 def _parse_work(work: dict) -> dict | None:
@@ -167,7 +182,7 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
     with connect(TECH_DB) as db:
         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
 
-    matched_actors = added = attributed = off_topic = errors = 0
+    matched_actors = added = attributed = off_topic = candidates_added = errors = 0
     with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=OPENALEX_TIMEOUT) as client:
         for actor in actors:
             try:
@@ -177,7 +192,7 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                 matched_actors += 1
                 institution_id = str(institution["id"]).rsplit("/", 1)[-1]
                 works = _fetch_recent_works(client, institution_id, from_date)
-                with connect(TECH_DB) as db:
+                with connect(TECH_DB) as db, connect(ACTORS_DB) as adb:
                     for work in works:
                         item = _parse_work(work)
                         if not item:
@@ -188,6 +203,14 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                         inserted, was_attributed = _upsert_document(db, actor["name"], item)
                         added += inserted
                         attributed += was_attributed
+                        # §4.D audit veille (Lot 3 §3.2) : une institution co-autrice récurrente
+                        # sur des travaux on-topic est un candidat acteur -- voir actor_discovery.py.
+                        for co_name in _co_institutions(work, institution_id):
+                            candidates_added += upsert_actor_candidate(
+                                adb, co_name, "openalex",
+                                context=f"co-auteur avec {actor['name']} sur un travail on-topic",
+                                source_url=item["url"],
+                            )
             except Exception:
                 errors += 1
 
@@ -197,7 +220,8 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
             (
                 utc_now(), "completed", matched_actors, added, errors,
                 f"OpenAlex : {matched_actors} institutions vérifiées par domaine, {added} nouvelles publications, "
-                f"{attributed} déjà connues ré-attribuées à un acteur, {off_topic} hors sujet filtrées",
+                f"{attributed} déjà connues ré-attribuées à un acteur, {off_topic} hors sujet filtrées, "
+                f"{candidates_added} candidats acteurs (co-institutions)",
                 run_id,
             ),
         )
@@ -206,5 +230,6 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
         "documents_added": added,
         "documents_attributed": attributed,
         "documents_off_topic": off_topic,
+        "actor_candidates_added": candidates_added,
         "errors": errors,
     }

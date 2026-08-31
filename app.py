@@ -20,7 +20,9 @@ Organisation des endpoints (tous préfixés /api/, sauf `/` qui sert index.html)
 - /api/documents : publications/brevets/projets collectés récemment (page "Technologies futures").
 - /api/page-versions/{source_id} : historique des versions archivées d'une page (chantier 6).
 - /api/scrape/{kind} : démarre/consulte une collecte (actors/market/technology/cordis/
-  firmographics/openalex/press/actor_feeds/capabilities/monthly).
+  firmographics/openalex/press/actor_feeds/actor_discovery/capabilities/monthly).
+- /api/actor-candidates* : file de découverte d'acteurs (CORDIS/OpenAlex/outbound_links non
+  rattachés), promotion en acteur réel ou rejet (Lot 3 §3.2).
 - /api/scheduler : état de la planification automatique (SCHEDULER_ENABLED/SCHEDULER_CRON,
   revue web-scraping priorité #2) -- désactivée par défaut, voir _scheduled_monthly_run.
 """
@@ -55,6 +57,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from actor_discovery import discover_actor_candidates, promote_candidate, reject_candidate
 from alerts import capture_alerts
 from capabilities import collect_capability_specs
 from cordis import collect_cordis
@@ -189,6 +192,7 @@ jobs: dict[str, dict[str, Any]] = {
     "openalex": {"status": "idle", "result": None, "error": None},
     "press": {"status": "idle", "result": None, "error": None},
     "actor_feeds": {"status": "idle", "result": None, "error": None},
+    "actor_discovery": {"status": "idle", "result": None, "error": None},
     "capabilities": {"status": "idle", "result": None, "error": None},
     "monthly": {"status": "idle", "result": None, "error": None},
 }
@@ -208,6 +212,7 @@ def _collect_monthly() -> dict:
         "openalex": collect_openalex_publications(),
         "press": collect_press_mentions(),
         "actor_feeds": collect_actor_feeds(),
+        "actor_discovery": discover_actor_candidates(),
         "capabilities": collect_capability_specs(),
     }
 
@@ -221,6 +226,7 @@ collectors: dict[str, Callable[[], dict]] = {
     "openalex": collect_openalex_publications,
     "press": collect_press_mentions,
     "actor_feeds": collect_actor_feeds,
+    "actor_discovery": discover_actor_candidates,
     "capabilities": collect_capability_specs,
     "monthly": _collect_monthly,
 }
@@ -867,6 +873,62 @@ def review_queue_decide(queue: str, item_id: int, payload: ReviewDecisionRequest
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/actor-candidates")
+def actor_candidates_list(status: Literal["pending", "promoted", "rejected"] = "pending"):
+    """Découverte d'acteurs (§4.D audit veille, 30/08/2026, Lot 3 §3.2) : candidats accumulés
+    depuis CORDIS/OpenAlex/outbound_links (voir actor_discovery.py), triés par score décroissant
+    (nombre de sources indépendantes). Un candidat n'est jamais un acteur tant qu'il n'a pas été
+    promu explicitement (POST .../promote)."""
+    candidates = rows(
+        ACTORS_DB,
+        """SELECT id,name,score,review_status,promoted_actor_id,reviewed_by,reviewed_at,reject_reason,first_seen_at,last_seen_at
+           FROM actor_candidates WHERE review_status=? ORDER BY score DESC,last_seen_at DESC""",
+        (status,),
+    )
+    for candidate in candidates:
+        candidate["sources"] = rows(
+            ACTORS_DB,
+            "SELECT source_type,context,source_url,created_at FROM actor_candidate_sources WHERE candidate_id=? ORDER BY created_at",
+            (candidate["id"],),
+        )
+    return candidates
+
+
+class PromoteCandidateRequest(BaseModel):
+    official_url: str
+    country: str
+    role: str
+    reviewed_by: str | None = None
+
+
+@app.post("/api/actor-candidates/{candidate_id}/promote")
+def actor_candidate_promote(candidate_id: int, payload: PromoteCandidateRequest):
+    """Crée un vrai acteur à partir d'un candidat validé (review_status='candidate' -- rejoint
+    ensuite /api/review?queue=actors pour la décision finale, voir review_queue.py Lot 1 §1.1).
+    official_url/country/role restent saisis par l'humain qui promeut : aucune des 3 sources de
+    découverte ne les détermine de façon fiable (voir actor_discovery.promote_candidate)."""
+    try:
+        return promote_candidate(
+            candidate_id, official_url=payload.official_url, country=payload.country,
+            role=payload.role, reviewed_by=payload.reviewed_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class RejectCandidateRequest(BaseModel):
+    reviewed_by: str | None = None
+    reject_reason: str | None = None
+
+
+@app.post("/api/actor-candidates/{candidate_id}/reject")
+def actor_candidate_reject(candidate_id: int, payload: RejectCandidateRequest):
+    try:
+        return reject_candidate(candidate_id, reviewed_by=payload.reviewed_by, reject_reason=payload.reject_reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # --- CRUD acteurs : les modèles Pydantic ci-dessous valident/documentent automatiquement le
 # corps JSON attendu par FastAPI pour chaque endpoint POST/PATCH. ---
 class ActorCreateRequest(BaseModel):
@@ -1432,7 +1494,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "capabilities", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "capabilities", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -1447,7 +1509,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "capabilities", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "capabilities", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 

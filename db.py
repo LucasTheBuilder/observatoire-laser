@@ -910,6 +910,43 @@ def init_databases() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS actor_relations_actor_idx ON actor_relations(actor_id);
+            -- Découverte d'acteurs (§4.D audit veille, 30/08/2026, Lot 3 §3.2) : "actors.
+            -- review_status='candidate' existe déjà en base et n'est jamais alimenté."  Un
+            -- candidat n'entre JAMAIS directement dans `actors` : il s'accumule ici (occurrences,
+            -- sources, score) et n'est promu en acteur réel (voir actor_discovery.promote_
+            -- candidate) qu'après validation humaine -- même gouvernance que vocabulary_
+            -- candidates -> custom_lexicon_entries, le modèle explicitement cité par l'audit.
+            -- Alimenté par 3 sources déjà présentes dans le pipeline (voir actor_discovery.py) :
+            -- CORDIS (actor_relations.related_name jamais rattaché), OpenAlex (institution
+            -- co-autrice récurrente sur des travaux on-topic), outbound_links (hôte externe
+            -- revenant sur plusieurs sites d'acteurs -- Lot 2 §2.4). Les mentions de presse non
+            -- appariées (4e source listée par l'audit) sont volontairement omises : press.py
+            -- n'extrait aujourd'hui aucun nom d'organisation (seul un matching par mot-clé sur
+            -- des noms déjà connus), et une heuristique de reconnaissance de nom sans vraie
+            -- extraction d'entités nommées produirait plus de bruit que de signal.
+            CREATE TABLE IF NOT EXISTS actor_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                normalized_name TEXT NOT NULL UNIQUE,
+                score INTEGER NOT NULL DEFAULT 0,
+                review_status TEXT NOT NULL DEFAULT 'pending' CHECK(review_status IN ('pending','promoted','rejected')),
+                promoted_actor_id INTEGER REFERENCES actors(id),
+                reviewed_by TEXT,
+                reviewed_at TEXT,
+                reject_reason TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS actor_candidate_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                candidate_id INTEGER NOT NULL REFERENCES actor_candidates(id) ON DELETE CASCADE,
+                source_type TEXT NOT NULL CHECK(source_type IN ('cordis','openalex','outbound_link')),
+                context TEXT,
+                source_url TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(candidate_id, source_type, source_url)
+            );
+            CREATE INDEX IF NOT EXISTS actor_candidate_sources_candidate_idx ON actor_candidate_sources(candidate_id);
             -- Un fait ponctuel sourcé sur un acteur : certification obtenue ou différenciateur.
             CREATE TABLE IF NOT EXISTS actor_facts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

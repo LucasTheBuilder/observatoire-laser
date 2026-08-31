@@ -19,7 +19,15 @@ sys.path.insert(0, str(ROOT))
 
 import db as dbmod
 import openalex
-from openalex import _domain, _find_institution, _parse_work, _upsert_document, _work_is_on_topic, collect_openalex_publications
+from openalex import (
+    _co_institutions,
+    _domain,
+    _find_institution,
+    _parse_work,
+    _upsert_document,
+    _work_is_on_topic,
+    collect_openalex_publications,
+)
 
 
 class WorkIsOnTopicTests(unittest.TestCase):
@@ -142,6 +150,31 @@ class ParseWorkTests(unittest.TestCase):
         self.assertEqual("https://openalex.org/W1", no_doi_no_landing["url"])
 
 
+class CoInstitutionsTests(unittest.TestCase):
+    def test_co_institutions_excludes_the_searched_institution(self):
+        work = {"authorships": [
+            {"institutions": [{"id": "https://openalex.org/I1", "display_name": "ALPhANOV"}]},
+            {"institutions": [{"id": "https://openalex.org/I2", "display_name": "Fraunhofer ILT"}]},
+        ]}
+        names = _co_institutions(work, "I1")
+        self.assertEqual(["Fraunhofer ILT"], names)
+
+    def test_no_authorships_returns_empty_list(self):
+        self.assertEqual([], _co_institutions({}, "I1"))
+
+    def test_institution_without_display_name_is_skipped(self):
+        work = {"authorships": [{"institutions": [{"id": "https://openalex.org/I2", "display_name": ""}]}]}
+        self.assertEqual([], _co_institutions(work, "I1"))
+
+    def test_multiple_distinct_co_institutions_are_all_returned(self):
+        work = {"authorships": [
+            {"institutions": [{"id": "https://openalex.org/I1", "display_name": "ALPhANOV"}]},
+            {"institutions": [{"id": "https://openalex.org/I2", "display_name": "Fraunhofer ILT"}]},
+            {"institutions": [{"id": "https://openalex.org/I3", "display_name": "Tekniker"}]},
+        ]}
+        self.assertEqual(["Fraunhofer ILT", "Tekniker"], _co_institutions(work, "I1"))
+
+
 class UpsertDocumentTests(unittest.TestCase):
     def _fresh_tech_db(self, tmp: str) -> Path:
         tech_db = Path(tmp) / "technology.db"
@@ -221,11 +254,20 @@ class CollectOpenAlexTests(unittest.TestCase):
                 def works_handler(params):
                     return {"results": [
                         {"id": "https://openalex.org/W1", "doi": "https://doi.org/10.1/a", "title": "Femtosecond laser micromachining of fused silica", "publication_date": "2026-01-01",
-                         "primary_location": {"landing_page_url": "https://doi.org/10.1/a"}},
+                         "primary_location": {"landing_page_url": "https://doi.org/10.1/a"},
+                         # §4.D audit veille (Lot 3 §3.2): a co-authoring institution on an
+                         # on-topic work must surface as an actor_candidates row.
+                         "authorships": [
+                             {"institutions": [{"id": "https://openalex.org/I1", "display_name": "ALPhANOV"}]},
+                             {"institutions": [{"id": "https://openalex.org/I9", "display_name": "New Photonics Lab"}]},
+                         ]},
                         # Off-topic: same institution, but nothing to do with lasers -- must be
-                        # counted and skipped, not stored (audit v8 §2.1).
+                        # counted and skipped, not stored (audit v8 §2.1). Its co-institution
+                        # must NOT surface as a candidate either -- off-topic works are skipped
+                        # before candidate extraction runs.
                         {"id": "https://openalex.org/W2", "doi": None, "title": "Effects of graded dietary levels of microalgae on poultry growth", "publication_date": "2026-02-01",
-                         "primary_location": {}},
+                         "primary_location": {},
+                         "authorships": [{"institutions": [{"id": "https://openalex.org/I8", "display_name": "Off Topic Institute"}]}]},
                     ]}
 
                 FakeClient.handlers = {"/institutions": institutions_handler, "/works": works_handler}
@@ -235,6 +277,7 @@ class CollectOpenAlexTests(unittest.TestCase):
                 self.assertEqual(1, result["actors_matched"])
                 self.assertEqual(1, result["documents_added"])
                 self.assertEqual(1, result["documents_off_topic"])
+                self.assertEqual(1, result["actor_candidates_added"])
                 self.assertEqual(0, result["errors"])
 
                 with dbmod.connect(tech_db) as db:
@@ -242,6 +285,10 @@ class CollectOpenAlexTests(unittest.TestCase):
                 self.assertEqual(1, len(docs))
                 self.assertEqual("Femtosecond laser micromachining of fused silica", docs[0]["title"])
                 self.assertTrue(all(d["actor_name"] == "ALPHANOV" for d in docs))
+
+                with dbmod.connect(actors_db) as db:
+                    candidates = list(db.execute("SELECT name FROM actor_candidates"))
+                self.assertEqual(["New Photonics Lab"], [c["name"] for c in candidates])
 
 
 if __name__ == "__main__":
