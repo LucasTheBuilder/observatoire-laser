@@ -1034,6 +1034,14 @@ def init_databases() -> None:
             # differentiators, M&A events) that back this summary up.
             "strategic_summary": "TEXT",
             "last_verified_at": "TEXT",
+            # Flux RSS/Atom de l'acteur lui-même (§4.A audit veille, 30/08/2026, Lot 2 §2.5),
+            # découvert via <link rel="alternate"> sur sa page d'accueil (voir
+            # press._discover_actor_feed). rss_feed_checked_at distingue "jamais tenté" (les
+            # deux colonnes NULL) de "tenté, aucun flux trouvé" (rss_feed_url NULL mais
+            # rss_feed_checked_at renseigné) -- sans cette distinction, une découverte négative
+            # relancerait une requête HTTP inutile à chaque collecte.
+            "rss_feed_url": "TEXT",
+            "rss_feed_checked_at": "TEXT",
         })
         _add_columns(db, "actor_sources", {
             "page_type": "TEXT",

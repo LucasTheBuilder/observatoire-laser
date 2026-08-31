@@ -35,9 +35,11 @@ from __future__ import annotations
 import re
 import unicodedata
 from email.utils import parsedate_to_datetime
+from urllib.parse import urljoin
 from xml.etree import ElementTree
 
 import httpx
+from bs4 import BeautifulSoup, Tag
 
 from db import ACTORS_DB, connect, utc_now
 from scrapers import HEADERS
@@ -243,6 +245,96 @@ def collect_press_mentions() -> dict:
 
     return {
         "feeds_configured": len(FEED_URLS),
+        "feeds_ok": feeds_ok,
+        "events_added": events_added,
+        "near_duplicates_skipped": near_duplicates_skipped,
+        "errors": errors,
+    }
+
+
+def _discover_actor_feed(client: httpx.Client, official_url: str) -> str | None:
+    """§4.A audit veille (30/08/2026, Lot 2 §2.5) : "beaucoup [d'acteurs] ont [un flux RSS],
+    découvrables via <link rel="alternate"> comme vous l'avez fait pour Laser Focus World" --
+    ici automatisé, un acteur à la fois, plutôt que découvert manuellement comme FEED_URLS.
+    None si la page d'accueil ne répond pas ou n'expose aucun <link> RSS/Atom."""
+    try:
+        response = client.get(official_url)
+        response.raise_for_status()
+    except Exception:
+        return None
+    soup = BeautifulSoup(response.text, "html.parser")
+    for link in soup.find_all("link", rel="alternate"):
+        if not isinstance(link, Tag):
+            continue
+        feed_type = str(link.get("type") or "").lower()
+        href = link.get("href")
+        if href and feed_type in ("application/rss+xml", "application/atom+xml"):
+            return urljoin(official_url, str(href))
+    return None
+
+
+def collect_actor_feeds() -> dict:
+    """Flux RSS/Atom des acteurs eux-mêmes (§4.A audit veille, 30/08/2026, Lot 2 §2.5) :
+    contenu DATÉ et de source PRIMAIRE, contrairement à une mention de presse tierce (voir
+    collect_press_mentions) -- répond en partie au problème de chronologie du §8.3 pour les
+    pages news des acteurs. La découverte du flux (une requête HTTP sur la page d'accueil)
+    n'est tentée qu'une fois par acteur : le résultat, trouvé ou non, est mis en cache dans
+    actors.rss_feed_url/rss_feed_checked_at (voir _discover_actor_feed) -- jamais retentée
+    automatiquement ensuite. Point d'entrée (voir app.py: collectors["actor_feeds"])."""
+    with connect(ACTORS_DB) as db:
+        actors = [
+            dict(row) for row in db.execute(
+                "SELECT id,name,official_url,rss_feed_url,rss_feed_checked_at FROM actors WHERE active=1"
+            ).fetchall()
+        ]
+
+    feeds_discovered = feeds_ok = events_added = near_duplicates_skipped = errors = 0
+    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=FEED_TIMEOUT) as client:
+        for actor in actors:
+            feed_url = actor["rss_feed_url"]
+            if feed_url is None and actor["rss_feed_checked_at"] is None:
+                feed_url = _discover_actor_feed(client, actor["official_url"])
+                with connect(ACTORS_DB) as db:
+                    db.execute(
+                        "UPDATE actors SET rss_feed_url=?,rss_feed_checked_at=? WHERE id=?",
+                        (feed_url, utc_now(), actor["id"]),
+                    )
+                if feed_url:
+                    feeds_discovered += 1
+            if not feed_url:
+                continue
+            try:
+                response = client.get(feed_url)
+                response.raise_for_status()
+                items = _parse_feed(response.content)
+            except Exception:
+                errors += 1
+                continue
+            feeds_ok += 1
+            with connect(ACTORS_DB) as db:
+                existing_descriptions = [
+                    row["description"] for row in db.execute(
+                        "SELECT description FROM actor_events WHERE actor_id=?", (actor["id"],)
+                    ).fetchall()
+                ]
+                for item in items:
+                    title = item["title"] or ""
+                    if _is_near_duplicate(title, existing_descriptions):
+                        near_duplicates_skipped += 1
+                        continue
+                    signal_type = classify_press_event(title, item["description"] or "")
+                    label = SIGNAL_EVENT_LABELS[signal_type]
+                    description = f"{label} (flux propre) : {title}"
+                    added = _upsert_press_event(
+                        db, actor["id"], signal_type, description, item["event_date"], str(item["link"]),
+                    )
+                    events_added += added
+                    if added:
+                        existing_descriptions.append(description)
+
+    return {
+        "actors_checked": len(actors),
+        "feeds_discovered": feeds_discovered,
         "feeds_ok": feeds_ok,
         "events_added": events_added,
         "near_duplicates_skipped": near_duplicates_skipped,

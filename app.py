@@ -20,7 +20,7 @@ Organisation des endpoints (tous préfixés /api/, sauf `/` qui sert index.html)
 - /api/documents : publications/brevets/projets collectés récemment (page "Technologies futures").
 - /api/page-versions/{source_id} : historique des versions archivées d'une page (chantier 6).
 - /api/scrape/{kind} : démarre/consulte une collecte (actors/market/technology/cordis/
-  firmographics/openalex/press/capabilities/monthly).
+  firmographics/openalex/press/actor_feeds/capabilities/monthly).
 - /api/scheduler : état de la planification automatique (SCHEDULER_ENABLED/SCHEDULER_CRON,
   revue web-scraping priorité #2) -- désactivée par défaut, voir _scheduled_monthly_run.
 """
@@ -81,7 +81,7 @@ from db import (
 from firmographics import collect_french_registry
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from openalex import collect_openalex_publications
-from press import collect_press_mentions
+from press import collect_actor_feeds, collect_press_mentions
 from review_queue import REJECT_REASONS, decide_review_item, list_review_queue
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
@@ -188,6 +188,7 @@ jobs: dict[str, dict[str, Any]] = {
     "firmographics": {"status": "idle", "result": None, "error": None},
     "openalex": {"status": "idle", "result": None, "error": None},
     "press": {"status": "idle", "result": None, "error": None},
+    "actor_feeds": {"status": "idle", "result": None, "error": None},
     "capabilities": {"status": "idle", "result": None, "error": None},
     "monthly": {"status": "idle", "result": None, "error": None},
 }
@@ -206,6 +207,7 @@ def _collect_monthly() -> dict:
         "firmographics": collect_french_registry(),
         "openalex": collect_openalex_publications(),
         "press": collect_press_mentions(),
+        "actor_feeds": collect_actor_feeds(),
         "capabilities": collect_capability_specs(),
     }
 
@@ -218,6 +220,7 @@ collectors: dict[str, Callable[[], dict]] = {
     "firmographics": collect_french_registry,
     "openalex": collect_openalex_publications,
     "press": collect_press_mentions,
+    "actor_feeds": collect_actor_feeds,
     "capabilities": collect_capability_specs,
     "monthly": _collect_monthly,
 }
@@ -1429,7 +1432,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "capabilities", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "capabilities", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -1444,7 +1447,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "capabilities", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "capabilities", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 
