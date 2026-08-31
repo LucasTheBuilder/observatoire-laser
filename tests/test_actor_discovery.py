@@ -86,6 +86,38 @@ class UpsertActorCandidateTests(unittest.TestCase):
             count = dbmod.scalar(actors_db, "SELECT COUNT(*) FROM actor_candidates")
             self.assertEqual(1, count)
 
+    def test_country_and_suggested_url_are_captured_when_provided(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = _setup(tmp)
+            with dbmod.connect(actors_db) as db:
+                ad.upsert_actor_candidate(
+                    db, "New Laser Co", "cordis", source_url="https://a.test/",
+                    country="US", suggested_official_url="https://newlaserco.example/",
+                )
+            row = dbmod.rows(actors_db, "SELECT country,suggested_official_url FROM actor_candidates")[0]
+            self.assertEqual("US", row["country"])
+            self.assertEqual("https://newlaserco.example/", row["suggested_official_url"])
+
+    def test_country_is_never_overwritten_by_a_later_occurrence_without_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = _setup(tmp)
+            with dbmod.connect(actors_db) as db:
+                ad.upsert_actor_candidate(db, "New Laser Co", "cordis", source_url="https://a.test/", country="US")
+                ad.upsert_actor_candidate(db, "New Laser Co", "outbound_link", source_url="https://b.test/")
+            row = dbmod.rows(actors_db, "SELECT country FROM actor_candidates")[0]
+            self.assertEqual("US", row["country"])
+
+    def test_first_known_country_wins_when_a_later_occurrence_disagrees(self):
+        # COALESCE never overwrites once known -- deliberately conservative rather than
+        # arbitrating between two sources that disagree.
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = _setup(tmp)
+            with dbmod.connect(actors_db) as db:
+                ad.upsert_actor_candidate(db, "New Laser Co", "cordis", source_url="https://a.test/", country="US")
+                ad.upsert_actor_candidate(db, "New Laser Co", "outbound_link", source_url="https://b.test/", country="JP")
+            row = dbmod.rows(actors_db, "SELECT country FROM actor_candidates")[0]
+            self.assertEqual("US", row["country"])
+
 
 class DiscoverFromCordisTests(unittest.TestCase):
     def test_unmatched_relation_becomes_a_candidate(self):
@@ -236,6 +268,62 @@ class PromoteAndRejectCandidateTests(unittest.TestCase):
             self.assertEqual("promoted", candidate_row["review_status"])
             self.assertEqual(result["actor_id"], candidate_row["promoted_actor_id"])
             self.assertEqual("lucas", candidate_row["reviewed_by"])
+
+    def test_promote_falls_back_to_suggested_official_url_and_country_when_not_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = _setup(tmp)
+            with dbmod.connect(actors_db) as db:
+                candidate_id = db.execute(
+                    """INSERT INTO actor_candidates(name,normalized_name,score,country,suggested_official_url,first_seen_at,last_seen_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    ("Korea Institute of Photonics", "KOREA INSTITUTE OF PHOTONICS", 1, "KR", "https://kip.example.kr/", dbmod.utc_now(), dbmod.utc_now()),
+                ).lastrowid
+            with patch.object(ad, "ACTORS_DB", actors_db), patch.object(dbmod, "ACTORS_DB", actors_db):
+                result = ad.promote_candidate(candidate_id, role="Prestataire")
+            actor_row = dbmod.rows(actors_db, "SELECT country,official_url FROM actors WHERE id=?", (result["actor_id"],))[0]
+            self.assertEqual("KR", actor_row["country"])
+            self.assertEqual("https://kip.example.kr/", actor_row["official_url"])
+
+    def test_promote_explicit_values_override_the_suggested_ones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = _setup(tmp)
+            with dbmod.connect(actors_db) as db:
+                candidate_id = db.execute(
+                    """INSERT INTO actor_candidates(name,normalized_name,score,country,suggested_official_url,first_seen_at,last_seen_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    ("Korea Institute of Photonics", "KOREA INSTITUTE OF PHOTONICS", 1, "KR", "https://kip.example.kr/", dbmod.utc_now(), dbmod.utc_now()),
+                ).lastrowid
+            with patch.object(ad, "ACTORS_DB", actors_db), patch.object(dbmod, "ACTORS_DB", actors_db):
+                result = ad.promote_candidate(
+                    candidate_id, role="Prestataire", country="South Korea", official_url="https://real-site.example.kr/",
+                )
+            actor_row = dbmod.rows(actors_db, "SELECT country,official_url FROM actors WHERE id=?", (result["actor_id"],))[0]
+            self.assertEqual("South Korea", actor_row["country"])
+            self.assertEqual("https://real-site.example.kr/", actor_row["official_url"])
+
+    def test_promote_without_official_url_and_no_suggestion_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = _setup(tmp)
+            with dbmod.connect(actors_db) as db:
+                candidate_id = db.execute(
+                    "INSERT INTO actor_candidates(name,normalized_name,score,first_seen_at,last_seen_at) VALUES(?,?,?,?,?)",
+                    ("New Laser Co", "NEW LASER CO", 1, dbmod.utc_now(), dbmod.utc_now()),
+                ).lastrowid
+            with patch.object(ad, "ACTORS_DB", actors_db), patch.object(dbmod, "ACTORS_DB", actors_db):
+                with self.assertRaises(ValueError):
+                    ad.promote_candidate(candidate_id, role="Prestataire", country="France")
+
+    def test_promote_without_country_and_no_suggestion_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = _setup(tmp)
+            with dbmod.connect(actors_db) as db:
+                candidate_id = db.execute(
+                    "INSERT INTO actor_candidates(name,normalized_name,score,first_seen_at,last_seen_at) VALUES(?,?,?,?,?)",
+                    ("New Laser Co", "NEW LASER CO", 1, dbmod.utc_now(), dbmod.utc_now()),
+                ).lastrowid
+            with patch.object(ad, "ACTORS_DB", actors_db), patch.object(dbmod, "ACTORS_DB", actors_db):
+                with self.assertRaises(ValueError):
+                    ad.promote_candidate(candidate_id, role="Prestataire", official_url="https://newlaserco.example/")
 
     def test_promote_an_already_reviewed_candidate_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

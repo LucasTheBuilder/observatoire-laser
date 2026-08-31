@@ -917,18 +917,28 @@ def init_databases() -> None:
             -- candidate) qu'après validation humaine -- même gouvernance que vocabulary_
             -- candidates -> custom_lexicon_entries, le modèle explicitement cité par l'audit.
             -- Alimenté par 3 sources déjà présentes dans le pipeline (voir actor_discovery.py) :
-            -- CORDIS (actor_relations.related_name jamais rattaché), OpenAlex (institution
-            -- co-autrice récurrente sur des travaux on-topic), outbound_links (hôte externe
-            -- revenant sur plusieurs sites d'acteurs -- Lot 2 §2.4). Les mentions de presse non
-            -- appariées (4e source listée par l'audit) sont volontairement omises : press.py
-            -- n'extrait aujourd'hui aucun nom d'organisation (seul un matching par mot-clé sur
-            -- des noms déjà connus), et une heuristique de reconnaissance de nom sans vraie
-            -- extraction d'entités nommées produirait plus de bruit que de signal.
+            -- CORDIS (actor_relations.related_name jamais rattaché, PUIS un passage "topic-
+            -- scoped" séparé -- tout projet on-topic, avec ou sans acteur déjà suivi dedans,
+            -- pas seulement les consortiums d'un acteur connu), OpenAlex (institution co-autrice
+            -- récurrente sur des travaux d'un acteur suivi, PUIS une recherche globale par sujet
+            -- indépendante de tout acteur déjà suivi), outbound_links (hôte externe revenant sur
+            -- plusieurs sites d'acteurs -- Lot 2 §2.4). Les mentions de presse non appariées (4e
+            -- source listée par l'audit) sont volontairement omises : press.py n'extrait
+            -- aujourd'hui aucun nom d'organisation (seul un matching par mot-clé sur des noms
+            -- déjà connus), et une heuristique de reconnaissance de nom sans vraie extraction
+            -- d'entités nommées produirait plus de bruit que de signal.
+            -- country/suggested_official_url : jamais obligatoires, jamais inventés -- remplis
+            -- seulement quand la source elle-même les porte (organization.csv de CORDIS a un
+            -- vrai champ country + organizationURL ; OpenAlex un vrai country_code par
+            -- institution), pour préremplir la promotion sans jamais la décider à la place d'un
+            -- humain (voir actor_discovery.promote_candidate, qui les garde éditables).
             CREATE TABLE IF NOT EXISTS actor_candidates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 normalized_name TEXT NOT NULL UNIQUE,
                 score INTEGER NOT NULL DEFAULT 0,
+                country TEXT,
+                suggested_official_url TEXT,
                 review_status TEXT NOT NULL DEFAULT 'pending' CHECK(review_status IN ('pending','promoted','rejected')),
                 promoted_actor_id INTEGER REFERENCES actors(id),
                 reviewed_by TEXT,

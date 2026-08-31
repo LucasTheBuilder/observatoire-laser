@@ -84,11 +84,16 @@ def _known_actor_names_and_domains(db) -> tuple[set[str], set[str]]:
     return names, domains
 
 
-def upsert_actor_candidate(db, name: str, source_type: str, *, context: str | None = None, source_url: str | None = None) -> int:
+def upsert_actor_candidate(
+    db, name: str, source_type: str, *, context: str | None = None, source_url: str | None = None,
+    country: str | None = None, suggested_official_url: str | None = None,
+) -> int:
     """Enregistre une occurrence d'un candidat depuis une source donnée. Renvoie 1 si cette
     occurrence était nouvelle (fait avancer le score), 0 si déjà vue. `db` doit être une
     connexion ACTORS_DB déjà ouverte (appelée depuis plusieurs collecteurs, jamais sa propre
-    transaction)."""
+    transaction). `country`/`suggested_official_url` : uniquement quand la source les porte
+    elle-même (jamais devinés) -- COALESCE ne les écrase jamais une fois connus, y compris par
+    une occurrence ultérieure qui ne les fournit pas."""
     normalized = _normalize_name(name)
     if not normalized:
         return 0
@@ -96,11 +101,14 @@ def upsert_actor_candidate(db, name: str, source_type: str, *, context: str | No
     row = db.execute("SELECT id FROM actor_candidates WHERE normalized_name=?", (normalized,)).fetchone()
     if row:
         candidate_id = int(row["id"])
-        db.execute("UPDATE actor_candidates SET last_seen_at=? WHERE id=?", (stamp, candidate_id))
+        db.execute(
+            "UPDATE actor_candidates SET last_seen_at=?,country=COALESCE(country,?),suggested_official_url=COALESCE(suggested_official_url,?) WHERE id=?",
+            (stamp, country, suggested_official_url, candidate_id),
+        )
     else:
         candidate_id = db.execute(
-            "INSERT INTO actor_candidates(name,normalized_name,first_seen_at,last_seen_at) VALUES(?,?,?,?)",
-            (name[:200], normalized, stamp, stamp),
+            "INSERT INTO actor_candidates(name,normalized_name,country,suggested_official_url,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?)",
+            (name[:200], normalized, country, suggested_official_url, stamp, stamp),
         ).lastrowid
 
     before = db.total_changes
@@ -169,21 +177,33 @@ def discover_actor_candidates() -> dict:
     return {"cordis_candidates": cordis_added, "outbound_link_candidates": outbound_added}
 
 
-def promote_candidate(candidate_id: int, *, official_url: str, country: str, role: str, reviewed_by: str | None = None) -> dict:
+def promote_candidate(
+    candidate_id: int, *, role: str, official_url: str | None = None, country: str | None = None,
+    reviewed_by: str | None = None,
+) -> dict:
     """Crée un vrai acteur (review_status='candidate' -- rejoint /api/review?queue=actors pour
-    la décision finale, voir review_queue.py Lot 1 §1.1) à partir d'un candidat validé.
-    `official_url`, `country` et `role` restent obligatoires et saisis par l'humain qui promeut
-    -- notamment `official_url` : le source_url d'une source CORDIS est une page de PROJET
-    CORDIS, pas le site de l'organisation, et celui d'un outbound_link peut être une page
-    profonde plutôt que la page d'accueil. Aucun des deux n'est fiable comme official_url sans
-    vérification humaine ; jamais deviné ici."""
+    la décision finale, voir review_queue.py Lot 1 §1.1) à partir d'un candidat validé. `role`
+    reste toujours obligatoire, saisi par l'humain qui promeut -- rien dans les sources de ce
+    module ne le détermine de façon fiable. `official_url`/`country` sont optionnels : à défaut,
+    la valeur suggérée par la source (candidate.suggested_official_url/country -- ex: le vrai
+    organizationURL/country de organization.csv pour un candidat CORDIS) est utilisée si connue.
+    Un humain qui la fournit explicitement l'emporte toujours sur la suggestion -- jamais
+    l'inverse, et jamais une valeur devinée quand ni l'un ni l'autre n'est disponible."""
     with connect(ACTORS_DB) as db:
-        row = db.execute("SELECT id,name,review_status FROM actor_candidates WHERE id=?", (candidate_id,)).fetchone()
+        row = db.execute(
+            "SELECT id,name,review_status,country,suggested_official_url FROM actor_candidates WHERE id=?", (candidate_id,)
+        ).fetchone()
         if not row:
             raise ValueError(f"Actor candidate {candidate_id} not found")
         if row["review_status"] != "pending":
             raise ValueError(f"Actor candidate {candidate_id} already {row['review_status']}")
         name = row["name"]
+        official_url = official_url or row["suggested_official_url"]
+        country = country or row["country"]
+        if not official_url:
+            raise ValueError("official_url is required: no suggested_official_url was captured for this candidate")
+        if not country:
+            raise ValueError("country is required: no country was captured for this candidate")
     # create_actor()/update_actor_classification() open their OWN connection each -- called
     # outside the block above rather than nested inside it, matching how every other caller in
     # this codebase uses them (never nested inside another open `with connect()`).

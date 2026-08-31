@@ -83,7 +83,7 @@ from db import (
 )
 from firmographics import collect_french_registry
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
-from openalex import collect_openalex_publications
+from openalex import collect_openalex_publications, discover_global_actor_candidates
 from press import collect_actor_feeds, collect_press_mentions
 from review_queue import REJECT_REASONS, decide_review_item, list_review_queue
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
@@ -193,6 +193,7 @@ jobs: dict[str, dict[str, Any]] = {
     "press": {"status": "idle", "result": None, "error": None},
     "actor_feeds": {"status": "idle", "result": None, "error": None},
     "actor_discovery": {"status": "idle", "result": None, "error": None},
+    "openalex_global": {"status": "idle", "result": None, "error": None},
     "capabilities": {"status": "idle", "result": None, "error": None},
     "monthly": {"status": "idle", "result": None, "error": None},
 }
@@ -213,6 +214,7 @@ def _collect_monthly() -> dict:
         "press": collect_press_mentions(),
         "actor_feeds": collect_actor_feeds(),
         "actor_discovery": discover_actor_candidates(),
+        "openalex_global": discover_global_actor_candidates(),
         "capabilities": collect_capability_specs(),
     }
 
@@ -227,6 +229,7 @@ collectors: dict[str, Callable[[], dict]] = {
     "press": collect_press_mentions,
     "actor_feeds": collect_actor_feeds,
     "actor_discovery": discover_actor_candidates,
+    "openalex_global": discover_global_actor_candidates,
     "capabilities": collect_capability_specs,
     "monthly": _collect_monthly,
 }
@@ -881,7 +884,7 @@ def actor_candidates_list(status: Literal["pending", "promoted", "rejected"] = "
     promu explicitement (POST .../promote)."""
     candidates = rows(
         ACTORS_DB,
-        """SELECT id,name,score,review_status,promoted_actor_id,reviewed_by,reviewed_at,reject_reason,first_seen_at,last_seen_at
+        """SELECT id,name,score,country,suggested_official_url,review_status,promoted_actor_id,reviewed_by,reviewed_at,reject_reason,first_seen_at,last_seen_at
            FROM actor_candidates WHERE review_status=? ORDER BY score DESC,last_seen_at DESC""",
         (status,),
     )
@@ -895,9 +898,9 @@ def actor_candidates_list(status: Literal["pending", "promoted", "rejected"] = "
 
 
 class PromoteCandidateRequest(BaseModel):
-    official_url: str
-    country: str
     role: str
+    official_url: str | None = None
+    country: str | None = None
     reviewed_by: str | None = None
 
 
@@ -905,8 +908,10 @@ class PromoteCandidateRequest(BaseModel):
 def actor_candidate_promote(candidate_id: int, payload: PromoteCandidateRequest):
     """Crée un vrai acteur à partir d'un candidat validé (review_status='candidate' -- rejoint
     ensuite /api/review?queue=actors pour la décision finale, voir review_queue.py Lot 1 §1.1).
-    official_url/country/role restent saisis par l'humain qui promeut : aucune des 3 sources de
-    découverte ne les détermine de façon fiable (voir actor_discovery.promote_candidate)."""
+    role reste toujours saisi par l'humain qui promeut. official_url/country sont optionnels :
+    à défaut, la valeur suggérée par la source (candidate.suggested_official_url/country, ex:
+    organizationURL/country réels de CORDIS) est utilisée si connue (voir
+    actor_discovery.promote_candidate) -- jamais devinée si absente des deux côtés."""
     try:
         return promote_candidate(
             candidate_id, official_url=payload.official_url, country=payload.country,
@@ -1494,7 +1499,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "capabilities", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "capabilities", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -1509,7 +1514,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "capabilities", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "capabilities", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 

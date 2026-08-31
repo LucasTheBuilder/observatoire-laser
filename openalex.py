@@ -35,14 +35,19 @@ from urllib.parse import urlparse
 
 import httpx
 
-from actor_discovery import upsert_actor_candidate
+from actor_discovery import _known_actor_names_and_domains, _normalize_name, upsert_actor_candidate
 from db import ACTORS_DB, TECH_DB, compute_is_backfill, connect, utc_now
-from scrapers import CRAWLER_CONTACT, HEADERS, is_on_topic, upsert_document_technology_signal
+from scrapers import CRAWLER_CONTACT, HEADERS, TECHNOLOGY_QUERIES, is_on_topic, upsert_document_technology_signal
 
 OPENALEX_API = "https://api.openalex.org"
 OPENALEX_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
 OPENALEX_LOOKBACK_DAYS_DEFAULT = 365
 OPENALEX_WORKS_PER_ACTOR = 25
+# §4.D/§10.8 audit veille (30/08/2026, Lot 3 §3.2/§3.3) : recherche globale, indépendante de
+# tout acteur suivi -- complète le passage actor-scoped ci-dessous (qui ne trouve que les
+# co-institutions des travaux d'un acteur DÉJÀ tracké, donc jamais une institution 100% hors du
+# réseau connu). Pas de per-page trop élevé : autant de requêtes que de TECHNOLOGY_QUERIES.
+GLOBAL_SEARCH_WORKS_PER_QUERY = 25
 
 
 def _domain(url: str) -> str:
@@ -97,6 +102,31 @@ def _fetch_recent_works(client: httpx.Client, institution_id: str, from_date: st
         return []
 
 
+def _fetch_global_on_topic_works(client: httpx.Client, query: str, from_date: str) -> list[dict]:
+    """§4.D/§10.8 audit veille (30/08/2026, Lot 3 §3.2/§3.3) : recherche OpenAlex GLOBALE (pas
+    scopée à `authorships.institutions.id` comme _fetch_recent_works) -- utilise le paramètre
+    `search` sur l'ensemble du corpus. Complète _fetch_recent_works : ce dernier ne trouve
+    jamais une institution qui n'a encore co-publié avec AUCUN acteur suivi, aussi pertinente
+    soit-elle. Réutilise les mêmes requêtes déjà vérifiées pour Crossref
+    (scrapers.TECHNOLOGY_QUERIES) plutôt que d'en inventer de nouvelles."""
+    try:
+        response = client.get(
+            f"{OPENALEX_API}/works",
+            params={
+                "search": query,
+                "filter": f"from_publication_date:{from_date}",
+                "sort": "publication_date:desc",
+                "per-page": GLOBAL_SEARCH_WORKS_PER_QUERY,
+                "select": "id,doi,title,publication_date,primary_location,authorships",
+                **_mailto_params(),
+            },
+        )
+        response.raise_for_status()
+        return response.json().get("results", [])
+    except Exception:
+        return []
+
+
 def _work_is_on_topic(title: str) -> bool:
     """Une publication n'est retenue que si son titre relève du laser ultra-rapide, via
     scrapers.is_on_topic() -- même filtre que cordis.py, voir son docstring pour le détail des
@@ -109,18 +139,20 @@ def _work_is_on_topic(title: str) -> bool:
     return is_on_topic(title)
 
 
-def _co_institutions(work: dict, exclude_institution_id: str) -> list[str]:
+def _co_institutions(work: dict, exclude_institution_id: str) -> list[tuple[str, str | None]]:
     """§4.D audit veille (30/08/2026, Lot 3 §3.2) : institutions co-autrices d'un travail
     on-topic d'un acteur suivi, hors l'institution de l'acteur lui-même -- signal de découverte
-    d'acteur (voir actor_discovery.py), pas un signal marché/technologie."""
-    names: list[str] = []
+    d'acteur (voir actor_discovery.py), pas un signal marché/technologie. Renvoie (nom, code
+    pays OpenAlex -- ISO 3166-1 alpha-2, ou None) : capturé tel quel, jamais deviné, pour
+    préremplir la promotion d'un candidat (actor_candidates.country)."""
+    results: list[tuple[str, str | None]] = []
     for authorship in work.get("authorships") or []:
         for institution in authorship.get("institutions") or []:
             institution_id = str(institution.get("id") or "").rsplit("/", 1)[-1]
             display_name = str(institution.get("display_name") or "").strip()
             if display_name and institution_id != exclude_institution_id:
-                names.append(display_name)
-    return names
+                results.append((display_name, institution.get("country_code") or None))
+    return results
 
 
 def _parse_work(work: dict) -> dict | None:
@@ -177,6 +209,7 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
     """Point d'entrée (voir app.py: collectors["openalex"])."""
     with connect(ACTORS_DB) as db:
         actors = [dict(row) for row in db.execute("SELECT name,official_url FROM actors WHERE active=1").fetchall()]
+        known_names, _known_domains = _known_actor_names_and_domains(db)
     from_date = (date.today() - timedelta(days=max(1, lookback_days))).isoformat()
 
     with connect(TECH_DB) as db:
@@ -212,11 +245,16 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                         )
                         # §4.D audit veille (Lot 3 §3.2) : une institution co-autrice récurrente
                         # sur des travaux on-topic est un candidat acteur -- voir actor_discovery.py.
-                        for co_name in _co_institutions(work, institution_id):
+                        # Exclut aussi les co-institutions qui sont déjà un AUTRE acteur suivi
+                        # (ex: ALPHANOV et Fraunhofer ILT co-auteurs) -- un acteur déjà réel ne
+                        # doit jamais redevenir un "candidat".
+                        for co_name, co_country in _co_institutions(work, institution_id):
+                            if _normalize_name(co_name) in known_names:
+                                continue
                             candidates_added += upsert_actor_candidate(
                                 adb, co_name, "openalex",
                                 context=f"co-auteur avec {actor['name']} sur un travail on-topic",
-                                source_url=item["url"],
+                                source_url=item["url"], country=co_country,
                             )
             except Exception:
                 errors += 1
@@ -239,5 +277,57 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
         "documents_off_topic": off_topic,
         "actor_candidates_added": candidates_added,
         "technology_signals_added": technology_signals_added,
+        "errors": errors,
+    }
+
+
+def discover_global_actor_candidates(lookback_days: int = 60) -> dict:
+    """§4.D/§10.8 audit veille (30/08/2026, Lot 3 §3.2/§3.3, "élargir le périmètre hors
+    Europe") : point d'entrée séparé de collect_openalex_publications() -- une recherche
+    globale par mot-clé (search=) est un usage différent de l'API que la recherche par
+    institution (filter=authorships.institutions.id:...), avec son propre budget de requêtes.
+    Ne dépend d'AUCUN acteur déjà suivi : c'est la seule des deux façons d'interroger OpenAlex
+    qui peut découvrir une institution qui n'a encore jamais co-publié avec un acteur tracké
+    (voir _fetch_global_on_topic_works). Chaque requête (scrapers.TECHNOLOGY_QUERIES, déjà
+    vérifiées pour Crossref) est indépendante du pays de l'institution -- aucun biais européen,
+    contrairement à collect_openalex_publications (qui part TOUJOURS d'un acteur suivi, donc
+    européen aujourd'hui)."""
+    with connect(ACTORS_DB) as db:
+        known_names, _known_domains = _known_actor_names_and_domains(db)
+    from_date = (date.today() - timedelta(days=max(1, lookback_days))).isoformat()
+
+    works_scanned = works_on_topic = candidates_added = errors = 0
+    seen_work_ids: set[str] = set()
+    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=OPENALEX_TIMEOUT) as client, connect(ACTORS_DB) as adb:
+        for query in TECHNOLOGY_QUERIES:
+            try:
+                works = _fetch_global_on_topic_works(client, query, from_date)
+            except Exception:
+                errors += 1
+                continue
+            for work in works:
+                work_id = str(work.get("id") or "")
+                if not work_id or work_id in seen_work_ids:
+                    continue
+                seen_work_ids.add(work_id)
+                works_scanned += 1
+                item = _parse_work(work)
+                if not item or not _work_is_on_topic(item["title"]):
+                    continue
+                works_on_topic += 1
+                for co_name, co_country in _co_institutions(work, ""):
+                    if _normalize_name(co_name) in known_names:
+                        continue
+                    candidates_added += upsert_actor_candidate(
+                        adb, co_name, "openalex",
+                        context=f"recherche globale on-topic : {item['title'][:120]}",
+                        source_url=item["url"], country=co_country,
+                    )
+
+    return {
+        "queries": len(TECHNOLOGY_QUERIES),
+        "works_scanned": works_scanned,
+        "works_on_topic": works_on_topic,
+        "actor_candidates_added": candidates_added,
         "errors": errors,
     }

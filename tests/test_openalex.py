@@ -154,10 +154,10 @@ class CoInstitutionsTests(unittest.TestCase):
     def test_co_institutions_excludes_the_searched_institution(self):
         work = {"authorships": [
             {"institutions": [{"id": "https://openalex.org/I1", "display_name": "ALPhANOV"}]},
-            {"institutions": [{"id": "https://openalex.org/I2", "display_name": "Fraunhofer ILT"}]},
+            {"institutions": [{"id": "https://openalex.org/I2", "display_name": "Fraunhofer ILT", "country_code": "DE"}]},
         ]}
         names = _co_institutions(work, "I1")
-        self.assertEqual(["Fraunhofer ILT"], names)
+        self.assertEqual([("Fraunhofer ILT", "DE")], names)
 
     def test_no_authorships_returns_empty_list(self):
         self.assertEqual([], _co_institutions({}, "I1"))
@@ -166,13 +166,17 @@ class CoInstitutionsTests(unittest.TestCase):
         work = {"authorships": [{"institutions": [{"id": "https://openalex.org/I2", "display_name": ""}]}]}
         self.assertEqual([], _co_institutions(work, "I1"))
 
+    def test_institution_without_country_code_returns_none(self):
+        work = {"authorships": [{"institutions": [{"id": "https://openalex.org/I2", "display_name": "Fraunhofer ILT"}]}]}
+        self.assertEqual([("Fraunhofer ILT", None)], _co_institutions(work, "I1"))
+
     def test_multiple_distinct_co_institutions_are_all_returned(self):
         work = {"authorships": [
             {"institutions": [{"id": "https://openalex.org/I1", "display_name": "ALPhANOV"}]},
-            {"institutions": [{"id": "https://openalex.org/I2", "display_name": "Fraunhofer ILT"}]},
-            {"institutions": [{"id": "https://openalex.org/I3", "display_name": "Tekniker"}]},
+            {"institutions": [{"id": "https://openalex.org/I2", "display_name": "Fraunhofer ILT", "country_code": "DE"}]},
+            {"institutions": [{"id": "https://openalex.org/I3", "display_name": "Tekniker", "country_code": "ES"}]},
         ]}
-        self.assertEqual(["Fraunhofer ILT", "Tekniker"], _co_institutions(work, "I1"))
+        self.assertEqual([("Fraunhofer ILT", "DE"), ("Tekniker", "ES")], _co_institutions(work, "I1"))
 
 
 class UpsertDocumentTests(unittest.TestCase):

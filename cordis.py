@@ -42,6 +42,7 @@ from typing import Any
 
 import httpx
 
+from actor_discovery import upsert_actor_candidate
 from db import ACTORS_DB, DATA_DIR, TECH_DB, connect, technology_signal_key, utc_now
 from scrapers import HEADERS, PROCESS_TECHNOLOGIES, _detect_maturity, _match_label_details, _quote, is_on_topic
 
@@ -176,6 +177,57 @@ def _find_tracked_actor(related_name: str, aliases: dict[str, str]) -> str | Non
     return None
 
 
+def discover_topic_scoped_candidates(zip_path: Path, aliases: dict[str, str]) -> int:
+    """Découverte d'acteurs TOPIC-scoped (extension du §4.D audit veille, 30/08/2026, Lot 3
+    §3.2/§3.3 : "élargir le périmètre hors Europe").
+
+    _match_projects (et donc actor_relations/actor_candidates via actor_discovery._discover_
+    from_cordis) est ACTOR-scoped : il ne trouve que les consortiums qui contiennent DÉJÀ un
+    acteur suivi. Un projet européen 100% hors du réseau connu -- ex: seuls participants une
+    université coréenne et une PME japonaise sur un projet d'usinage laser ultra-rapide -- est
+    donc invisible à ce jour, quel que soit son degré de pertinence. Vérifié sur les données
+    réelles avant d'écrire cette fonction : organization.csv couvre bien 190 pays (1765 lignes
+    US, 287 CN, 240 JP, 145 KR...), CORDIS n'est donc pas un jeu de données limité à l'Europe --
+    seule la façon dont il était interrogé l'était.
+
+    Deux passes complètes supplémentaires (comme _match_projects/_consortiums_for_projects) :
+    project.csv pour les project_id on-topic (titre+objectif, is_on_topic -- même filtre que
+    _project_is_on_topic), puis organization.csv pour toutes leurs organisations, candidates SAUF
+    celles qui matchent déjà un alias suivi. country/organizationURL sont capturés tels quels
+    (jamais devinés) pour préremplir une promotion -- voir actor_discovery.upsert_actor_candidate.
+    """
+    on_topic_project_ids: set[str] = set()
+    for row in _csv_rows(zip_path, "project.csv"):
+        project_id = row.get("id")
+        if not project_id:
+            continue
+        text = f"{row.get('title') or ''} {row.get('objective') or ''}"
+        if is_on_topic(text):
+            on_topic_project_ids.add(project_id)
+    if not on_topic_project_ids:
+        return 0
+
+    added = 0
+    with connect(ACTORS_DB) as db:
+        for row in _csv_rows(zip_path, "organization.csv"):
+            project_id = row.get("projectID")
+            if project_id not in on_topic_project_ids:
+                continue
+            org_name = (row.get("name") or "").strip()
+            if not org_name:
+                continue
+            if _find_tracked_actor(org_name, aliases):
+                continue
+            added += upsert_actor_candidate(
+                db, org_name, "cordis",
+                context=f"Projet CORDIS on-topic {project_id} ({row.get('country') or '?'})",
+                source_url=_project_url(project_id),
+                country=(row.get("country") or None),
+                suggested_official_url=(row.get("organizationURL") or None),
+            )
+    return added
+
+
 def _consortiums_for_projects(zip_path: Path, project_ids: set[str]) -> dict[str, list[dict[str, str]]]:
     """Passe 2 (deuxième lecture complète d'organization.csv) : la liste des organisations
     participantes pour, seulement, les projets déjà identifiés comme pertinents en passe 1 --
@@ -305,7 +357,8 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
     except Exception as exc:
         return {
             "error": str(exc)[:300], "actors_matched": 0, "projects_matched": 0, "projects_off_topic": 0,
-            "events_added": 0, "relations_added": 0, "signals_added": 0, "signal_sources_added": 0, "errors": 0,
+            "events_added": 0, "relations_added": 0, "signals_added": 0, "signal_sources_added": 0,
+            "topic_scoped_candidates_added": 0, "errors": 0,
         }
 
     matches = _match_projects(zip_path, aliases)
@@ -377,6 +430,15 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
             except Exception:
                 errors += 1
 
+    # §4.D/§10.8 audit veille (Lot 3 §3.2/§3.3) : passe indépendante, topic-scoped -- ne dépend
+    # pas de project_actor_names (qui ne connaît que les consortiums d'un acteur déjà suivi).
+    # Voir discover_topic_scoped_candidates pour le raisonnement complet.
+    try:
+        topic_scoped_candidates = discover_topic_scoped_candidates(zip_path, aliases)
+    except Exception:
+        topic_scoped_candidates = 0
+        errors += 1
+
     return {
         "actors_matched": len(matches),
         "projects_matched": len(project_actor_names),
@@ -385,5 +447,6 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
         "relations_added": relations_added,
         "signals_added": signals_added,
         "signal_sources_added": signal_sources_added,
+        "topic_scoped_candidates_added": topic_scoped_candidates,
         "errors": errors,
     }
