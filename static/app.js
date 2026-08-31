@@ -11,6 +11,12 @@ const state = {
   vocabulary: [],
   marketReview: [],
   actorDiscovery: [],
+  reviewOffers: [],
+  reviewEvents: [],
+  collectionHealth: null,
+  schedulerStatus: null,
+  veilleMetrics: null,
+  digest: null,
   network: {nodes: [], edges: []},
   duplicates: [],
   pipelineFunnel: {discovered: 0, fetched: 0, parsed: 0, evidence: 0, validated: 0},
@@ -498,6 +504,24 @@ function nextBestActions() {
       label: `Trier ${pendingMarketReview} fait${pendingMarketReview > 1 ? "s" : ""} marché en attente`,
       detail: "Faits partiels ou proposés par l'IA, à valider ou rejeter.",
       view: "market-review",
+    });
+  }
+  const pendingReviewQueues = (state.reviewOffers || []).length + (state.reviewEvents || []).length;
+  if (pendingReviewQueues > 0) {
+    actions.push({
+      label: `Trier ${pendingReviewQueues} capacité(s)/événement(s) en attente`,
+      detail: "Offres et événements détectés (M&A, financement...), jamais visibles ailleurs tant qu'ils restent ici.",
+      view: "market-review",
+    });
+  }
+  const concerningHealth = (state.collectionHealth?.actors || []).filter(a =>
+    (a.health_score != null && a.health_score < 70) || a.error_rate > 0.1 || a.needs_reprofile
+  ).length;
+  if (concerningHealth > 0) {
+    actions.push({
+      label: `${concerningHealth} acteur${concerningHealth > 1 ? "s" : ""} en difficulté de collecte`,
+      detail: "Erreurs répétées ou score de santé faible, potentiellement silencieux jusqu'ici.",
+      view: "collections",
     });
   }
   const marketRun = state.overview?.market?.last_run;
@@ -1383,6 +1407,49 @@ function marketReviewCard(item) {
   </article>`;
 }
 
+// §5.G audit veille (30/08/2026, Lot 1 §1.1) : GET /api/review couvre 7 files derrière un seul
+// contrat {id,queue,actor_name,summary,detail,priority,...} -- avant cet endpoint, offers/
+// tech_signals/actor_events/actor_facts n'avaient AUCUN moyen d'être vus en dehors d'un accès
+// direct à la base. evidence/vocabulary ont déjà leur propre page dédiée (au-dessus) ; cette
+// section couvre les deux files réellement chargées en production au 31/08/2026 (offers : 29,
+// events : 174, dont une vraie acquisition jamais vue nulle part dans l'app avant ce jour).
+const REJECT_REASON_LABELS = {
+  off_topic: "Hors sujet",
+  wrong_actor: "Mauvais acteur",
+  wrong_dimension: "Mauvaise dimension",
+  unconvincing_citation: "Citation non probante",
+  duplicate: "Doublon",
+};
+
+function reviewQueueCard(item) {
+  const detail = item.detail || {};
+  const key = `${item.queue}:${item.id}`;
+  const reasonOptions = Object.entries(REJECT_REASON_LABELS)
+    .map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("");
+  return `<article class="vocab-card">
+    <header><span>${esc(item.actor_name || "—")} · ${dateLabel(item.created_at)}</span><span>Priorité ${Number(item.priority || 0).toFixed(1)}</span></header>
+    <p class="dialog-operation">${esc(item.summary)}</p>
+    ${detail.quote ? `<blockquote>${esc(detail.quote)}</blockquote>` : ""}
+    ${detail.laser_process ? `<small class="block-label">${esc(detail.laser_process)}</small>` : ""}
+    <div class="vocab-dims" style="margin-top:12px">
+      <button class="vocab-accept" data-accept-review="${key}">✓ Valider</button>
+      <select class="reject-reason-select" data-reject-reason-for="${key}">
+        <option value="">Motif de rejet…</option>
+        ${reasonOptions}
+      </select>
+      <button class="vocab-reject" data-reject-review="${key}">✕ Rejeter</button>
+    </div>
+    ${detail.source_url ? `<a class="signal-link" href="${esc(detail.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>` : ""}
+  </article>`;
+}
+
+function reviewQueueSection(symbol, title, description, items) {
+  if (!items.length) return "";
+  return `<section><div class="section-title"><div><span>${esc(symbol)}</span><div><h2>${esc(title)}</h2><p>${esc(description)}</p></div></div><b>${items.length}</b></div>
+    <div class="vocab-list">${items.map(reviewQueueCard).join("")}</div>
+  </section>`;
+}
+
 function renderMarketReview() {
   const items = state.marketReview || [];
   const partialCount = items.filter(i => i.fact_status === "partial").length;
@@ -1394,8 +1461,24 @@ function renderMarketReview() {
   ) +
   (items.length
     ? `<p class="actor-summary-counts">${partialCount} partiel${partialCount > 1 ? "s" : ""} · ${aiCount} proposé${aiCount > 1 ? "s" : ""} par l'IA</p><div class="vocab-list">${items.map(marketReviewCard).join("")}</div>`
-    : `<div class="empty">Aucun fait marché en attente de revue.</div>`);
+    : `<div class="empty">Aucun fait marché en attente de revue.</div>`)
+  + reviewQueueSection("◈", "Capacités à valider", "Offres/capacités extraites mais pas encore confirmées comme fait retenu.", state.reviewOffers || [])
+  + reviewQueueSection("⚑", "Événements à valider", "Événements datés (M&A, financement, mentions presse) détectés mais pas encore vérifiés — jamais visibles ailleurs dans l'app tant qu'ils restent ici.", state.reviewEvents || []);
   wireActions();
+}
+
+async function decideReviewItem(queue, itemId, decision, rejectReason) {
+  try {
+    const body = {decision};
+    if (decision === "reject") body.reject_reason = rejectReason;
+    await api(`/api/review/${queue}/${itemId}/decide`, {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    toast(decision === "accept" ? "Validé." : "Rejeté.");
+    if (queue === "offers") state.reviewOffers = (await api("/api/review?queue=offers")).items;
+    if (queue === "events") state.reviewEvents = (await api("/api/review?queue=events")).items;
+    renderMarketReview();
+  } catch (error) { toast(error.message); }
 }
 
 // --- Découverte d'acteurs (Lot 3 §3.2/§3.4) : rubrique unique regroupant les candidats
@@ -1480,6 +1563,61 @@ async function rejectCandidate(candidateId) {
   } catch (error) { toast(error.message); }
 }
 
+// --- Digest (§5.F audit veille, 30/08/2026) : "ce digest ne doit contenir QUE du changement
+// depuis `since`, jamais un état" -- 4 règles évaluées après chaque collecte (voir alerts.py) :
+// transition radar->existing, nouveau fait chez un acteur C1/C2, incident de collecte, signal
+// M&A/financement. GET /api/digest existait déjà, mais rien dans l'app ne l'appelait -- 60
+// alertes réelles accumulées en silence au 31/08/2026, dont une vraie acquisition (Blueacre
+// Technology).
+const ALERT_TYPE_LABELS = {
+  bucket_transition_existing: "Passage radar → existant",
+  new_fact_high_value_actor: "Nouveau fait chez un acteur prioritaire",
+  collection_incident: "Incident de collecte",
+  ma_funding_event: "M&A / financement",
+};
+
+function digestAlertCard(item) {
+  return `<article class="vocab-card">
+    <header><span>${esc(item.actor_name || "—")} · ${dateLabel(item.event_at)}</span></header>
+    <p class="dialog-operation">${esc(item.summary)}</p>
+    ${item.detail ? `<blockquote>${esc(item.detail)}</blockquote>` : ""}
+    ${item.source_url ? `<a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>` : ""}
+  </article>`;
+}
+
+function renderDigest() {
+  const digest = state.digest || {since: null, total: 0, by_type: {}};
+  const sections = Object.entries(ALERT_TYPE_LABELS).map(([type, label]) => {
+    const items = digest.by_type[type] || [];
+    if (!items.length) return "";
+    return `<section><div class="section-title"><div><span>⚑</span><div><h2>${esc(label)}</h2></div></div><b>${items.length}</b></div>
+      <div class="vocab-list">${items.map(digestAlertCard).join("")}</div>
+    </section>`;
+  }).join("");
+  content.innerHTML = header(
+    "Intelligence",
+    "Digest",
+    "Ce qui a changé depuis la fenêtre choisie -- transition radar → existant, nouveau fait chez un acteur prioritaire, incident de collecte, ou signal M&A/financement. Jamais un état, seulement du changement.",
+    `<div class="header-actions">
+      <button class="export-btn" data-digest-window="7">7 j</button>
+      <button class="export-btn" data-digest-window="30">30 j</button>
+      <button class="export-btn" data-digest-window="90">90 j</button>
+    </div>`
+  ) +
+  (digest.total
+    ? `<p class="actor-summary-counts">${digest.total} alerte${digest.total > 1 ? "s" : ""} depuis ${dateLabel(digest.since)}</p>${sections}`
+    : `<div class="empty">Aucune alerte sur cette fenêtre.</div>`);
+  wireActions();
+}
+
+async function setDigestWindow(days) {
+  try {
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    state.digest = await api(`/api/digest?since=${encodeURIComponent(since)}`);
+    renderDigest();
+  } catch (error) { toast(error.message); }
+}
+
 function dbCard(kind,label,file,count,detail,paused=false) {
   const last=state.overview?.[kind]?.last_run;
   const job=state.overview?.jobs?.[kind];
@@ -1499,8 +1637,66 @@ function renderCollections() {
    <section class="adaptive-panel"><div class="adaptive-heading"><div><p class="eyebrow">Couverture déterministe</p><h2>Profils des acteurs prioritaires</h2></div><span class="ollama ${o.adaptive.ollama_available?'online':'offline'}">${o.adaptive.ollama_available?`${aiProviderName(o.adaptive)} · ${esc(o.adaptive.model)}${aiCostSuffix(o.adaptive)}`:`${aiProviderName(o.adaptive)} indisponible · crawler autonome`}</span></div><div class="profile-grid">${priorityProfiles.map(p=>`<article><div><strong>${esc(p.name)}</strong><span class="profile-badge ${p.needs_reprofile?'warning':p.strategy}">${p.needs_reprofile?'À recalibrer':p.strategy==='adaptive'?'Adaptatif':'Générique'}</span></div><p>${p.status==='ready'?'Rubriques stratégiques exploitables':p.status==='partial'?'Couverture partielle':p.status==='degraded'?'Aucune rubrique stratégique exploitable':'Cartographie au prochain lancement'}</p>${sectionStates(p)}<small>${p.last_profiled_at?`Dernière analyse : ${dateLabel(p.last_profiled_at)}`:'Pas encore analysé'}</small></article>`).join("")}</div></section>
    <div class="rule-note"><strong>Règle de séparation</strong><p>Le crawler collecte les pages et reconstruit leurs blocs. La vue Marché exige marché + composant + opération explicitement reliés. Les pages de service, technologie ou savoir-faire qui ne portent pas de marché explicite sont conservées séparément dans « Offres & capacités ».</p></div>
    ${pipelineFunnelPanel()}
+   ${veilleMetricsPanel()}
+   ${collectionHealthPanel()}
    ${duplicatesPanel()}`;
   wireActions();
+}
+
+// §10.11 audit veille (30/08/2026, Lot 1 §1.7) : "aucun des chiffres de ce document n'est
+// calculé par l'application" -- veille_metrics.py calcule bien les 8 indicateurs, mais rien ne
+// les affichait avant ce jour.
+const VEILLE_METRIC_LABELS = {
+  collection_yield: "Rendement de collecte",
+  unvisited_discovery_rate: "Découvertes jamais visitées",
+  crawl_error_rate: "Taux d'erreur de crawl",
+  non_verbatim_share: "Citations non verbatim",
+  unreviewed_accepted_share: "Faits acceptés sans revue humaine",
+  published_date_reliability: "Fiabilité des dates de publication",
+  detection_latency_days: "Latence de détection",
+  source_concentration_top10pct: "Concentration des sources (top 10%)",
+};
+const VEILLE_METRIC_RAW_DAYS = new Set(["detection_latency_days"]);
+
+function veilleMetricValue(indicator) {
+  if (indicator.value == null) return "—";
+  if (VEILLE_METRIC_RAW_DAYS.has(indicator.indicator)) return `${Math.round(indicator.value)} j`;
+  return `${Math.round(indicator.value * 100)}%`;
+}
+
+function veilleMetricsPanel() {
+  const vm = state.veilleMetrics;
+  if (!vm) return "";
+  const items = vm.indicators.map(ind => {
+    const label = VEILLE_METRIC_LABELS[ind.indicator] || ind.indicator;
+    const status = ind.value == null ? "missing" : (ind.alert ? "error" : "ready");
+    const symbol = status === "error" ? "!" : status === "missing" ? "—" : "✓";
+    return `<span class="section-state ${status}" title="${esc(label)}">${symbol} ${esc(label)} : ${veilleMetricValue(ind)}</span>`;
+  }).join("");
+  return `<section><div class="section-title"><div><span>⚕</span><div><h2>Santé de la veille</h2><p>8 indicateurs de qualité du pipeline pour ${esc(vm.period)} — pas une dimension métier, la fiabilité de ce que l'observatoire produit lui-même.</p></div></div></div>
+    <div class="section-states">${items}</div>
+  </section>`;
+}
+
+// §9.2 audit veille (30/08/2026, Lot 1 §1.5) : health_score/failure_count existaient déjà
+// (site_profiles) mais rien ne les exposait au-delà de nombres bruts sur la fiche acteur. Cas
+// trouvé en production : Workshop of Photonics, le 2e acteur le mieux documenté, échouait aussi
+// le plus (72 échecs 403 Forbidden) sans que rien ne le signale.
+function collectionHealthPanel() {
+  const health = state.collectionHealth;
+  if (!health) return "";
+  const concerning = (health.actors || []).filter(a =>
+    (a.health_score != null && a.health_score < 70) || a.error_rate > 0.1 || a.needs_reprofile
+  );
+  const actorRows = concerning.length
+    ? concerning.slice(0, 15).map(a => `<article class="dup-row"><div><strong>${esc(a.name)}</strong>${a.priority ? " (prioritaire)" : ""}</div><span>Santé ${a.health_score ?? "—"}/100 · ${a.sources_failed}/${a.sources_total} source(s) en erreur (${Math.round(a.error_rate * 100)}%)${a.top_error_status ? ` · le plus fréquent : HTTP ${a.top_error_status} (${a.top_error_count}×)` : ""}${a.last_error ? ` · ${esc(a.last_error)}` : ""}</span></article>`).join("")
+    : `<div class="empty">Aucun acteur en difficulté détectée.</div>`;
+  const runRows = (health.recent_runs || []).slice(0, 8).map(r => `<article class="dup-row"><div><strong>${esc(r.source)}</strong></div><span>${dateLabel(r.started_at)} · ${esc(r.status)} · ${r.scanned} scanné(s) · ${r.errors} erreur(s) (${Math.round(r.error_rate * 100)}%)${r.message ? ` · ${esc(r.message)}` : ""}</span></article>`).join("");
+  return `<section><div class="section-title"><div><span>⚕</span><div><h2>Santé de collecte</h2><p>Acteurs dont la collecte échoue ou se dégrade silencieusement, triés du pire au meilleur.</p></div></div><b>${concerning.length}</b></div>
+    <div class="dup-list">${actorRows}</div>
+    <h3 style="margin-top:20px">Runs récents</h3>
+    <div class="dup-list">${runRows}</div>
+  </section>`;
 }
 
 function pipelineFunnelPanel() {
@@ -1530,9 +1726,17 @@ function duplicatesPanel() {
   </section>`;
 }
 
+function schedulerStatusLine() {
+  const s = state.schedulerStatus;
+  if (!s) return '<b class="warn">Inconnu</b>';
+  if (!s.enabled) return '<b class="warn">Désactivée</b>';
+  return `<b class="ok">Active · ${esc(s.cron)}${s.next_run_at ? ` · prochain run ${dateLabel(s.next_run_at)}` : ""}</b>`;
+}
+
 function renderSettings() {
   const adaptive=state.overview.adaptive;
   content.innerHTML=header("Configuration","Paramètres","Règles de collecte et de publication de l’observatoire.")+`<div class="settings">
+    <article><div><h3>Planification automatique</h3><p>Lancement mensuel du pipeline complet (SCHEDULER_ENABLED) sans intervention manuelle.</p></div>${schedulerStatusLine()}</article>
     <article><div><h3>Crawler déterministe</h3><p>Découverte coverage-first, scoring des URLs, profils génériques et overrides spécifiques.</p></div><b class="ok">Actif</b></article>
     <article><div><h3>Analyse sémantique ${esc(aiProviderName(adaptive))}</h3><p>Modèle ${esc(adaptive.model)}${esc(aiCostSuffix(adaptive))} · réservé à l’interprétation sémantique des blocs ambiguës, pas au pilotage principal du crawl.</p></div><b class="${adaptive.ollama_available?'ok':'warn'}">${adaptive.ollama_available?'Disponible':'Secours absent'}</b></article>
     <article><div><h3>Recalibrage des profils</h3><p>Déclenché lorsqu’une structure devient inexploitable ou produit des erreurs répétées.</p></div><b>${adaptive.needs_reprofile} à recalibrer</b></article>
@@ -1777,6 +1981,7 @@ function render(){
   if(state.view==="vocabulary") renderVocabulary();
   if(state.view==="market-review") renderMarketReview();
   if(state.view==="actor-discovery") renderActorDiscovery();
+  if(state.view==="digest") renderDigest();
   if(state.view==="collections") renderCollections();
   if(state.view==="settings") renderSettings();
 }
@@ -1937,6 +2142,16 @@ function wireActions(){
   document.querySelectorAll("[data-reject-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.rejectVocab),"reject")));
   document.querySelectorAll("[data-accept-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.acceptMarketReview),"accept")));
   document.querySelectorAll("[data-reject-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.rejectMarketReview),"reject")));
+  document.querySelectorAll("[data-accept-review]").forEach(button=>button.addEventListener("click",()=>{
+    const [queue, id] = button.dataset.acceptReview.split(":");
+    decideReviewItem(queue, Number(id), "accept");
+  }));
+  document.querySelectorAll("[data-reject-review]").forEach(button=>button.addEventListener("click",()=>{
+    const [queue, id] = button.dataset.rejectReview.split(":");
+    const select = button.closest("article").querySelector(".reject-reason-select");
+    if (!select.value) { toast("Choisis un motif de rejet d'abord."); return; }
+    decideReviewItem(queue, Number(id), "reject", select.value);
+  }));
   document.querySelectorAll("[data-review-actor]").forEach(button=>button.addEventListener("click",()=>decideActorReview(Number(button.dataset.reviewActor), button.dataset.reviewStatus)));
   document.querySelectorAll("[data-promote-candidate]").forEach(button=>button.addEventListener("click",()=>showCandidatePromote(Number(button.dataset.promoteCandidate))));
   document.querySelectorAll("[data-reject-candidate]").forEach(button=>button.addEventListener("click",()=>rejectCandidate(Number(button.dataset.rejectCandidate))));
@@ -1944,6 +2159,7 @@ function wireActions(){
   document.querySelectorAll("[data-actor-edit]").forEach(el=>el.addEventListener("click",()=>showActorEdit(Number(el.dataset.actorEdit))));
   document.querySelectorAll("[data-actor-toggle-priority]").forEach(el=>el.addEventListener("click",()=>toggleActorPriority(Number(el.dataset.actorTogglePriority), el.dataset.nextPriority==="1")));
   document.querySelectorAll("[data-actor-delete]").forEach(el=>el.addEventListener("click",()=>deleteActorWithConfirm(Number(el.dataset.actorDelete), el.dataset.actorName)));
+  document.querySelectorAll("[data-digest-window]").forEach(button=>button.addEventListener("click",()=>setDigestWindow(Number(button.dataset.digestWindow))));
 }
 
 document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click",()=>{
@@ -1963,8 +2179,21 @@ document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click
 document.querySelector(".dialog-close").addEventListener("click",()=>dialog.close());
 dialog.addEventListener("click",e=>{if(e.target===dialog)dialog.close()});
 
+// veille_metrics n'a pas encore d'instantané sur une base toute neuve (404) -- ne doit jamais
+// faire échouer tout refresh() pour autant, contrairement aux autres endpoints ci-dessous qui
+// renvoient toujours 200 (éventuellement avec des listes vides).
+async function apiOrNull(path) {
+  try { return await api(path); } catch (_) { return null; }
+}
+
 async function refresh(){
-  [state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.documents,state.actors,state.profiles,state.vocabulary,state.marketReview,state.network,state.duplicates,state.pipelineFunnel,state.marketScores,state.actorDiscovery]=await Promise.all([
+  [
+    state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.documents,
+    state.actors,state.profiles,state.vocabulary,state.marketReview,state.network,state.duplicates,
+    state.pipelineFunnel,state.marketScores,state.actorDiscovery,
+    state.reviewOffers,state.reviewEvents,state.collectionHealth,state.schedulerStatus,
+    state.veilleMetrics,state.digest,
+  ]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
     api("/api/market"),
@@ -1980,6 +2209,12 @@ async function refresh(){
     api("/api/pipeline-funnel"),
     api("/api/market-scores"),
     api("/api/actor-candidates"),
+    api("/api/review?queue=offers").then(r => r.items),
+    api("/api/review?queue=events").then(r => r.items),
+    api("/api/collection-health"),
+    api("/api/scheduler"),
+    apiOrNull("/api/veille-metrics"),
+    api("/api/digest"),
   ]);
   render();
 }
