@@ -17,6 +17,7 @@ const state = {
   schedulerStatus: null,
   veilleMetrics: null,
   digest: null,
+  demandSignals: [],
   network: {nodes: [], edges: []},
   duplicates: [],
   pipelineFunnel: {discovered: 0, fetched: 0, parsed: 0, evidence: 0, validated: 0},
@@ -426,6 +427,25 @@ function evidenceTable(rows, {hideMarketColumn = false, emptyMessage} = {}) {
   </div>`;
 }
 
+// §4.B.3 audit veille (30/08/2026, Lot 4 §15) : "un cahier des charges mentionnant du
+// micro-usinage femtoseconde est un signal d'achat, pas un signal de discours" -- appels
+// d'offres publics (TED/BOAMP) trouvés par demand_signals.py, le seul endroit de market.db qui
+// documente ce que le marché ACHÈTE plutôt que ce que les acteurs suivis DISENT faire.
+function demandSignalCard(item) {
+  return `<article class="vocab-card">
+    <header><span>${esc(item.buyer_name || "Acheteur non précisé")} · ${dateLabel(item.published_at)}</span><span>${esc(item.source)}</span></header>
+    <p class="dialog-operation">${esc(item.title)}</p>
+    <a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">Voir l'avis ↗</a>
+  </article>`;
+}
+
+function demandSignalsPanel() {
+  const items = state.demandSignals || [];
+  return `<section><div class="section-title"><div><span>04</span><div><h2>Signaux de demande</h2><p>Appels d'offres publics (TED, BOAMP) mentionnant du laser ultra-rapide -- un signal d'achat réel, pas une déclaration d'un acteur suivi.</p></div></div><b>${items.length}</b></div>
+    ${items.length ? `<div class="vocab-list">${items.map(demandSignalCard).join("")}</div>` : `<div class="empty">Aucun signal de demande sur la fenêtre couverte.</div>`}
+  </section>`;
+}
+
 function renderMarket() {
   const market = state.market || {existing:[], radar:[]};
   const allRows = [...market.existing, ...market.radar];
@@ -448,7 +468,8 @@ function renderMarket() {
   ) +
   `<section id="market-drill-root">${section01}</section>
    <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${existingRows.length} faits</b></div>${evidenceTable(existingRows, {hideMarketColumn: !!selected, emptyMessage: selected ? `Aucune application existante documentée pour ${selected}.` : undefined})}</section>
-   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${radarRows.length} faits</b></div>${evidenceTable(radarRows, {hideMarketColumn: !!selected, emptyMessage: selected ? `Aucune application radar documentée pour ${selected}.` : undefined})}</section>`;
+   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${radarRows.length} faits</b></div>${evidenceTable(radarRows, {hideMarketColumn: !!selected, emptyMessage: selected ? `Aucune application radar documentée pour ${selected}.` : undefined})}</section>
+   ${demandSignalsPanel()}`;
   wireActions();
   document.querySelectorAll("[data-drill-market]").forEach(el => el.addEventListener("click", () => {
     state.marketDrill = el.dataset.drillMarket || null;
@@ -2192,7 +2213,7 @@ async function refresh(){
     state.actors,state.profiles,state.vocabulary,state.marketReview,state.network,state.duplicates,
     state.pipelineFunnel,state.marketScores,state.actorDiscovery,
     state.reviewOffers,state.reviewEvents,state.collectionHealth,state.schedulerStatus,
-    state.veilleMetrics,state.digest,
+    state.veilleMetrics,state.digest,state.demandSignals,
   ]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
@@ -2215,6 +2236,7 @@ async function refresh(){
     api("/api/scheduler"),
     apiOrNull("/api/veille-metrics"),
     api("/api/digest"),
+    api("/api/demand-signals"),
   ]);
   render();
 }

@@ -1288,6 +1288,19 @@ def proofs(bucket: str, market: str, component: str, operation: str):
     )
 
 
+@app.get("/api/demand-signals")
+def demand_signals_list():
+    """Signaux de demande (§4.B.3 audit veille, Lot 4 §15, voir demand_signals.py) : appels
+    d'offres publics (TED/BOAMP) mentionnant du laser ultra-rapide -- un signal d'achat, pas un
+    signal de discours, contrairement au reste de market.db qui ne documente que ce que les
+    acteurs suivis DISENT faire."""
+    return rows(
+        MARKET_DB,
+        """SELECT signal_type,source,buyer_name,title,published_at,source_url
+           FROM demand_signals ORDER BY published_at DESC""",
+    )
+
+
 @app.get("/api/vocabulary-candidates")
 def vocabulary_candidates(status: Literal["pending", "accepted", "rejected"] = "pending"):
     """AI-proposed market/component/operation labels that matched no known lexicon entry.
