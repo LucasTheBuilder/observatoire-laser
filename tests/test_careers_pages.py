@@ -45,6 +45,23 @@ class ClassifySourceCareersTests(unittest.TestCase):
         for fragment in ("/careers", "/career", "/jobs"):
             self.assertNotIn(fragment, DEFAULT_SITE_PROFILE["ignore_paths"])
 
+    def test_job_shop_is_never_misclassified_as_careers(self):
+        # Real production false positive (30/08/2026): "job shop" is established industry
+        # terminology for a contract-manufacturing service (already matched by the SERVICE
+        # rule below), not a careers signal -- the careers rule must only match "jobs" plural,
+        # never the bare singular "job" that "job shop" contains.
+        page_type, _ = classify_source(
+            "https://kmlt.de/en/services/laser-marking/", "",
+            title="Laser marking, laser engraving - laser job shop at KMLT GmbH",
+        )
+        self.assertEqual("service", page_type)
+        page_type, _ = classify_source("https://example.test/jobshop/", "Job Shop")
+        self.assertEqual("service", page_type)
+
+    def test_plural_jobs_still_matches_careers(self):
+        page_type, _ = classify_source("https://example.test/careers/", "Jobs")
+        self.assertEqual("careers", page_type)
+
     def test_other_ignore_terms_still_work_by_default(self):
         page_type, _ = classify_source("https://example.test/privacy-policy/", "Privacy")
         self.assertEqual("ignore", page_type)

@@ -33,7 +33,7 @@ import shutil
 import sqlite3
 import unicodedata
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
@@ -772,6 +772,35 @@ def _reconcile_orphaned_runs(db: sqlite3.Connection) -> None:
     db.execute("UPDATE collection_runs SET status='interrupted' WHERE status='running'")
 
 
+# §9.1 audit veille (30/08/2026, Lot 2 §2.2) : "89,4% des URLs découvertes ne sont jamais
+# visitées [...] et rien ne les purge." Sans borne, le backlog grossit indéfiniment et entre en
+# concurrence avec les pages réellement informatives à chaque relance de la sélection de
+# sources. Bornée aux lignes désormais horodatées (discovered_at NOT NULL, voir
+# scrapers.scrape_actors) : une ligne découverte avant l'existence de cette colonne (donc sans
+# date connue) n'est jamais purgée sur la seule foi d'une hypothèse.
+BACKLOG_PURGE_DAYS = 90
+
+
+def purge_stale_backlog(days: int = BACKLOG_PURGE_DAYS, db_path: Path | None = None) -> int:
+    """Désactive (active=0, jamais une suppression -- réversible) les URLs découvertes,
+    jamais visitées, classées 'other' (score le plus bas hors 'ignore'), et découvertes il y a
+    plus de `days` jours. Renvoie le nombre de lignes désactivées.
+
+    ``db_path`` : appelée depuis scrapers.scrape_actors, qui a sa PROPRE copie importée de
+    ACTORS_DB -- les tests du crawler patchent celle-là (scrapers.ACTORS_DB), pas celle-ci
+    (db.ACTORS_DB). Sans ce paramètre explicite, cette fonction ignorerait silencieusement ce
+    patch et se connecterait au vrai chemin par défaut au lieu de la base de test isolée."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with connect(db_path or ACTORS_DB) as db:
+        purged = db.execute(
+            """UPDATE actor_sources SET active=0
+               WHERE active=1 AND page_type='other' AND last_checked_at IS NULL
+                 AND discovered_at IS NOT NULL AND discovered_at < ?""",
+            (cutoff,),
+        ).rowcount
+    return purged
+
+
 def init_databases() -> None:
     """Crée/actualise le schéma des 3 bases (appelée à chaque démarrage, voir app.py: lifespan).
 
@@ -1046,6 +1075,13 @@ def init_databases() -> None:
         _add_columns(db, "actor_sources", {
             "page_type": "TEXT",
             "source_score": "INTEGER NOT NULL DEFAULT 0",
+            # §9.1 audit veille (30/08/2026, Lot 2 §2.2) : "89% des URLs découvertes ne sont
+            # jamais visitées [...] et rien ne purge [le reliquat]." Sans horodatage de
+            # découverte, impossible de distinguer une URL découverte hier d'une découverte il
+            # y a six mois -- NULL sur les lignes déjà en base avant cette colonne (leur vraie
+            # date de découverte est inconnue, jamais fabriquée) ; purge_stale_backlog() n'agit
+            # que sur les lignes où cette colonne est renseignée.
+            "discovered_at": "TEXT",
             "discovery_depth": "INTEGER NOT NULL DEFAULT 0",
             "discovery_context": "TEXT",
             "discovery_reason": "TEXT",

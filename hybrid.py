@@ -368,7 +368,10 @@ def classify_source(
     ) if is_pdf_url else ()
     rules = (
         *datasheet_rule,
-        ("careers", r"\b(careers?|recrutement|jobs?|emploi|karriere|carriere)\b"),
+        # "jobs" pluriel seulement, jamais "job" seul (§9.1 audit veille, faux positif constaté
+        # en production : "job shop" -- terme métier de sous-traitance industrielle, déjà
+        # reconnu par la règle "service" ci-dessous -- ne doit jamais basculer en carrières).
+        ("careers", r"\b(careers?|recrutement|jobs|emploi|karriere|carriere)\b"),
         ("case_study", r"\b(case stud(?:y|ies)|case-study|customer cases?|cas clients?|realisations?|success stor(?:y|ies))\b"),
         ("application", r"\b(applications?|use cases?|applications? industrielles?)\b"),
         ("project", r"\b(projects?|projets?|collaborations?|collaborative projects?)\b"),

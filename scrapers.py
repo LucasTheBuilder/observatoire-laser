@@ -58,6 +58,7 @@ from db import (
     market_fact_key,
     numeric_spec_tokens,
     offer_fact_key,
+    purge_stale_backlog,
     utc_now,
 )
 from hybrid import (
@@ -2107,12 +2108,13 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                     else:
                         seed_score = max(seed_score, 95)
                     db.execute(
-                        """INSERT INTO actor_sources(actor_id,url,source_kind,page_type,source_score,discovery_depth,discovery_reason)
-                           VALUES(?,?,?,?,?,0,'profile-seed')
+                        """INSERT INTO actor_sources(actor_id,url,source_kind,page_type,source_score,discovery_depth,discovery_reason,discovered_at)
+                           VALUES(?,?,?,?,?,0,'profile-seed',?)
                            ON CONFLICT(url) DO UPDATE SET actor_id=excluded.actor_id,active=1,
                                source_score=MAX(actor_sources.source_score,excluded.source_score),
-                               page_type=CASE WHEN actor_sources.page_type IS NULL OR actor_sources.page_type='' THEN excluded.page_type ELSE actor_sources.page_type END""",
-                        (actor["id"], seed_url, source_kind, seed_type, seed_score),
+                               page_type=CASE WHEN actor_sources.page_type IS NULL OR actor_sources.page_type='' THEN excluded.page_type ELSE actor_sources.page_type END,
+                               discovered_at=COALESCE(actor_sources.discovered_at,excluded.discovered_at)""",
+                        (actor["id"], seed_url, source_kind, seed_type, seed_score, utc_now()),
                     )
                 for sitemap_page_url in _discover_sitemap_urls(client, actor["official_url"], site_profile):
                     sitemap_type, sitemap_score = classify_source(sitemap_page_url, profile=site_profile)
@@ -2120,12 +2122,13 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                         continue
                     existed = db.execute("SELECT id FROM actor_sources WHERE url=?", (sitemap_page_url,)).fetchone()
                     db.execute(
-                        """INSERT INTO actor_sources(actor_id,url,source_kind,page_type,source_score,discovery_depth,discovery_reason)
-                           VALUES(?,?,'sitemap',?,?,0,'sitemap')
+                        """INSERT INTO actor_sources(actor_id,url,source_kind,page_type,source_score,discovery_depth,discovery_reason,discovered_at)
+                           VALUES(?,?,'sitemap',?,?,0,'sitemap',?)
                            ON CONFLICT(url) DO UPDATE SET
                                source_score=MAX(actor_sources.source_score,excluded.source_score),
-                               page_type=CASE WHEN actor_sources.page_type IS NULL OR actor_sources.page_type='' THEN excluded.page_type ELSE actor_sources.page_type END""",
-                        (actor["id"], sitemap_page_url, sitemap_type, sitemap_score),
+                               page_type=CASE WHEN actor_sources.page_type IS NULL OR actor_sources.page_type='' THEN excluded.page_type ELSE actor_sources.page_type END,
+                               discovered_at=COALESCE(actor_sources.discovered_at,excluded.discovered_at)""",
+                        (actor["id"], sitemap_page_url, sitemap_type, sitemap_score, utc_now()),
                     )
                     discovered += int(existed is None)
                 initial_sources = db.execute(
@@ -2321,8 +2324,8 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                                 db.execute(
                                     """INSERT INTO actor_sources(
                                            actor_id,url,source_kind,page_type,source_score,discovery_depth,discovery_context,
-                                           discovery_reason,parent_url,active
-                                       ) VALUES(?,?,?,?,?,?,?,?,?,1)
+                                           discovery_reason,parent_url,active,discovered_at
+                                       ) VALUES(?,?,?,?,?,?,?,?,?,1,?)
                                        ON CONFLICT(url) DO UPDATE SET
                                            page_type=excluded.page_type,
                                            source_score=MAX(actor_sources.source_score, excluded.source_score),
@@ -2330,10 +2333,11 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                                            discovery_context=excluded.discovery_context,
                                            discovery_reason=excluded.discovery_reason,
                                            parent_url=excluded.parent_url,
-                                           active=1""",
+                                           active=1,
+                                           discovered_at=COALESCE(actor_sources.discovered_at,excluded.discovered_at)""",
                                     (
                                         actor["id"], link["url"], "discovered", link["category"], int(link["score"]),
-                                        link_depth, link["context"], link.get("reason"), resolved_url,
+                                        link_depth, link["context"], link.get("reason"), resolved_url, utc_now(),
                                     ),
                                 )
                                 discovered += int(existed is None)
@@ -2406,6 +2410,10 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                 run_id,
             ),
         )
+    # §9.1 audit veille (30/08/2026, Lot 2 §2.2) : purge du reliquat non traité à chaque run --
+    # voir db.purge_stale_backlog pour les critères exacts (page_type='other', jamais visitée,
+    # découverte il y a plus de BACKLOG_PURGE_DAYS jours).
+    backlog_purged = purge_stale_backlog(db_path=ACTORS_DB)
     return {
         "scanned": scanned,
         "changed": changed,
@@ -2413,6 +2421,7 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
         "discovered": discovered,
         "profiled": profiled,
         "adaptive_fallbacks": fallback,
+        "backlog_purged": backlog_purged,
         "ollama": ollama.available(),
         "crawler": "deterministic-coverage-first-v2",
     }

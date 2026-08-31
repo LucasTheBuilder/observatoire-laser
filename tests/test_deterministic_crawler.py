@@ -136,7 +136,7 @@ class DynamicCrawlIntegrationTests(unittest.TestCase):
                     discovery_context TEXT, discovery_reason TEXT, parent_url TEXT, extraction_mode TEXT,
                     structure_hash TEXT, last_title TEXT, last_error TEXT, ambiguous INTEGER DEFAULT 0, blocks_json TEXT,
                     published_date TEXT, market_extracted_hash TEXT, anomaly_detected_at TEXT,
-                    anomaly_detail TEXT, render_required INTEGER DEFAULT 0, etag TEXT, last_modified_header TEXT
+                    anomaly_detail TEXT, render_required INTEGER DEFAULT 0, etag TEXT, last_modified_header TEXT, discovered_at TEXT
                 );
                 CREATE TABLE source_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, block_count INTEGER,
@@ -215,7 +215,7 @@ class DynamicCrawlIntegrationTests(unittest.TestCase):
                     discovery_context TEXT, discovery_reason TEXT, parent_url TEXT, extraction_mode TEXT,
                     structure_hash TEXT, last_title TEXT, last_error TEXT, ambiguous INTEGER DEFAULT 0, blocks_json TEXT,
                     published_date TEXT, market_extracted_hash TEXT, anomaly_detected_at TEXT,
-                    anomaly_detail TEXT, render_required INTEGER DEFAULT 0, etag TEXT, last_modified_header TEXT
+                    anomaly_detail TEXT, render_required INTEGER DEFAULT 0, etag TEXT, last_modified_header TEXT, discovered_at TEXT
                 );
                 CREATE TABLE source_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, block_count INTEGER,
