@@ -308,6 +308,15 @@ def _add_columns(db: sqlite3.Connection, table: str, columns: dict[str, str]) ->
             db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
+# File de revue unifiée (§5.G audit veille, 30/08/2026, Lot 1 §1.1) : traçabilité de la décision
+# -- "sans motif typé, on ne peut rien apprendre des rejets". Les mêmes 3 colonnes sur les 7
+# tables couvertes par review_queue.py (evidence, offers, technology_signals, actor_events,
+# actor_facts, actors, vocabulary_candidates). reject_reason est validé côté API (voir
+# review_queue.REJECT_REASONS), pas par une contrainte CHECK ici -- cohérent avec le reste du
+# schéma, qui laisse `_add_columns` additif sans CHECK sur les colonnes ajoutées après coup.
+_REVIEW_TRACE_COLUMNS = {"reviewed_by": "TEXT", "reviewed_at": "TEXT", "reject_reason": "TEXT"}
+
+
 def _slug(value: str | None) -> str:
     """Normalise une chaîne en un "slug" ASCII minuscule et sans accents (ex: "Électrodes" ->
     "electrodes"). Utilisé comme brique de base des clés déterministes (market_fact_key,
@@ -957,6 +966,8 @@ def init_databases() -> None:
             );
             """
         )
+        _add_columns(db, "actor_facts", dict(_REVIEW_TRACE_COLUMNS))
+        _add_columns(db, "actor_events", dict(_REVIEW_TRACE_COLUMNS))
         _add_columns(db, "actors", {
             # competitive_class: C1/C2 (direct/partial competitor), T1 (technology centre),
             # A1 (internal reference, e.g. HEF/IREIS), etc. -- orthogonal to "role", which
@@ -965,6 +976,7 @@ def init_databases() -> None:
             "is_reference": "INTEGER NOT NULL DEFAULT 0 CHECK(is_reference IN (0,1))",
             "parent_actor": "TEXT",
             "entity_note": "TEXT",
+            **_REVIEW_TRACE_COLUMNS,
             # Human-validation queue for actors whose evidence is too thin to trust yet
             # (e.g. a newly-launched site found by the audit's counter-investigation).
             # 'verified' is the default so every actor added the normal way (or already
@@ -1156,6 +1168,7 @@ def init_databases() -> None:
             """
         )
         _add_columns(db, "evidence", {
+            **_REVIEW_TRACE_COLUMNS,
             "block_heading": "TEXT",
             "block_path": "TEXT",
             "extraction_mode": "TEXT",
@@ -1356,7 +1369,9 @@ def init_databases() -> None:
             CREATE INDEX IF NOT EXISTS alerts_event_at_idx ON alerts(event_at);
             """
         )
+        _add_columns(db, "vocabulary_candidates", dict(_REVIEW_TRACE_COLUMNS))
         _add_columns(db, "offers", {
+            **_REVIEW_TRACE_COLUMNS,
             "last_seen_at": "TEXT",
             # Chantier 4 (fiabiliser la preuve) : is_verbatim distingue une citation exacte
             # (le scraper garantit déjà `quote in block.text`, voir scrapers._candidate) d'une
@@ -1511,6 +1526,7 @@ def init_databases() -> None:
             CREATE INDEX IF NOT EXISTS technology_signal_sources_signal_idx ON technology_signal_sources(signal_id);
             """
         )
+        _add_columns(db, "technology_signals", dict(_REVIEW_TRACE_COLUMNS))
         _add_columns(db, "documents", {
             "last_seen_at": "TEXT",
             # Revue chronologie du 30/08/2026 : voir classify_source_date/compute_is_backfill

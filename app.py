@@ -53,7 +53,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from alerts import capture_alerts
 from capabilities import collect_capability_specs
@@ -82,6 +82,7 @@ from firmographics import collect_french_registry
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from openalex import collect_openalex_publications
 from press import collect_press_mentions
+from review_queue import REJECT_REASONS, decide_review_item, list_review_queue
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 from timeseries import capture_metric_snapshot, list_timeseries_keys, read_timeseries
@@ -822,6 +823,45 @@ def digest_capture():
     """Déclenche une évaluation immédiate des 4 règles d'alerte -- même fonction que celle
     appelée automatiquement par _run_job après chaque collecte."""
     return capture_alerts()
+
+
+@app.get("/api/review")
+def review_queue_list(
+    queue: Literal["evidence", "offers", "tech_signals", "events", "facts", "actors", "vocabulary"] = Query(...),
+    status: Literal["pending", "accepted", "rejected"] = "pending",
+):
+    """File de revue unifiée (§5.G audit veille, 30/08/2026) : un seul contrat pour les 7 files
+    -- evidence/offers/tech_signals/events/facts/actors/vocabulary --, triée par priorité
+    décroissante (classe concurrentielle de l'acteur × impact du fait × incertitude
+    d'extraction, voir review_queue.py). Avant cet endpoint, 5 des 7 files n'avaient aucun
+    moyen d'être consultées (§3.2) : offers/technology-signals n'exposaient que leurs lignes
+    déjà `accepted`, actor_events/actor_facts n'avaient aucun filtre de revue, et les candidats
+    acteurs n'étaient jamais exposés du tout."""
+    return {"queue": queue, "status": status, "items": list_review_queue(queue, status)}
+
+
+class ReviewDecisionRequest(BaseModel):
+    decision: Literal["accept", "reject"]
+    reviewed_by: str | None = None
+    reject_reason: str | None = Field(None, description=f"Requis pour un rejet, un de {REJECT_REASONS}.")
+    dimension: Literal["market", "component", "operation"] | None = Field(
+        None, description="Requis pour accepter un item de la file 'vocabulary' : quelle dimension proposée promouvoir."
+    )
+
+
+@app.post("/api/review/{queue}/{item_id}/decide")
+def review_queue_decide(queue: str, item_id: int, payload: ReviewDecisionRequest):
+    """Point d'entrée unique pour accepter/rejeter un item de n'importe laquelle des 7 files
+    (§5.G item 1), avec traçabilité de la décision (§5.G item 3) : reviewed_by, reviewed_at
+    (toujours horodaté ici), et pour un rejet un motif TYPÉ (review_queue.REJECT_REASONS) --
+    "sans motif typé, on ne peut rien apprendre des rejets"."""
+    try:
+        return decide_review_item(
+            queue, item_id, payload.decision,
+            reviewed_by=payload.reviewed_by, reject_reason=payload.reject_reason, dimension=payload.dimension,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # --- CRUD acteurs : les modèles Pydantic ci-dessous valident/documentent automatiquement le
