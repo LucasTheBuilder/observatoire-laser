@@ -81,6 +81,7 @@ from db import (
     set_actor_active,
     update_actor_classification,
 )
+from demand_signals import collect_demand_signals
 from firmographics import collect_french_registry
 from gleif import collect_gleif_group_identity
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
@@ -198,6 +199,7 @@ jobs: dict[str, dict[str, Any]] = {
     "openalex_global": {"status": "idle", "result": None, "error": None},
     "patents": {"status": "idle", "result": None, "error": None},
     "gleif": {"status": "idle", "result": None, "error": None},
+    "demand_signals": {"status": "idle", "result": None, "error": None},
     "capabilities": {"status": "idle", "result": None, "error": None},
     "monthly": {"status": "idle", "result": None, "error": None},
 }
@@ -221,6 +223,7 @@ def _collect_monthly() -> dict:
         "openalex_global": discover_global_actor_candidates(),
         "patents": collect_patents(),
         "gleif": collect_gleif_group_identity(),
+        "demand_signals": collect_demand_signals(),
         "capabilities": collect_capability_specs(),
     }
 
@@ -238,6 +241,7 @@ collectors: dict[str, Callable[[], dict]] = {
     "openalex_global": discover_global_actor_candidates,
     "patents": collect_patents,
     "gleif": collect_gleif_group_identity,
+    "demand_signals": collect_demand_signals,
     "capabilities": collect_capability_specs,
     "monthly": _collect_monthly,
 }
@@ -1507,7 +1511,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "capabilities", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "capabilities", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -1522,7 +1526,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "capabilities", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "capabilities", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 

@@ -1595,6 +1595,26 @@ def init_databases() -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS alerts_event_at_idx ON alerts(event_at);
+            -- Signal de demande (§4.B.3 audit veille, 30/08/2026, Lot 4 §15) : un appel d'offres
+            -- public mentionnant du micro-usinage laser ultra-rapide, vu par demand_signals.py
+            -- (TED pour l'UE, BOAMP pour la France -- toutes deux vérifiées en direct avant
+            -- d'écrire ce module). Sort la dimension marché du miroir de l'offre : jusqu'ici elle
+            -- ne documentait que ce que les acteurs suivis DISENT faire, jamais ce que le marché
+            -- ACHÈTE réellement. signal_type='tender' seulement pour l'instant -- 'hiring' (offres
+            -- d'emploi des donneurs d'ordre) reste hors scope, aucune source vérifiée identifiée.
+            CREATE TABLE IF NOT EXISTS demand_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_type TEXT NOT NULL CHECK(signal_type IN ('tender','hiring')),
+                source TEXT NOT NULL,
+                buyer_name TEXT,
+                title TEXT NOT NULL,
+                published_at TEXT,
+                source_url TEXT NOT NULL,
+                fingerprint TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS demand_signals_published_idx ON demand_signals(published_at);
             """
         )
         _add_columns(db, "vocabulary_candidates", dict(_REVIEW_TRACE_COLUMNS))
