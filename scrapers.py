@@ -479,6 +479,17 @@ PROCESS_TECHNOLOGIES: Lexicon = {
     # before adding (unlike its earlier, partly-stale claims elsewhere in the same audit).
     "Beam shaping": {"any_of": ("beam shaping", "dynamic beam shaping", "programmable laser beam", "spatial light modulator", "adaptive optics beam")},
     "Monitoring IA procédé": {"any_of": ("process monitoring", "in-line monitoring", "digital twin", "data-driven process optimization", "process optimization ai", "closed-loop process control")},
+    # §10.10 audit veille (30/08/2026, Lot 2 §2.7) : "deux libellés d'axe coexistent pour le
+    # même concept [...] les axes technologiques n'ont pas d'équivalent [à vocabulary_candidates]
+    # et sont écrits en texte libre. Il faut un lexique fermé pour axis." Trois axes trouvés en
+    # production sous forme de texte libre (écrits avant que cordis.py ne se limite à ce
+    # lexique) n'avaient encore aucune entrée correspondante -- ajoutés ici plutôt que fusionnés
+    # dans un axe existant qui en changerait le sens (voir db._normalize_technology_axes pour la
+    # migration ponctuelle qui canonise les DEUX vrais doublons : "Monitoring + IA / digital
+    # twin" -> "Monitoring IA procédé", "Beam shaping / surfaces 3D" -> "Beam shaping").
+    "Haute puissance / hauts taux": {"any_of": ("high average power", "high repetition rate", "mhz processing", "high-throughput ablation")},
+    "Multi-beam / parallélisation": {"any_of": ("multi-beam", "multibeam", "beam splitting", "diffractive optical element", "parallel processing")},
+    "Fabrication roll-to-roll (batteries)": {"any_of": ("roll-to-roll", "roll to roll", "r2r processing", "battery electrode manufacturing")},
 }
 
 APPLICATION_ARCHITECTURES: Lexicon = {
@@ -870,7 +881,14 @@ def _extract_career_signal(block: ContentBlock) -> str | None:
 # Framework for Predictive Safety and Maintenance", sans aucune mention de laser, matchait
 # "Monitoring IA procédé" via "digital twin" seul. Exclus ici pour cette raison ; SLE/LIPSS/
 # DLIP/LSFL/HSFL restent des procédés assez spécifiquement laser pour être fiables seuls.
-_GENERIC_PROCESS_AXES = frozenset({"Monitoring IA procédé", "Beam shaping"})
+# "Multi-beam / parallélisation" ("parallel processing") et "Fabrication roll-to-roll
+# (batteries)" ("roll-to-roll", technique de fabrication générique -- impression, revêtement,
+# pas seulement laser) rejoignent la même exclusion pour la même raison (Lot 2 §2.7) :
+# "Haute puissance / hauts taux" reste hors de cette liste, ses termes (repetition rate, mhz
+# processing) étant assez spécifiquement photonique pour rester fiables seuls.
+_GENERIC_PROCESS_AXES = frozenset({
+    "Monitoring IA procédé", "Beam shaping", "Multi-beam / parallélisation", "Fabrication roll-to-roll (batteries)",
+})
 
 
 def is_on_topic(text: str) -> bool:

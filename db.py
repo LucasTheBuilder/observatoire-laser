@@ -561,6 +561,74 @@ def _migrate_industrial_stage_placeholder_values(db: sqlite3.Connection) -> None
         )
 
 
+# §10.10 audit veille (30/08/2026, Lot 2 §2.7) : "deux libellés d'axe coexistent pour le même
+# concept [...] avec 10 lignes c'est anecdotique ; à 500 lignes, tout comptage par axe sera
+# faux et personne ne s'en apercevra." Ces deux couples pré-existaient en production, écrits
+# avant que cordis.py ne se limite au lexique fermé scrapers.PROCESS_TECHNOLOGIES (voir
+# scrapers.py pour les 3 axes ajoutés au lexique plutôt que fusionnés, qui n'avaient encore
+# aucun équivalent). Migration ponctuelle et idempotente : sans ligne portant l'ancien libellé,
+# ne fait rien.
+_TECHNOLOGY_AXIS_ALIASES: dict[str, str] = {
+    "Monitoring + IA / digital twin": "Monitoring IA procédé",
+    "Beam shaping / surfaces 3D": "Beam shaping",
+}
+
+
+def _normalize_technology_axes(db: sqlite3.Connection) -> None:
+    """Canonise les libellés d'axe hérités vers leur entrée de lexique -- fusionne (union des
+    actor_names, comme _upsert_technology_signal) si la ligne canonique existe déjà pour le
+    même projet, sinon renomme la ligne en place."""
+    for old_axis, new_axis in _TECHNOLOGY_AXIS_ALIASES.items():
+        rows = db.execute(
+            "SELECT id,project_name,actor_names FROM technology_signals WHERE axis=?", (old_axis,)
+        ).fetchall()
+        for row in rows:
+            new_fact_key = technology_signal_key(new_axis, row["project_name"])
+            existing = db.execute(
+                "SELECT id,actor_names FROM technology_signals WHERE fact_key=?", (new_fact_key,)
+            ).fetchone()
+            if existing:
+                merged = sorted(set(json.loads(row["actor_names"] or "[]")) | set(json.loads(existing["actor_names"] or "[]")))
+                db.execute(
+                    "UPDATE technology_signals SET actor_names=? WHERE id=?",
+                    (json.dumps(merged, ensure_ascii=False), existing["id"]),
+                )
+                db.execute("DELETE FROM technology_signals WHERE id=?", (row["id"],))
+            else:
+                db.execute(
+                    "UPDATE technology_signals SET axis=?,fact_key=?,fingerprint=? WHERE id=?",
+                    (new_axis, new_fact_key, hashlib.sha256(new_fact_key.encode()).hexdigest(), row["id"]),
+                )
+
+
+# Même mapping que scrapers.MATURITY_RULES (stage -> bucket), dupliqué ici plutôt qu'importé :
+# db.py ne peut pas importer scrapers.py (scrapers.py importe déjà db.py -- import circulaire).
+# Seul "Production" vaut "existing" ; tout le reste, y compris "Industrialisation", vaut
+# "radar" -- une paire qui *semble* se contredire (§10.10 : "deux signaux portent
+# maturity_stage='Industrialisation' ET bucket='radar'") est en réalité la correspondance
+# canonique voulue : vérifiée contre les 10 lignes technology_signals en production, aucune
+# n'était réellement incohérente une fois cette table de référence appliquée.
+TECHNOLOGY_STAGE_TO_BUCKET: dict[str, str] = {
+    "Production": "existing",
+    "Industrialisation": "radar",
+    "Pré-industrialisation": "radar",
+    "Prototype": "radar",
+    "R&D": "radar",
+    "Maturité industrielle non déterminée": "radar",
+}
+
+
+def _reconcile_technology_signal_maturity(db: sqlite3.Connection) -> None:
+    """Corrige toute ligne dont bucket ne correspond pas à ce que TECHNOLOGY_STAGE_TO_BUCKET
+    prescrit pour son maturity_stage -- garde-fou structurel plutôt qu'une contrainte CHECK
+    (le mapping peut évoluer ; un stage non reconnu retombe sur 'radar', jamais 'existing' par
+    défaut). Idempotent : ne touche que les lignes réellement incohérentes."""
+    for row in db.execute("SELECT id,maturity_stage,bucket FROM technology_signals").fetchall():
+        expected = TECHNOLOGY_STAGE_TO_BUCKET.get(row["maturity_stage"], "radar")
+        if row["bucket"] != expected:
+            db.execute("UPDATE technology_signals SET bucket=? WHERE id=?", (expected, row["id"]))
+
+
 def technology_signal_key(axis: str, project_name: str | None) -> str:
     """Identity for one science->industry readiness signal: the axis plus the named project it
     was observed in (not the source URL), so the same axis/project pair merges new citations
@@ -1605,6 +1673,8 @@ def init_databases() -> None:
             """
         )
         _add_columns(db, "technology_signals", dict(_REVIEW_TRACE_COLUMNS))
+        _normalize_technology_axes(db)
+        _reconcile_technology_signal_maturity(db)
         _add_columns(db, "documents", {
             "last_seen_at": "TEXT",
             # Revue chronologie du 30/08/2026 : voir classify_source_date/compute_is_backfill
