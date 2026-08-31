@@ -834,6 +834,30 @@ def _laser_match(text: str) -> bool:
     return any(_rule_matches(text, rule) for rule in LASER_RULES.values())
 
 
+# §4.A audit veille (30/08/2026, Lot 2 §2.3) : "un acteur qui recrute trois process engineer --
+# ultrafast laser annonce sa direction technique 12 mois avant sa page produit." Un intitulé de
+# poste n'entre en base que s'il combine un terme laser ultra-rapide (LASER_RULES, via
+# _laser_match) ET un rôle technique de cette liste dans le MÊME bloc -- une offre "assistant
+# commercial" ou "comptable" sur la même page carrières ne doit jamais créer de signal.
+CAREER_ROLE_TERMS = (
+    "process engineer", "r&d engineer", "research engineer", "applications engineer",
+    "optical engineer", "photonics engineer", "laser engineer", "systems engineer",
+    "manufacturing engineer", "product engineer", "development engineer", "test engineer",
+    "ingenieur procede", "ingenieur r&d", "ingenieur recherche", "ingenieur photonique",
+    "ingenieur laser", "ingenieur applications", "ingenieur developpement",
+    "entwicklungsingenieur", "anwendungsingenieur", "verfahrensingenieur",
+)
+
+
+def _extract_career_signal(block: ContentBlock) -> str | None:
+    """Renvoie l'intitulé (tronqué) si ce bloc d'une page carrières combine un terme laser
+    ultra-rapide et un rôle technique connu, sinon None. Voir CAREER_ROLE_TERMS."""
+    text = " ".join(filter(None, (block.heading, block.text)))
+    if not text or not _laser_match(text) or not any(_contains_term(text, term) for term in CAREER_ROLE_TERMS):
+        return None
+    return (block.heading or text)[:200]
+
+
 # "Monitoring IA procédé" et "Beam shaping" sont volontairement génériques dans
 # PROCESS_TECHNOLOGIES (digital twin, process monitoring, spatial light modulator...) parce que
 # technology_signals ne les tague jamais que sur un texte ayant déjà passé un filtre laser en
@@ -1946,6 +1970,27 @@ def _detect_content_anomaly(db, source_id: int, block_count: int) -> tuple[str |
     return None, None
 
 
+def _upsert_career_event(db, actor_id: int, description: str, source_url: str) -> int:
+    """Écrit un signal de recrutement (voir _extract_career_signal) dans actor_events,
+    event_type='hiring', review_status='pending' -- même discipline que press.py : un matching
+    par mot-clé sur un intitulé de poste est un signal faible, jamais publié sans relecture.
+    Dédoublonne sur (actor_id, source_url, description) -- PAS (actor_id, source_url) seul
+    comme press._upsert_press_event, parce qu'une seule page carrières liste souvent plusieurs
+    intitulés distincts sous la même URL."""
+    existing = db.execute(
+        "SELECT id FROM actor_events WHERE actor_id=? AND source_url=? AND description=?",
+        (actor_id, source_url, description),
+    ).fetchone()
+    if existing:
+        return 0
+    db.execute(
+        """INSERT INTO actor_events(actor_id,event_type,description,source_url,review_status,created_at)
+           VALUES(?,'hiring',?,?,'pending',?)""",
+        (actor_id, description, source_url, utc_now()),
+    )
+    return 1
+
+
 def _diff_page_blocks(previous_blocks_json: str | None, new_blocks_json: str | None) -> list[dict]:
     """§5.E.1/§8.3 audit veille (30/08/2026) : page_versions archive déjà le blocks_json d'avant
     un changement de contenu détecté, mais rien ne le comparait. Pour la majorité du corpus
@@ -2233,6 +2278,15 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                                )""",
                             (source_id, source_id, SOURCE_METRICS_RETENTION),
                         )
+                        # §4.A audit veille (30/08/2026, Lot 2 §2.3) : une page carrières est
+                        # crawlée mais exclue du pipeline marché (voir _select_market_sources) --
+                        # son seul usage est ce signal de recrutement, extrait ici plutôt que
+                        # dans un passage séparé, puisque le contenu de la page est déjà en main.
+                        if fetched_type == "careers":
+                            for block in document.blocks:
+                                signal = _extract_career_signal(block)
+                                if signal:
+                                    _upsert_career_event(db, actor["id"], signal, resolved_url)
                         db.execute(
                             """UPDATE actor_sources SET content_hash=?,last_http_status=?,last_checked_at=?,last_title=?,
                                       page_type=?,source_score=?,extraction_mode=?,structure_hash=?,blocks_json=?,last_error=NULL,
@@ -2401,7 +2455,7 @@ def _select_market_sources(max_pages: int = 350) -> list[dict]:
                FROM actor_sources s
                JOIN actors a ON a.id=s.actor_id
                LEFT JOIN site_profiles p ON p.actor_id=a.id
-               WHERE s.active=1 AND COALESCE(s.page_type,'')!='ignore'
+               WHERE s.active=1 AND COALESCE(s.page_type,'') NOT IN ('ignore','careers')
                  AND (s.last_http_status IS NULL OR s.last_http_status BETWEEN 200 AND 399)
                  AND (s.content_hash IS NULL OR s.market_extracted_hash IS NULL OR s.content_hash!=s.market_extracted_hash)
                ORDER BY a.priority DESC,a.name,s.source_score DESC,s.id"""

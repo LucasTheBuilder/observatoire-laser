@@ -40,12 +40,12 @@ class ClassifySourceDatasheetTests(unittest.TestCase):
         page_type, _ = classify_source("https://example.test/downloads/terms-and-conditions.pdf", "Terms and Conditions")
         self.assertNotEqual("datasheet", page_type)
 
-    def test_pdf_matching_careers_is_still_ignored(self):
-        # The ignore-path/regex checks run BEFORE the datasheet rule -- a careers PDF must not
-        # be rescued into visibility by this change.
-        page_type, score = classify_source("https://example.test/careers/job-opening.pdf", "Open position PDF")
-        self.assertEqual("ignore", page_type)
-        self.assertEqual(0, score)
+    def test_pdf_matching_careers_is_typed_careers_not_datasheet(self):
+        # Lot 2 §2.3 (implemented after this test was first written) made 'careers' its own
+        # page_type rather than 'ignore' -- the datasheet rule must not steal a careers PDF
+        # away from that classification just because it also ends in .pdf.
+        page_type, _ = classify_source("https://example.test/careers/job-opening.pdf", "Open position PDF")
+        self.assertEqual("careers", page_type)
 
     def test_non_pdf_page_with_datasheet_wording_is_not_forced_to_datasheet(self):
         # The rule is deliberately gated on the .pdf suffix (§8.1: "le suffixe .pdf croisé au

@@ -19,6 +19,17 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
+# Termes qui font toujours passer une page en 'ignore' (voir hybrid.classify_source), quel que
+# soit le profil -- sauf 'careers?|recrutement|jobs?...', volontairement RETIRÉ d'ici (§8.4/§4.A
+# audit veille, 30/08/2026) : c'était une regex en dur dans classify_source, non surchargeable
+# par profil, qui fermait les pages carrières même quand ignore_paths ne les excluait plus.
+# Descendu dans un profil configurable pour que le défaut reste prudent (contact/mentions
+# légales/cookies...) sans jamais reproduire ce blocage non contournable.
+DEFAULT_IGNORE_TERMS: tuple[str, ...] = (
+    "contact", "mentions? legales?", "privacy", "confidentialite", "cookies?", "login",
+    "legal notice", "newsletter",
+)
+
 # Profil par défaut appliqué à TOUS les acteurs, avant toute surcharge spécifique à un site.
 DEFAULT_SITE_PROFILE: dict[str, Any] = {
     "profile_version": 2,
@@ -74,11 +85,20 @@ DEFAULT_SITE_PROFILE: dict[str, Any] = {
     # augmentent son score de priorité dans la file de crawl (voir hybrid.classify_source).
     "priority_paths": [],
     # "ignore_paths" : fragments d'URL à ne jamais suivre (pages sans intérêt métier :
-    # contact, mentions légales, recrutement...).
+    # contact, mentions légales...). Les pages carrières ont été retirées de cette liste
+    # (§8.4/§4.A audit veille, 30/08/2026, Lot 2 §2.3) : "le meilleur proxy public de la
+    # trajectoire d'une entreprise" -- désormais crawlées et typées 'careers' (voir
+    # DEFAULT_IGNORE_TERMS et hybrid.classify_source), juste exclues du pipeline d'extraction
+    # de faits marché (voir scrapers._select_market_sources).
     "ignore_paths": [
         "/contact", "/privacy", "/cookies", "/legal", "/mentions-legales",
-        "/careers", "/career", "/jobs", "/login", "/newsletter",
+        "/login", "/newsletter",
     ],
+    # Termes (dans le libellé/URL/titre/H1) qui font passer une page en 'ignore' -- utilisé par
+    # hybrid.classify_source. Reste surchargeable par profil (contrairement à l'ancienne regex
+    # en dur qui ignorait 'careers?|recrutement|jobs?' quel que soit le profil de site, §8.4) :
+    # un acteur dont le profil personnalisé retire un terme d'ici le laisse passer.
+    "ignore_terms": DEFAULT_IGNORE_TERMS,
     # Bonus/malus de score ajouté selon le type de page détecté (voir hybrid.classify_source) :
     # plus une page a de chances de contenir de l'info métier utile, plus son boost est élevé.
     "page_type_boosts": {

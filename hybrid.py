@@ -52,6 +52,13 @@ SECTION_SCORES = {
     # au niveau de "news" pour qu'il remonte vraiment en tête de file de crawl.
     "datasheet": 90,
     "service": 85,
+    # §4.A/§8.4 audit veille (30/08/2026, Lot 2 §2.3) : "le meilleur proxy public de la
+    # trajectoire d'une entreprise" -- une page carrières annonce une direction technique des
+    # mois avant la page produit correspondante. Crawlée désormais (voir DEFAULT_IGNORE_TERMS),
+    # mais volontairement en dessous de "product" : c'est un signal de recrutement, pas une
+    # source de faits marché -- exclue du pipeline d'extraction (voir
+    # scrapers._select_market_sources).
+    "careers": 55,
     "capability": 82,
     "technology": 80,
     "market": 76,
@@ -77,6 +84,8 @@ DISCOVERY_TERMS = (
     "datasheet", "data sheet", "fiche technique", "technische daten", "brochure",
     "specification", "specifications", "spécifications", "download", "téléchargement",
     "catalog", "catalogue", "white paper",
+    # §4.A/§8.4 audit veille (30/08/2026, Lot 2 §2.3) : pages carrières, désormais crawlées.
+    "career", "careers", "recrutement", "jobs", "emploi", "karriere", "carriere",
 )
 
 
@@ -330,7 +339,13 @@ def classify_source(
     ignore_paths = profile.get("ignore_paths", ())
     if any(_contains_fragment(parsed.path, item) for item in ignore_paths):
         return "ignore", SECTION_SCORES["ignore"]
-    if re.search(r"\b(contact|mentions? legales?|privacy|confidentialite|cookies?|login|careers?|recrutement|jobs?|legal notice|newsletter)\b", words):
+    # §8.4 audit veille (30/08/2026, Lot 2 §2.3) : ces termes vivaient dans une regex EN DUR ici
+    # (careers?|recrutement|jobs? incluses), non surchargeable par profil -- un profil ne
+    # pouvait donc jamais rouvrir ce que cette ligne fermait. Descendu dans
+    # DEFAULT_SITE_PROFILE/site_profiles.DEFAULT_IGNORE_TERMS, sans 'careers' (voir plus bas :
+    # les pages carrières ont désormais leur propre type, crawlé).
+    ignore_terms = profile.get("ignore_terms", ())
+    if ignore_terms and re.search(rf"\b({'|'.join(ignore_terms)})\b", words):
         return "ignore", SECTION_SCORES["ignore"]
 
     # §8.1/§9.3 audit veille (30/08/2026) : "le taux de captation des PDF utiles est proche de
@@ -347,6 +362,7 @@ def classify_source(
     ) if is_pdf_url else ()
     rules = (
         *datasheet_rule,
+        ("careers", r"\b(careers?|recrutement|jobs?|emploi|karriere|carriere)\b"),
         ("case_study", r"\b(case stud(?:y|ies)|case-study|customer cases?|cas clients?|realisations?|success stor(?:y|ies))\b"),
         ("application", r"\b(applications?|use cases?|applications? industrielles?)\b"),
         ("project", r"\b(projects?|projets?|collaborations?|collaborative projects?)\b"),
