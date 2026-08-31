@@ -1282,6 +1282,7 @@ def proofs(bucket: str, market: str, component: str, operation: str):
         """SELECT e.actor_name,e.industrial_stage,es.source_url,es.source_title,es.source_date,es.quote,es.is_verbatim,
                   es.language,es.block_heading,es.extraction_mode,es.field_confidence,
                   es.relation_strength,es.relation_evidence,es.source_role,
+                  es.first_appeared_at,es.first_appeared_snapshot_url,
                   e.laser_process,e.material,e.performance,e.maturity_level,e.architecture,e.evidence_type
            FROM evidence e
            JOIN evidence_sources es ON es.evidence_id=e.id
