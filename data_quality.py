@@ -169,6 +169,18 @@ def add_golden_fact(
     if not source_url.startswith(("http://", "https://")):
         raise ValueError("source_url must be an absolute http(s) URL")
     with connect(MARKET_DB) as db:
+        # Idempotent sur les QUATRE dimensions, qui sont exactement ce que compute_recall()
+        # apparie contre `evidence` -- deux lignes golden identiques sur ce quadruplet
+        # trouveraient la même preuve et gonfleraient le dénominateur du rappel, donc
+        # feraient baisser un pourcentage sans qu'aucune régression réelle ait eu lieu.
+        # Depuis que la file de revue propose « garder comme référence » en un clic, le
+        # doublon n'est plus une faute de frappe improbable mais un simple double-clic.
+        existing = db.execute(
+            "SELECT id FROM golden_facts WHERE actor_name=? AND market=? AND component=? AND operation=?",
+            (actor_name, market, component, operation),
+        ).fetchone()
+        if existing:
+            return int(existing["id"])
         row_id = db.execute(
             """INSERT INTO golden_facts(actor_name,market,component,operation,source_url,expected_quote,added_by,created_at)
                VALUES(?,?,?,?,?,?,?,?)""",

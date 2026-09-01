@@ -1562,6 +1562,20 @@ function marketReviewMeta(item) {
   return parts.length ? `<small class="block-label">${parts.join(" · ")}</small>` : "";
 }
 
+// Un fait « golden » est une référence de non-régression, et il n'a de valeur que si un humain a
+// vérifié LUI-MÊME la page (voir data_quality.add_golden_fact). D'où un bouton DISTINCT, jamais
+// un effet de bord de « Valider » : recopier en masse ce que le pipeline croit déjà ferait du
+// golden set une redite de l'extraction, pas un test indépendant -- c'est explicitement le
+// principe posé par le module data_quality. La revue est le seul moment où l'utilisateur lit
+// déjà la citation et ouvre déjà la source ; c'est donc le seul moment où cette vérification ne
+// coûte rien de plus. Sans elle, golden_facts reste vide et compute_recall() renvoie None.
+//
+// Le bouton exige les quatre dimensions : un fait 'partial' (2 sur 3) ne peut pas servir de
+// référence, add_golden_fact les refuserait de toute façon.
+function canBecomeGoldenFact(item) {
+  return Boolean(item.market && item.component && item.operation && item.quote && item.source_url);
+}
+
 function marketReviewCard(item) {
   return `<article class="vocab-card">
     <header><span>${esc(item.actor_name)} · ${dateLabel(item.last_seen_at)}</span><span>${esc(marketReviewStatusLabel(item))}</span></header>
@@ -1571,9 +1585,34 @@ function marketReviewCard(item) {
     <div class="vocab-dims" style="margin-top:12px">
       <button class="vocab-accept" data-accept-market-review="${item.id}">✓ Valider</button>
       <button class="vocab-reject" data-reject-market-review="${item.id}">✕ Rejeter</button>
+      ${canBecomeGoldenFact(item)
+        ? `<button class="export-btn" data-golden-from-review="${item.id}" title="J'ai vérifié cette page moi-même : garder ce fait comme référence de non-régression.">★ Garder comme référence</button>`
+        : ""}
     </div>
     ${item.source_url ? `<a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>` : ""}
   </article>`;
+}
+
+async function keepMarketReviewItemAsGoldenFact(evidenceId, button) {
+  const item = (state.marketReview || []).find(i => i.id === evidenceId);
+  if (!item) return;
+  try {
+    await api("/api/golden-facts", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        actor_name: item.actor_name, market: item.market, component: item.component,
+        operation: item.operation, source_url: item.source_url, expected_quote: item.quote,
+        added_by: "file de revue",
+      }),
+    });
+    // Pas de re-render : la décision de revue elle-même n'a pas changé, et re-rendre la page
+    // entière ferait remonter la liste alors que l'utilisateur est en train de la parcourir.
+    // On confirme sur le bouton, qui devient inerte -- l'ajout est de toute façon idempotent
+    // côté serveur, un double-clic ne crée pas de doublon.
+    button.textContent = "★ Référence gardée";
+    button.disabled = true;
+    toast("Gardé comme référence de non-régression.");
+  } catch (error) { toast(error.message); }
 }
 
 // §5.G audit veille (30/08/2026, Lot 1 §1.1) : GET /api/review couvre 7 files derrière un seul
@@ -2395,6 +2434,7 @@ function wireActions(){
   document.querySelectorAll("[data-reject-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.rejectVocab),"reject")));
   document.querySelectorAll("[data-accept-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.acceptMarketReview),"accept")));
   document.querySelectorAll("[data-reject-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.rejectMarketReview),"reject")));
+  document.querySelectorAll("[data-golden-from-review]").forEach(button=>button.addEventListener("click",()=>keepMarketReviewItemAsGoldenFact(Number(button.dataset.goldenFromReview),button)));
   document.querySelectorAll("[data-accept-review]").forEach(button=>button.addEventListener("click",()=>{
     const [queue, id] = button.dataset.acceptReview.split(":");
     decideReviewItem(queue, Number(id), "accept");

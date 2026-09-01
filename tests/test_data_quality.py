@@ -185,6 +185,28 @@ class DataQualityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             delete_golden_fact(999)
 
+    def test_adding_the_same_golden_fact_twice_is_idempotent(self):
+        # Depuis que la file de revue propose « garder comme référence » en un clic, le doublon
+        # n'est plus une faute de frappe improbable mais un simple double-clic. Deux lignes
+        # identiques sur le quadruplet apparieraient la MÊME preuve dans compute_recall() et
+        # gonfleraient son dénominateur : le rappel baisserait sans qu'aucune régression réelle
+        # n'ait eu lieu.
+        first = add_golden_fact(actor_name="A", market="M", component="C", operation="O",
+                                source_url="https://example.com/x", expected_quote="a verified quote")
+        second = add_golden_fact(actor_name="A", market="M", component="C", operation="O",
+                                 source_url="https://example.com/autre-page", expected_quote="une autre citation")
+        self.assertEqual(first, second)
+        self.assertEqual(len(list_golden_facts()), 1)
+        # La première saisie fait foi : la ré-ajouter ne réécrit ni sa source ni sa citation.
+        self.assertEqual("https://example.com/x", list_golden_facts()[0]["source_url"])
+
+    def test_a_different_dimension_still_creates_a_second_golden_fact(self):
+        add_golden_fact(actor_name="A", market="M", component="C", operation="O",
+                        source_url="https://example.com/x", expected_quote="q")
+        add_golden_fact(actor_name="A", market="M", component="C", operation="AUTRE",
+                        source_url="https://example.com/x", expected_quote="q")
+        self.assertEqual(len(list_golden_facts()), 2)
+
     # --- combined report -------------------------------------------------------------------------
 
     def test_data_quality_report_combines_all_four_indicators(self):
