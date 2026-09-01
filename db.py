@@ -2602,20 +2602,35 @@ def accept_evidence_review(evidence_id: int) -> dict[str, Any]:
     return {"id": evidence_id, "fact_status": "validated"}
 
 
-def reject_evidence_review(evidence_id: int) -> None:
+def reject_evidence_review(
+    evidence_id: int, *, reviewed_by: str | None = None, reject_reason: str | None = None
+) -> None:
     """Mark a review/partial evidence row reviewed-and-declined. Raises ValueError if unknown.
 
     fact_status is left untouched (still 'review'/'partial', for an audit trail of what was
     proposed) -- review_status='rejected' alone is enough to drop it from both the validated
     market matrix (which filters on fact_status='validated') and the pending-review queue
     (which filters on review_status='review').
+
+    ``reject_reason`` est le motif TYPÉ (review_queue.REJECT_REASONS), validé par l'appelant
+    HTTP. Il est écrit ici parce que c'est cette fonction -- et non decide_review_item -- que
+    l'écran « Faits marché à valider » emprunte : c'est la file la plus volumineuse (123 des 152
+    items en attente), et donc celle dont les rejets ont le plus à enseigner. Les paramètres
+    restent optionnels pour ne pas casser decide_review_item, qui écrit déjà sa propre trace
+    juste après son appel.
     """
     with connect(MARKET_DB) as db:
         # reviewed_at : même raison que dans accept_evidence_review ci-dessus -- c'est ce
         # marquage qui rend la décision reconnaissable par la garde du crawler.
+        # COALESCE sur les deux colonnes de trace : decide_review_item appelle cette fonction
+        # SANS motif puis pose le sien dans la foulée -- un NULL passé ici ne doit pas pouvoir
+        # écraser un motif déjà écrit si l'ordre de ces deux écritures venait à changer.
         updated = db.execute(
-            "UPDATE evidence SET review_status='rejected',reviewed_at=?,updated_at=? WHERE id=? AND fact_status!='validated'",
-            (stamp := utc_now(), stamp, evidence_id),
+            """UPDATE evidence
+                  SET review_status='rejected', reviewed_at=?, updated_at=?,
+                      reviewed_by=COALESCE(?,reviewed_by), reject_reason=COALESCE(?,reject_reason)
+                WHERE id=? AND fact_status!='validated'""",
+            (stamp := utc_now(), stamp, reviewed_by, reject_reason, evidence_id),
         ).rowcount
     if not updated:
         raise ValueError(f"Evidence {evidence_id} not found or already validated")

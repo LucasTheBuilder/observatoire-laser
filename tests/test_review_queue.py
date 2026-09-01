@@ -435,5 +435,45 @@ class HumanDecisionSurvivesRecrawlTests(unittest.TestCase):
         self.assertIsNone(row["reviewed_at"])
 
 
+class MarketReviewRejectReasonTests(unittest.TestCase):
+    """L'écran « Faits marché à valider » porte 123 des 152 items en attente : c'est la file dont
+    les rejets ont le plus à enseigner, et la dernière à avoir accepté un rejet non motivé."""
+
+    def test_legacy_endpoint_refuses_an_untyped_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            with _patch_dbs(actors_db, market_db, tech_db):
+                with dbmod.connect(market_db) as db:
+                    scrapers._upsert_market_candidate(db, dict(_EVIDENCE_CANDIDATE, fact_status="review"))
+                for bad_reason in (None, "pas pertinent"):
+                    with self.subTest(reject_reason=bad_reason):
+                        payload = appmod.RejectMarketReviewRequest(reject_reason=bad_reason)
+                        with self.assertRaises(appmod.HTTPException) as ctx:
+                            appmod.reject_market_review(1, payload)
+                        self.assertEqual(400, ctx.exception.status_code)
+                # Le fait doit être resté en attente : un rejet refusé ne décide rien.
+                with dbmod.connect(market_db) as db:
+                    row = db.execute("SELECT review_status FROM evidence WHERE id=1").fetchone()
+        self.assertEqual("review", row["review_status"])
+
+    def test_typed_reason_is_persisted_on_the_evidence_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            with _patch_dbs(actors_db, market_db, tech_db):
+                with dbmod.connect(market_db) as db:
+                    scrapers._upsert_market_candidate(db, dict(_EVIDENCE_CANDIDATE, fact_status="review"))
+                appmod.reject_market_review(
+                    1, appmod.RejectMarketReviewRequest(reviewed_by="lucas", reject_reason="wrong_dimension")
+                )
+                with dbmod.connect(market_db) as db:
+                    row = db.execute(
+                        "SELECT review_status,reject_reason,reviewed_by,reviewed_at FROM evidence WHERE id=1"
+                    ).fetchone()
+        self.assertEqual("rejected", row["review_status"])
+        self.assertEqual("wrong_dimension", row["reject_reason"])
+        self.assertEqual("lucas", row["reviewed_by"])
+        self.assertIsNotNone(row["reviewed_at"])
+
+
 if __name__ == "__main__":
     unittest.main()

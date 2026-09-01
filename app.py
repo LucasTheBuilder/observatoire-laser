@@ -1589,15 +1589,29 @@ def accept_market_review(evidence_id: int):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+class RejectMarketReviewRequest(BaseModel):
+    reviewed_by: str | None = None
+    reject_reason: str | None = Field(None, description=f"Requis, un de {REJECT_REASONS}.")
+
+
 @app.post("/api/market/review/{evidence_id}/reject")
-def reject_market_review(evidence_id: int):
+def reject_market_review(evidence_id: int, payload: RejectMarketReviewRequest):
     """Marque le fait comme relu-et-refusé ; il garde son fact_status d'origine (traçabilité)
-    mais ne réapparaît plus dans la file de revue ni dans la matrice marché."""
+    mais ne réapparaît plus dans la file de revue ni dans la matrice marché.
+
+    Motif TYPÉ obligatoire, comme les huit autres files. C'est ici que ça compte le plus : cet
+    écran porte 123 des 152 items en attente, donc la majorité de ce qu'une analyse des rejets
+    aura à lire. Un rejet non motivé y était jusqu'ici accepté en silence -- la file la plus
+    volumineuse était la seule à ne rien enseigner."""
+    if payload.reject_reason not in REJECT_REASONS:
+        raise HTTPException(status_code=400, detail=f"reject_reason must be one of {REJECT_REASONS}")
     try:
-        reject_evidence_review(evidence_id)
+        reject_evidence_review(
+            evidence_id, reviewed_by=payload.reviewed_by, reject_reason=payload.reject_reason
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"id": evidence_id, "status": "rejected"}
+    return {"id": evidence_id, "status": "rejected", "reject_reason": payload.reject_reason}
 
 
 @app.get("/api/offers")

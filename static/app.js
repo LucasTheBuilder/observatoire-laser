@@ -1657,6 +1657,10 @@ function marketReviewCard(item) {
     ${marketReviewMeta(item)}
     <div class="vocab-dims" style="margin-top:12px">
       <button class="vocab-accept" data-accept-market-review="${item.id}">✓ Valider</button>
+      <select class="reject-reason-select" data-reject-reason-for="market:${item.id}">
+        <option value="">Motif de rejet…</option>
+        ${Object.entries(REJECT_REASON_LABELS).map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("")}
+      </select>
       <button class="vocab-reject" data-reject-market-review="${item.id}">✕ Rejeter</button>
       ${canBecomeGoldenFact(item)
         ? `<button class="export-btn" data-golden-from-review="${item.id}" title="J'ai vérifié cette page moi-même : garder ce fait comme référence de non-régression.">★ Garder comme référence</button>`
@@ -2404,9 +2408,14 @@ async function decideVocabulary(id, action, dimension) {
   } catch (error) { toast(error.message); }
 }
 
-async function decideMarketReview(id, action) {
+// Un rejet porte un motif typé, une validation n'en a pas besoin -- d'où le corps de requête
+// seulement pour "reject" : l'endpoint /accept, lui, n'attend aucun payload.
+async function decideMarketReview(id, action, rejectReason) {
   try {
-    await api(`/api/market/review/${id}/${action}`, {method: "POST"});
+    const options = action === "reject"
+      ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({reject_reason: rejectReason})}
+      : {method: "POST"};
+    await api(`/api/market/review/${id}/${action}`, options);
     toast(action === "accept" ? "Fait validé." : "Fait rejeté.");
     state.marketReview = await api("/api/market/review");
     renderMarketReview();
@@ -2527,7 +2536,11 @@ function wireActions(){
   document.querySelectorAll("[data-accept-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.acceptVocab),"accept",button.dataset.dimension)));
   document.querySelectorAll("[data-reject-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.rejectVocab),"reject")));
   document.querySelectorAll("[data-accept-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.acceptMarketReview),"accept")));
-  document.querySelectorAll("[data-reject-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.rejectMarketReview),"reject")));
+  document.querySelectorAll("[data-reject-market-review]").forEach(button=>button.addEventListener("click",()=>{
+    const select = button.closest("article").querySelector(".reject-reason-select");
+    if (!select.value) { toast("Choisis un motif de rejet d'abord."); return; }
+    decideMarketReview(Number(button.dataset.rejectMarketReview),"reject",select.value);
+  }));
   document.querySelectorAll("[data-golden-from-review]").forEach(button=>button.addEventListener("click",()=>keepMarketReviewItemAsGoldenFact(Number(button.dataset.goldenFromReview),button)));
   document.querySelectorAll("[data-accept-review]").forEach(button=>button.addEventListener("click",()=>{
     const [queue, id] = button.dataset.acceptReview.split(":");
