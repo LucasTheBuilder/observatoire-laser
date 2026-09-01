@@ -45,7 +45,7 @@ import httpx
 from actor_discovery import upsert_actor_candidate
 from db import ACTORS_DB, DATA_DIR, TECH_DB, connect, technology_signal_key, utc_now
 from http_client import connector_client
-from scrapers import PROCESS_TECHNOLOGIES, _detect_maturity, _match_label_details, _quote, is_on_topic
+from lexicon import PROCESS_TECHNOLOGIES, best_quote, detect_maturity, is_on_topic, match_label_details
 
 CORDIS_PROJECTS_ZIP_URL = "https://cordis.europa.eu/data/cordis-HORIZONprojects-csv.zip"
 CORDIS_CACHE_PATH = DATA_DIR / "cordis_cache" / "horizon_projects.zip"
@@ -298,7 +298,7 @@ def _upsert_technology_signal(db, *, axis: str, project: dict[str, str], actor_n
     stamp = utc_now()
     project_name = project.get("acronym") or project.get("title") or project["id"]
     fact_key = technology_signal_key(axis, project_name)
-    bucket, stage = _detect_maturity(project.get("objective") or "")
+    bucket, stage = detect_maturity(project.get("objective") or "")
     if bucket == "unknown":
         bucket = "radar"  # projet de R&D financé par l'UE : pré-industriel par défaut, jamais "existing" par supposition
     source_url = _project_url(project["id"])
@@ -421,9 +421,9 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
                             actors_db, actor_id, related_name[:180], related_actor_id, note, source_url,
                         )
 
-                axis, hits = _match_label_details(f"{project.get('title') or ''} {project.get('objective') or ''}", PROCESS_TECHNOLOGIES)
+                axis, hits = match_label_details(f"{project.get('title') or ''} {project.get('objective') or ''}", PROCESS_TECHNOLOGIES)
                 if axis:
-                    quote = _quote(project.get("objective") or project.get("title") or "", hits)[:700]
+                    quote = best_quote(project.get("objective") or project.get("title") or "", hits)[:700]
                     if quote:
                         added, source_added = _upsert_technology_signal(
                             tech_db, axis=axis, project=project, actor_names=sorted(actor_names), quote=quote,

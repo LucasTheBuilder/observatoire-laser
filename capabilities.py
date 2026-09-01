@@ -62,7 +62,8 @@ from typing import Any
 from db import ACTORS_DB, connect, utc_now
 from http_client import connector_client
 from hybrid import is_pdf_response, parse_document, parse_pdf_document
-from scrapers import MATERIALS, _fetch, _match_all_labels, _stored_blocks
+from lexicon import MATERIALS, match_all_labels
+from scrapers import _fetch, _stored_blocks
 from site_profiles import get_site_profile
 
 CAPABILITY_PAGE_TYPES = ("product", "equipment", "capability", "service", "about", "datasheet")
@@ -279,7 +280,7 @@ def _extract_capabilities(page_texts: list[tuple[str, str]]) -> dict[str, Any]:
             if batch_match:
                 batch_quote = batch_match.group(0).strip()
                 batch_source = source_url
-        for label, _hits in _match_all_labels(text, MATERIALS):
+        for label, _hits in match_all_labels(text, MATERIALS):
             materials.add(label)
             material_source = material_source or source_url
 
