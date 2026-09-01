@@ -171,7 +171,11 @@ function intensityBadge(market) {
   if (!entry) return "";
   const level = intensityLevel(entry.intensity_score);
   const title = `Intensité concurrentielle : ${entry.existing} fait(s) existant(s), ${entry.radar} radar, ${entry.actors_count} acteur(s) actif(s), ${Math.round(entry.production_share * 100)}% en stade Production/Industrialisation. Mesure l'offre déjà présente, pas la demande.`;
-  return `<span class="attractiveness-badge lvl-${level}" title="${esc(title)}">${Math.round(entry.intensity_score)} intensité</span>`;
+  // §10.4/§0.5 audit veille (30/08/2026) : "afficher les composantes" -- un agrégat seul masque
+  // ce qu'il mesure réellement (l'offre déjà présente, pas la demande). Visible en texte, pas
+  // seulement au survol (title reste en complément, pour le détail complet).
+  return `<span class="attractiveness-badge lvl-${level}" title="${esc(title)}">${Math.round(entry.intensity_score)} intensité</span>
+    <small class="block-label">${entry.existing} existant · ${entry.radar} radar · ${entry.actors_count} acteur${entry.actors_count > 1 ? "s" : ""} · ${Math.round(entry.production_share * 100)}% industrialisé</small>`;
 }
 
 function marketFamilyCards(rows) {

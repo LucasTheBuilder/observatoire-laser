@@ -218,6 +218,11 @@ def _extract_capabilities(page_texts: list[tuple[str, str]]) -> dict[str, Any]:
     throughput_candidates: list[tuple[float, str]] = []
     batch_quote: str | None = None
     batch_source: str | None = None
+    # Audit veille §9.4/§10.12 item 0.8 : chaque valeur qui échoue un contrôle de plausibilité
+    # (bornes ci-dessus) est notée ici plutôt que simplement jetée -- jamais écrite comme si elle
+    # était vérifiée, mais le fait qu'elle ait existé et semblé aberrante doit rester visible
+    # (voir review_status/review_note, calculés par collect_capability_specs).
+    implausible: dict[str, list[str]] = defaultdict(list)
 
     for source_url, text in page_texts:
         if not text.strip():
@@ -228,10 +233,16 @@ def _extract_capabilities(page_texts: list[tuple[str, str]]) -> dict[str, Any]:
                 if any(abs(nm_value - line) <= _LASER_LINE_TOLERANCE_NM for line in _KNOWN_LASER_LINES_NM):
                     wavelengths.add(nm_value)
                     wavelength_source = wavelength_source or source_url
+                else:
+                    implausible["wavelengths_nm"].append(f"{nm_value}nm")
         for match in _PULSE_FS_RE.finditer(text):
             value = _parse_number(match.group(1))
-            if value is not None and _PULSE_MIN_FS <= value <= _PULSE_MAX_FS:
+            if value is None:
+                continue
+            if _PULSE_MIN_FS <= value <= _PULSE_MAX_FS:
                 pulse_candidates.append((value, source_url))
+            else:
+                implausible["pulse_duration_fs"].append(f"{value:g}fs")
         tolerance_spans = [match.span() for match in _TOLERANCE_RE.finditer(text)]
         for match in _TOLERANCE_RE.finditer(text):
             value = _parse_number(match.group(1))
@@ -245,13 +256,21 @@ def _extract_capabilities(page_texts: list[tuple[str, str]]) -> dict[str, Any]:
                 if any(match.start() < end and match.end() > start for start, end in tolerance_spans):
                     continue
                 value = _parse_number(match.group(1))
-                if value is not None and _FEATURE_SIZE_MIN_UM <= value <= _FEATURE_SIZE_MAX_UM:
+                if value is None:
+                    continue
+                if _FEATURE_SIZE_MIN_UM <= value <= _FEATURE_SIZE_MAX_UM:
                     feature_candidates.append((value, source_url))
+                else:
+                    implausible["min_feature_size_um"].append(f"{value:g}µm")
         if _contains_any(text, _PART_SIZE_CONTEXT):
             for match in _MM_VALUE_RE.finditer(text):
                 value = _parse_number(match.group(1))
-                if value is not None and 0 < value <= _PART_SIZE_MAX_MM:
+                if value is None:
+                    continue
+                if 0 < value <= _PART_SIZE_MAX_MM:
                     part_size_candidates.append((value, source_url))
+                else:
+                    implausible["max_part_size_mm"].append(f"{value:g}mm")
         for match in _THROUGHPUT_RE.finditer(text):
             value = _parse_number(match.group(1))
             if value is not None and value > 0:
@@ -280,6 +299,7 @@ def _extract_capabilities(page_texts: list[tuple[str, str]]) -> dict[str, Any]:
         "pulse_duration_fs": best_pulse[0], "pulse_duration_fs_source_url": best_pulse[1],
         "materials_qualified": sorted(materials), "materials_qualified_source_url": material_source,
         "batch_size_range": batch_quote, "batch_size_range_source_url": batch_source,
+        "implausible_values": dict(implausible),
     }
 
 
@@ -339,15 +359,29 @@ def _upsert_actor_fact(db, actor_id: int, dimension: str, value: str, source_url
     return 1
 
 
+def _review_note(implausible: dict[str, list[str]]) -> str | None:
+    """Une phrase courte listant les valeurs écartées par le contrôle de plausibilité (audit
+    veille §9.4/§10.12 item 0.8) -- jamais la valeur elle-même écrite comme si elle était
+    vérifiée, seulement le fait qu'une anomalie a été vue sur cette page."""
+    if not implausible:
+        return None
+    parts = [f"{field} : {', '.join(values[:3])}" for field, values in sorted(implausible.items())]
+    return "Valeur(s) hors plage de plausibilité écartée(s) -- " + " ; ".join(parts)
+
+
 def _upsert_capability_spec(db, actor_id: int, fields: dict[str, Any], source_url: str) -> int:
     """Une ligne par acteur, comme firmographics._upsert_actor_profile -- un rafraîchissement
     remplace l'enveloppe précédente plutôt que de l'ignorer. ``source_url`` reste la première
     page analysée pour cet acteur (compatibilité/complétude, voir app.py) ; chaque champ a en
     plus sa PROPRE colonne ``*_source_url`` (voir _extract_capabilities), désormais la source de
-    vérité pour savoir d'où vient une valeur donnée."""
+    vérité pour savoir d'où vient une valeur donnée. ``review_status`` passe à 'review' (au lieu
+    de 'verified') dès qu'au moins une valeur candidate a été écartée par le contrôle de
+    plausibilité pour cet acteur -- voir _review_note."""
     stamp = utc_now()
     wavelengths_json = json.dumps(fields["wavelengths_nm"], ensure_ascii=False) if fields["wavelengths_nm"] else None
     materials_json = json.dumps(fields["materials_qualified"], ensure_ascii=False) if fields["materials_qualified"] else None
+    review_note = _review_note(fields.get("implausible_values") or {})
+    review_status = "review" if review_note else "verified"
     values = (
         fields["min_feature_size_um"], fields["tolerance_um"], fields["max_part_size_mm"],
         fields["throughput_units_per_h"], wavelengths_json, fields["pulse_duration_fs"],
@@ -356,7 +390,7 @@ def _upsert_capability_spec(db, actor_id: int, fields: dict[str, Any], source_ur
         fields["max_part_size_mm_source_url"], fields["throughput_units_per_h_source_url"],
         fields["wavelengths_nm_source_url"], fields["pulse_duration_fs_source_url"],
         fields["materials_qualified_source_url"], fields["batch_size_range_source_url"],
-        stamp,
+        review_status, review_note, stamp,
     )
     existing = db.execute("SELECT actor_id FROM capability_spec WHERE actor_id=?", (actor_id,)).fetchone()
     if existing:
@@ -367,6 +401,7 @@ def _upsert_capability_spec(db, actor_id: int, fields: dict[str, Any], source_ur
                       min_feature_size_um_source_url=?,tolerance_um_source_url=?,max_part_size_mm_source_url=?,
                       throughput_units_per_h_source_url=?,wavelengths_nm_source_url=?,pulse_duration_fs_source_url=?,
                       materials_qualified_source_url=?,batch_size_range_source_url=?,
+                      review_status=?,review_note=?,
                       updated_at=?
                WHERE actor_id=?""",
             values + (actor_id,),
@@ -379,8 +414,9 @@ def _upsert_capability_spec(db, actor_id: int, fields: dict[str, Any], source_ur
                min_feature_size_um_source_url,tolerance_um_source_url,max_part_size_mm_source_url,
                throughput_units_per_h_source_url,wavelengths_nm_source_url,pulse_duration_fs_source_url,
                materials_qualified_source_url,batch_size_range_source_url,
+               review_status,review_note,
                created_at,updated_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (actor_id,) + values + (stamp,),
     )
     return 1
@@ -445,11 +481,17 @@ def collect_capability_specs() -> dict:
             fields = _extract_capabilities(page_texts)
             certifications = _extract_certifications(page_texts)
             cleanroom_class, cleanroom_source = _extract_cleanroom_class(page_texts)
-            has_capability_field = any(fields[key] for key in fields if not key.endswith("_source_url"))
-            if not has_capability_field and not certifications and not cleanroom_class:
+            has_capability_field = any(
+                fields[key] for key in fields if key != "implausible_values" and not key.endswith("_source_url")
+            )
+            # Une valeur écartée par le contrôle de plausibilité doit rester visible même quand
+            # AUCUN champ valide n'a par ailleurs été trouvé pour cet acteur -- sinon l'anomalie
+            # retombe dans le même silence que ce que l'item 0.8 corrige (voir _review_note).
+            has_implausible = bool(fields.get("implausible_values"))
+            if not has_capability_field and not has_implausible and not certifications and not cleanroom_class:
                 continue
             with connect(ACTORS_DB) as db:
-                if has_capability_field:
+                if has_capability_field or has_implausible:
                     created = _upsert_capability_spec(db, actor_id, fields, primary_source_url)
                     profiles_added += created
                     profiles_updated += int(not created)

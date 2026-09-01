@@ -1311,6 +1311,16 @@ def init_databases() -> None:
             "pulse_duration_fs_source_url": "TEXT",
             "materials_qualified_source_url": "TEXT",
             "batch_size_range_source_url": "TEXT",
+            # Audit veille §9.4/§10.12 item 0.8 (30/08/2026) : le contrôle de plausibilité
+            # (_KNOWN_LASER_LINES_NM/_PULSE_MIN_FS.../_FEATURE_SIZE_MIN_UM.../_PART_SIZE_MAX_MM)
+            # écartait déjà les valeurs hors plage, mais SILENCIEUSEMENT -- le champ restait NULL
+            # comme si rien n'avait été trouvé, sans jamais dire qu'une valeur avait existé et
+            # semblé aberrante. review_status='review' quand au moins une valeur candidate a été
+            # écartée pour un champ borné (voir capabilities._extract_capabilities) ; la valeur
+            # écartée elle-même n'est JAMAIS écrite comme si elle était vérifiée -- seul le fait
+            # qu'une anomalie a été vue devient visible, jamais le chiffre suspect lui-même.
+            "review_status": "TEXT NOT NULL DEFAULT 'verified'",
+            "review_note": "TEXT",
         })
         _add_columns(db, "actor_candidates", {
             "country": "TEXT",

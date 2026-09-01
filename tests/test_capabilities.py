@@ -77,12 +77,16 @@ class ExtractCapabilitiesTests(unittest.TestCase):
         self.assertEqual(290.0, fields["pulse_duration_fs"])
 
     def test_pulse_duration_outside_audit_range_is_rejected(self):
-        # Audit veille §10.12 (0.8), 100-1500fs. Values outside are not written at all rather
-        # than kept -- silence is preferable to a number nobody can defend.
+        # Audit veille §10.12 (0.8), 100-1500fs. Values outside are not written as a verified
+        # field -- but item 0.8 requires the anomaly itself to stay visible via
+        # implausible_values, never fabricated as if it were a plausible reading.
         too_short = _extract_capabilities(_pages("Ultra-short 30 fs pulse duration."))
         too_long = _extract_capabilities(_pages("System operates at 5000 fs pulse duration."))
         self.assertIsNone(too_short["pulse_duration_fs"])
         self.assertIsNone(too_long["pulse_duration_fs"])
+        self.assertIn("pulse_duration_fs", too_short["implausible_values"])
+        self.assertIn("30", too_short["implausible_values"]["pulse_duration_fs"][0])
+        self.assertIn("pulse_duration_fs", too_long["implausible_values"])
 
     def test_wavelength_far_from_any_known_laser_line_is_rejected(self):
         # Audit veille §9.4, real production example: an actor's page yielded
@@ -99,6 +103,10 @@ class ExtractCapabilitiesTests(unittest.TestCase):
         # 258nm is within 5nm of the real 257nm (4th harmonic of 1030nm) line.
         fields = _extract_capabilities(_pages("Laser output at 258 nm."))
         self.assertEqual([258], fields["wavelengths_nm"])
+
+    def test_a_page_with_only_plausible_values_reports_no_implausible_values(self):
+        fields = _extract_capabilities(_pages("This laser operates at 1064 nm, 290 fs pulse duration."))
+        self.assertEqual({}, fields["implausible_values"])
 
     def test_tolerance_uses_plus_minus_marker(self):
         fields = _extract_capabilities(_pages("Positioning accuracy of ±2 µm on all axes."))
@@ -338,6 +346,70 @@ class CollectCapabilitySpecsTests(unittest.TestCase):
             with dbmod.connect(actors_db) as db:
                 count = db.execute("SELECT COUNT(*) FROM capability_spec").fetchone()[0]
             self.assertEqual(1, count)
+
+    def test_row_with_only_plausible_values_is_verified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+
+            def run():
+                self._seed(actors_db, "FEMTOprint", "product", "Minimum feature size achievable: 8 µm.")
+                return collect_capability_specs()
+
+            self._run(actors_db, run)
+            with dbmod.connect(actors_db) as db:
+                row = db.execute(
+                    """SELECT c.review_status,c.review_note FROM capability_spec c
+                       JOIN actors a ON a.id=c.actor_id WHERE a.name='FEMTOprint'"""
+                ).fetchone()
+            self.assertEqual("verified", row["review_status"])
+            self.assertIsNone(row["review_note"])
+
+    def test_row_with_an_implausible_value_is_flagged_for_review_without_writing_the_bad_number(self):
+        # Audit veille §9.4/§10.12 item 0.8 : the row still gets a real, plausible feature-size
+        # value -- but the page ALSO contained a pulse duration outside [100,1500]fs, which must
+        # never be written to pulse_duration_fs, only surface as a reason to look again.
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+
+            def run():
+                self._seed(
+                    actors_db, "KMLT", "product",
+                    "Minimum feature size achievable: 8 µm. Ultra-short 30 fs pulse duration.",
+                )
+                return collect_capability_specs()
+
+            self._run(actors_db, run)
+            with dbmod.connect(actors_db) as db:
+                row = db.execute(
+                    """SELECT min_feature_size_um,pulse_duration_fs,c.review_status,c.review_note
+                       FROM capability_spec c JOIN actors a ON a.id=c.actor_id WHERE a.name='KMLT'"""
+                ).fetchone()
+            self.assertEqual(8.0, row["min_feature_size_um"])
+            self.assertIsNone(row["pulse_duration_fs"])
+            self.assertEqual("review", row["review_status"])
+            self.assertIn("pulse_duration_fs", row["review_note"])
+            self.assertIn("30", row["review_note"])
+
+    def test_an_implausible_value_alone_still_creates_a_row_flagged_for_review(self):
+        # No plausible field at all on this page -- before item 0.8 this produced nothing
+        # (no_deterministic_signal path); now the anomaly itself must stay visible.
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = Path(tmp) / "actors.db"
+
+            def run():
+                self._seed(actors_db, "MeKo", "product", "Ultra-short 30 fs pulse duration.")
+                return collect_capability_specs()
+
+            result = self._run(actors_db, run)
+            self.assertEqual(1, result["profiles_added"])
+            with dbmod.connect(actors_db) as db:
+                row = db.execute(
+                    """SELECT pulse_duration_fs,c.review_status,c.review_note FROM capability_spec c
+                       JOIN actors a ON a.id=c.actor_id WHERE a.name='MeKo'"""
+                ).fetchone()
+            self.assertIsNone(row["pulse_duration_fs"])
+            self.assertEqual("review", row["review_status"])
+            self.assertTrue(row["review_note"])
 
     def test_certification_found_on_about_page_is_written_to_actor_facts(self):
         with tempfile.TemporaryDirectory() as tmp:
