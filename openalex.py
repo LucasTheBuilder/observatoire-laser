@@ -29,7 +29,6 @@ scrapers.scrape_technology() le fait déjà pour Crossref -- voir audit v8 §2.1
 
 from __future__ import annotations
 
-import hashlib
 import os
 from datetime import date, timedelta
 from urllib.parse import urlparse
@@ -37,7 +36,7 @@ from urllib.parse import urlparse
 import httpx
 
 from actor_discovery import _known_actor_names_and_domains, _normalize_name, upsert_actor_candidate
-from db import ACTORS_DB, TECH_DB, compute_is_backfill, connect, utc_now
+from db import ACTORS_DB, TECH_DB, connect, upsert_document, utc_now
 from http_client import CRAWLER_CONTACT, connector_client
 from scrapers import TECHNOLOGY_QUERIES, is_on_topic, upsert_document_technology_signal
 
@@ -179,40 +178,19 @@ def _parse_work(work: dict) -> dict | None:
 
 
 def _upsert_document(db, actor_name: str, item: dict) -> tuple[int, int]:
-    """Renvoie (1 si nouvelle ligne insérée, 1 si actor_name vient d'être renseigné sur une
-    ligne déjà existante) -- ce deuxième cas est le correctif central de ce module : une
-    publication déjà vue par scrape_technology() (Crossref générique, jamais attribué) reçoit
-    enfin son actor_name plutôt que de rester orpheline."""
-    fingerprint = hashlib.sha256((item["doi"] or item["url"]).casefold().encode()).hexdigest()
-    stamp = utc_now()
-    # Revue chronologie du 30/08/2026 : published_at vient toujours d'un champ structuré de
-    # l'API OpenAlex (voir _parse_work ci-dessus), jamais d'un repli fabriqué -- donc, à la
-    # différence de evidence/offers (scrapers.py), 'published'/'observed_only' peut être décidé
-    # sans ambiguïté dès cette écriture. is_backfill compare cette date à `stamp`, qui EST le
-    # created_at de la ligne (première insertion, jamais réécrite ensuite).
-    date_confidence = "published" if item.get("published_at") else "observed_only"
-    is_backfill = compute_is_backfill(stamp, item.get("published_at"), date_confidence)
-    before = db.total_changes
-    db.execute(
-        """INSERT OR IGNORE INTO documents(
-               actor_name,document_type,title,source_url,published_at,doi,date_confidence,is_backfill,fingerprint,created_at,last_seen_at
-           ) VALUES(?,'publication',?,?,?,?,?,?,?,?,?)""",
-        (
-            actor_name, item["title"], item["url"], item["published_at"], item["doi"],
-            date_confidence, is_backfill, fingerprint, stamp, stamp,
-        ),
+    """Adaptateur : traduit un `item` OpenAlex en colonnes `documents`, puis delegue l'ecriture
+    a db.upsert_document (dedoublonnage sur empreinte + rattachement tardif d'un actor_name),
+    partagee avec patent.py. L'empreinte derive du DOI quand il existe, sinon de l'URL."""
+    return upsert_document(
+        db,
+        document_type="publication",
+        title=item["title"],
+        source_url=item["url"],
+        fingerprint_source=item["doi"] or item["url"],
+        actor_name=actor_name,
+        published_at=item["published_at"],
+        doi=item["doi"],
     )
-    inserted = int(db.total_changes > before)
-    attributed = 0
-    if inserted:
-        return 1, 0
-    db.execute("UPDATE documents SET last_seen_at=? WHERE fingerprint=?", (stamp, fingerprint))
-    row = db.execute("SELECT actor_name FROM documents WHERE fingerprint=?", (fingerprint,)).fetchone()
-    if row and not row["actor_name"]:
-        db.execute("UPDATE documents SET actor_name=? WHERE fingerprint=?", (actor_name, fingerprint))
-        attributed = 1
-    return 0, attributed
-
 
 def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DEFAULT) -> dict:
     """Point d'entrée (voir app.py: collectors["openalex"])."""

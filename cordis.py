@@ -30,7 +30,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-import json
 import re
 import time
 import unicodedata
@@ -43,7 +42,16 @@ from typing import Any
 import httpx
 
 from actor_discovery import upsert_actor_candidate
-from db import ACTORS_DB, DATA_DIR, TECH_DB, connect, technology_signal_key, utc_now
+from db import (
+    ACTORS_DB,
+    DATA_DIR,
+    TECH_DB,
+    connect,
+    technology_signal_key,
+    upsert_actor_event,
+    upsert_technology_signal,
+    utc_now,
+)
 from http_client import connector_client
 from lexicon import PROCESS_TECHNOLOGIES, best_quote, detect_maturity, is_on_topic, match_label_details
 
@@ -258,22 +266,6 @@ def _project_details(zip_path: Path, project_ids: set[str]) -> dict[str, dict[st
     return details
 
 
-def _upsert_actor_event(db, actor_id: int, description: str, event_date: str | None, source_url: str) -> int:
-    """Dédoublonne sur (actor_id, source_url) : la page CORDIS d'un projet est une URL stable,
-    donc un run répété sur le même projet ne recrée jamais le même événement."""
-    existing = db.execute(
-        "SELECT id FROM actor_events WHERE actor_id=? AND source_url=?", (actor_id, source_url),
-    ).fetchone()
-    if existing:
-        return 0
-    db.execute(
-        """INSERT INTO actor_events(actor_id,event_type,description,event_date,source_url,review_status,created_at)
-           VALUES(?,?,?,?,?,?,?)""",
-        (actor_id, "cordis_project", description, event_date, source_url, "verified", utc_now()),
-    )
-    return 1
-
-
 def _upsert_actor_relation(db, actor_id: int, related_name: str, related_actor_id: int | None, note: str, source_url: str) -> int:
     """Dédoublonne sur (actor_id, related_name) plutôt que par projet : si les deux mêmes
     organisations se retrouvent dans plusieurs consortiums au fil des runs, une seule ligne de
@@ -303,28 +295,19 @@ def _upsert_technology_signal(db, *, axis: str, project: dict[str, str], actor_n
         bucket = "radar"  # projet de R&D financé par l'UE : pré-industriel par défaut, jamais "existing" par supposition
     source_url = _project_url(project["id"])
 
-    row = db.execute("SELECT id,actor_names FROM technology_signals WHERE fact_key=?", (fact_key,)).fetchone()
-    added = 0
-    if row:
-        signal_id = int(row["id"])
-        merged = sorted(set(json.loads(row["actor_names"] or "[]")) | set(actor_names))
-        db.execute(
-            "UPDATE technology_signals SET actor_names=?,updated_at=?,last_seen_at=? WHERE id=?",
-            (json.dumps(merged, ensure_ascii=False), stamp, stamp, signal_id),
-        )
-    else:
-        signal_id = db.execute(
-            """INSERT INTO technology_signals(
-                   axis,maturity_stage,bucket,project_name,actor_names,source_url,source_title,quote,
-                   fact_key,fingerprint,review_status,field_confidence,created_at,updated_at,last_seen_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                axis, stage, bucket, project_name, json.dumps(sorted(set(actor_names)), ensure_ascii=False),
-                source_url, project.get("title"), quote, fact_key, hashlib.sha256(fact_key.encode()).hexdigest(),
-                "accepted", 0.9, stamp, stamp, stamp,
-            ),
-        ).lastrowid
-        added = 1
+    added, signal_id = upsert_technology_signal(
+        db,
+        fact_key=fact_key,
+        axis=axis,
+        maturity_stage=stage,
+        bucket=bucket,
+        actor_names=actor_names,
+        source_url=source_url,
+        quote=quote,
+        field_confidence=0.9,
+        project_name=project_name,
+        source_title=project.get("title"),
+    )
 
     source_fingerprint = hashlib.sha256(f"{fact_key}|{source_url}|{quote}".encode()).hexdigest()
     before = db.total_changes
@@ -396,7 +379,13 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
                     actor_id = actors_by_name[actor_name]
                     label = project.get("acronym") or project_id
                     description = f"Participation au projet européen {label} ({project.get('title') or ''})".strip()[:500]
-                    events_added += _upsert_actor_event(actors_db, actor_id, description, project.get("startDate") or None, source_url)
+                    events_added += upsert_actor_event(
+                        actors_db, actor_id, "cordis_project", description, source_url=source_url,
+                        event_date=project.get("startDate") or None,
+                        # Participation a un projet europeen, sourcee sur une page CORDIS stable :
+                        # pas un signal faible, contrairement a la presse ou aux offres d'emploi.
+                        review_status="verified",
+                    )
 
                     own_alias = aliases[actor_name]
                     for org in consortiums.get(project_id, [])[:MAX_PARTNERS_PER_PROJECT]:

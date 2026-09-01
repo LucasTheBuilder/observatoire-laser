@@ -31,7 +31,6 @@ l'API -- à faire dès qu'une clé/secret sont disponibles, avant de considérer
 
 from __future__ import annotations
 
-import hashlib
 import os
 import time
 import xml.etree.ElementTree as ET
@@ -40,7 +39,7 @@ from datetime import date, timedelta
 import httpx
 
 from actor_discovery import _known_actor_names_and_domains, _normalize_name, upsert_actor_candidate
-from db import ACTORS_DB, TECH_DB, compute_is_backfill, connect, utc_now
+from db import ACTORS_DB, TECH_DB, connect, upsert_document
 from http_client import connector_client
 
 EPO_OPS_KEY = os.getenv("EPO_OPS_KEY", "").strip()
@@ -183,35 +182,19 @@ def _fetch_topic_scoped_patents(client: httpx.Client, token: str, from_date_yyyy
 
 
 def _upsert_patent_document(db, actor_name: str | None, doc: dict) -> tuple[int, int]:
-    """Même logique que openalex._upsert_document : (1 si nouvelle ligne, 1 si actor_name vient
-    d'être renseigné sur une ligne déjà vue sans attribution -- ex: trouvé d'abord par la passe
-    topic-scoped, puis attribué par la passe par-déposant, ou l'inverse)."""
-    fingerprint = hashlib.sha256(doc["patent_number"].casefold().encode()).hexdigest()
-    stamp = utc_now()
-    date_confidence = "published" if doc["published_at"] else "observed_only"
-    is_backfill = compute_is_backfill(stamp, doc["published_at"], date_confidence)
-    before = db.total_changes
-    db.execute(
-        """INSERT OR IGNORE INTO documents(
-               actor_name,document_type,title,source_url,published_at,patent_number,date_confidence,is_backfill,fingerprint,created_at,last_seen_at
-           ) VALUES(?,'patent',?,?,?,?,?,?,?,?,?)""",
-        (
-            actor_name, doc["title"], doc["url"], doc["published_at"], doc["patent_number"],
-            date_confidence, is_backfill, fingerprint, stamp, stamp,
-        ),
+    """Adaptateur : traduit un `doc` EPO OPS en colonnes `documents`, puis delegue l'ecriture a
+    db.upsert_document, partagee avec openalex.py. actor_name peut etre None (passe thematique,
+    trouvee sans deposant rattache) : le rattachement se fera lors d'une passe ulterieure."""
+    return upsert_document(
+        db,
+        document_type="patent",
+        title=doc["title"],
+        source_url=doc["url"],
+        fingerprint_source=doc["patent_number"],
+        actor_name=actor_name,
+        published_at=doc["published_at"],
+        patent_number=doc["patent_number"],
     )
-    inserted = int(db.total_changes > before)
-    if inserted:
-        return 1, 0
-    db.execute("UPDATE documents SET last_seen_at=? WHERE fingerprint=?", (stamp, fingerprint))
-    attributed = 0
-    if actor_name:
-        row = db.execute("SELECT actor_name FROM documents WHERE fingerprint=?", (fingerprint,)).fetchone()
-        if row and not row["actor_name"]:
-            db.execute("UPDATE documents SET actor_name=? WHERE fingerprint=?", (actor_name, fingerprint))
-            attributed = 1
-    return 0, attributed
-
 
 def collect_patents(*, lookback_days: int = 365) -> dict:
     """Point d'entrée (voir app.py: collectors["patents"])."""

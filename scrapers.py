@@ -58,6 +58,9 @@ from db import (
     offer_fact_key,
     purge_stale_backlog,
     technology_signal_key,
+    upsert_actor_event,
+    upsert_document,
+    upsert_technology_signal,
     utc_now,
 )
 from http_client import HEADERS, TIMEOUTS
@@ -1588,27 +1591,6 @@ def _detect_content_anomaly(db, source_id: int, block_count: int) -> tuple[str |
     return None, None
 
 
-def _upsert_career_event(db, actor_id: int, description: str, source_url: str) -> int:
-    """Écrit un signal de recrutement (voir _extract_career_signal) dans actor_events,
-    event_type='hiring', review_status='pending' -- même discipline que press.py : un matching
-    par mot-clé sur un intitulé de poste est un signal faible, jamais publié sans relecture.
-    Dédoublonne sur (actor_id, source_url, description) -- PAS (actor_id, source_url) seul
-    comme press._upsert_press_event, parce qu'une seule page carrières liste souvent plusieurs
-    intitulés distincts sous la même URL."""
-    existing = db.execute(
-        "SELECT id FROM actor_events WHERE actor_id=? AND source_url=? AND description=?",
-        (actor_id, source_url, description),
-    ).fetchone()
-    if existing:
-        return 0
-    db.execute(
-        """INSERT INTO actor_events(actor_id,event_type,description,source_url,review_status,created_at)
-           VALUES(?,'hiring',?,?,'pending',?)""",
-        (actor_id, description, source_url, utc_now()),
-    )
-    return 1
-
-
 def _diff_page_blocks(previous_blocks_json: str | None, new_blocks_json: str | None) -> list[dict]:
     """§5.E.1/§8.3 audit veille (30/08/2026) : page_versions archive déjà le blocks_json d'avant
     un changement de contenu détecté, mais rien ne le comparait. Pour la majorité du corpus
@@ -1906,7 +1888,12 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                             for block in document.blocks:
                                 signal = _extract_career_signal(block)
                                 if signal:
-                                    _upsert_career_event(db, actor["id"], signal, resolved_url)
+                                    upsert_actor_event(
+                                        db, actor["id"], "hiring", signal, source_url=resolved_url,
+                                        # Une page carrieres liste souvent plusieurs intitules sous la
+                                        # meme URL : la source seule ne suffit pas a les distinguer.
+                                        dedupe_on_description=True,
+                                    )
                         # §8.2 audit veille (30/08/2026, Lot 2 §2.4) : jamais crawlés, juste
                         # tracés -- voir hybrid._meaningful_links pour la distinction domaine
                         # racine (admis)/externe (ici uniquement).
@@ -2708,7 +2695,6 @@ def upsert_document_technology_signal(
     if bucket == "unknown":
         bucket = "radar"
     actor_names = [actor_name] if actor_name else []
-    stamp = utc_now()
     added = 0
     for axis in sorted(labels):
         # Discriminant sur l'URL du document (stable, toujours disponible), pas son titre --
@@ -2716,26 +2702,19 @@ def upsert_document_technology_signal(
         # pourrait coïncider.
         fact_key = technology_signal_key(axis, source_url)
         quote = _quote(text, PROCESS_TECHNOLOGIES.get(axis, {}).get("any_of", ()))
-        row = db.execute("SELECT id,actor_names FROM technology_signals WHERE fact_key=?", (fact_key,)).fetchone()
-        if row:
-            if actor_name:
-                merged = sorted(set(json.loads(row["actor_names"] or "[]")) | {actor_name})
-                db.execute(
-                    "UPDATE technology_signals SET actor_names=?,updated_at=?,last_seen_at=? WHERE id=?",
-                    (json.dumps(merged, ensure_ascii=False), stamp, stamp, row["id"]),
-                )
-            continue
-        db.execute(
-            """INSERT INTO technology_signals(
-                   axis,maturity_stage,bucket,project_name,actor_names,source_url,source_title,quote,
-                   fact_key,fingerprint,review_status,field_confidence,created_at,updated_at,last_seen_at
-               ) VALUES(?,?,?,NULL,?,?,?,?,?,?,'accepted',0.7,?,?,?)""",
-            (
-                axis, stage, bucket, json.dumps(actor_names, ensure_ascii=False), source_url, title, quote,
-                fact_key, hashlib.sha256(fact_key.encode()).hexdigest(), stamp, stamp, stamp,
-            ),
+        created, _ = upsert_technology_signal(
+            db,
+            fact_key=fact_key,
+            axis=axis,
+            maturity_stage=stage,
+            bucket=bucket,
+            actor_names=actor_names,
+            source_url=source_url,
+            quote=quote,
+            field_confidence=0.7,
+            source_title=title,
         )
-        added += 1
+        added += created
     return added
 
 
@@ -2816,30 +2795,23 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
         with connect(TECH_DB) as db:
             for item in list(pooled.values())[: max(1, limit)]:
                 try:
-                    fingerprint = hashlib.sha256((item["doi"] or item["url"]).casefold().encode()).hexdigest()
-                    stamp = utc_now()
-                    # Revue chronologie du 30/08/2026 : item["published"] vient du champ structuré
-                    # Crossref "published"/date-parts (voir plus haut), jamais d'un repli fabriqué
-                    # -- même raisonnement que openalex._upsert_document.
-                    date_confidence = "published" if item.get("published") else "observed_only"
-                    is_backfill = compute_is_backfill(stamp, item.get("published"), date_confidence)
-                    before = db.total_changes
-                    db.execute(
-                        """INSERT OR IGNORE INTO documents(
-                               document_type,title,source_url,published_at,doi,abstract,date_confidence,is_backfill,fingerprint,created_at,last_seen_at
-                           ) VALUES('publication',?,?,?,?,?,?,?,?,?,?)""",
-                        (
-                            item["title"], item["url"], item["published"], item["doi"],
-                            item["abstract"], date_confidence, is_backfill, fingerprint, stamp, stamp,
-                        ),
+                    # Ecriture deleguee a db.upsert_document, partagee avec openalex.py et
+                    # patent.py : meme dedoublonnage sur empreinte, meme rafraichissement de
+                    # last_seen_at, meme calcul date_confidence/is_backfill. Crossref est la
+                    # seule des trois sources a ne pas attribuer d'acteur (collecte generique) :
+                    # actor_name reste NULL, et openalex.py le renseignera plus tard sur la
+                    # meme ligne s'il retrouve la publication.
+                    inserted, _ = upsert_document(
+                        db,
+                        document_type="publication",
+                        title=item["title"],
+                        source_url=item["url"],
+                        fingerprint_source=item["doi"] or item["url"],
+                        published_at=item["published"],
+                        doi=item["doi"],
+                        abstract=item["abstract"],
                     )
-                    inserted = int(db.total_changes > before)
                     added += inserted
-                    if not inserted:
-                        db.execute(
-                            "UPDATE documents SET last_seen_at=? WHERE fingerprint=?",
-                            (stamp, fingerprint),
-                        )
                     # §4.C.2 audit veille (Lot 3 §3.5) : appelé pour chaque document, nouveau ou
                     # déjà connu -- idempotent (fact_key dédoublonne), donc sans coût à reclasser
                     # un document déjà vu qui n'avait pas encore de signal.

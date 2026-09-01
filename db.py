@@ -2230,6 +2230,173 @@ def add_actor_event(
         ).lastrowid
 
 
+def upsert_actor_event(
+    db: sqlite3.Connection,
+    actor_id: int,
+    event_type: str,
+    description: str,
+    *,
+    source_url: str,
+    event_date: str | None = None,
+    review_status: str = "pending",
+    dedupe_on_description: bool = False,
+    refresh_event_type: bool = False,
+) -> int:
+    """Écrit un événement collecté dans actor_events, en dédoublonnant sur sa source.
+
+    Contrairement à add_actor_event() (qui ouvre sa propre connexion, pour un ajout manuel
+    isolé), cette fonction prend une connexion déjà ouverte : les collecteurs écrivent des
+    dizaines d'événements dans une seule transaction.
+
+    Remplace trois implémentations quasi identiques -- cordis._upsert_actor_event,
+    press._upsert_press_event et scrapers._upsert_career_event -- dont les seules vraies
+    différences sont portées ici par des paramètres explicites :
+
+    - ``review_status`` : CORDIS écrit 'verified' (participation à un projet européen, sourcée
+      sur une page stable), presse et recrutement écrivent 'pending' (un appariement par
+      mot-clé sur un titre d'article ou une offre d'emploi est un signal faible, jamais publié
+      sans relecture).
+    - ``dedupe_on_description`` : une page carrières liste souvent plusieurs intitulés sous la
+      même URL, la source seule ne suffit donc pas à les distinguer.
+    - ``refresh_event_type`` : la presse peut reclasser un événement déjà vu (un mot-clé ajouté
+      depuis la dernière collecte), sans pour autant le dupliquer.
+
+    Renvoie 1 si une ligne a été insérée, 0 sinon -- même contrat que les trois fonctions
+    remplacées, dont les appelants comptent les insertions.
+    """
+    if dedupe_on_description:
+        existing = db.execute(
+            "SELECT id,event_type FROM actor_events WHERE actor_id=? AND source_url=? AND description=?",
+            (actor_id, source_url, description),
+        ).fetchone()
+    else:
+        existing = db.execute(
+            "SELECT id,event_type FROM actor_events WHERE actor_id=? AND source_url=?",
+            (actor_id, source_url),
+        ).fetchone()
+    if existing:
+        if refresh_event_type and existing["event_type"] != event_type:
+            db.execute("UPDATE actor_events SET event_type=? WHERE id=?", (event_type, existing["id"]))
+        return 0
+    db.execute(
+        """INSERT INTO actor_events(actor_id,event_type,description,event_date,source_url,review_status,created_at)
+           VALUES(?,?,?,?,?,?,?)""",
+        (actor_id, event_type, description, event_date, source_url, review_status, utc_now()),
+    )
+    return 1
+
+
+def upsert_document(
+    db: sqlite3.Connection,
+    *,
+    document_type: str,
+    title: str,
+    source_url: str,
+    fingerprint_source: str,
+    actor_name: str | None = None,
+    published_at: str | None = None,
+    doi: str | None = None,
+    patent_number: str | None = None,
+    abstract: str | None = None,
+) -> tuple[int, int]:
+    """Écrit un document (publication, brevet) dans technology.db, dédoublonné sur son empreinte.
+
+    Remplace openalex._upsert_document et patent._upsert_patent_document, qui ne différaient que
+    par trois choses désormais passées en paramètres : le ``document_type``, la colonne
+    d'identité renseignée (``doi`` ou ``patent_number``) et la chaîne dont on dérive l'empreinte
+    (le DOI ou l'URL pour une publication, le numéro de brevet pour un brevet).
+
+    Renvoie ``(inséré, attribué)`` : le second compteur est le comportement utile hérité des deux
+    fonctions d'origine -- un document déjà vu SANS acteur (trouvé par une passe thématique, ou
+    par la collecte Crossref générique) se voit enfin rattacher son ``actor_name`` au lieu de
+    rester orphelin, sans être dupliqué pour autant.
+    """
+    fingerprint = hashlib.sha256(fingerprint_source.casefold().encode()).hexdigest()
+    stamp = utc_now()
+    # published_at vient toujours d'un champ structuré de l'API amont, jamais d'un repli
+    # fabriqué : 'published' vs 'observed_only' se décide donc sans ambiguïté dès l'écriture,
+    # contrairement à evidence/offers (voir scrapers.py). is_backfill compare cette date à
+    # `stamp`, qui EST le created_at de la ligne (première insertion, jamais réécrite ensuite).
+    date_confidence = "published" if published_at else "observed_only"
+    is_backfill = compute_is_backfill(stamp, published_at, date_confidence)
+    before = db.total_changes
+    db.execute(
+        """INSERT OR IGNORE INTO documents(
+               actor_name,document_type,title,source_url,published_at,doi,patent_number,abstract,
+               date_confidence,is_backfill,fingerprint,created_at,last_seen_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            actor_name, document_type, title, source_url, published_at, doi, patent_number, abstract,
+            date_confidence, is_backfill, fingerprint, stamp, stamp,
+        ),
+    )
+    if db.total_changes > before:
+        return 1, 0
+    db.execute("UPDATE documents SET last_seen_at=? WHERE fingerprint=?", (stamp, fingerprint))
+    if not actor_name:
+        return 0, 0
+    row = db.execute("SELECT actor_name FROM documents WHERE fingerprint=?", (fingerprint,)).fetchone()
+    if row and not row["actor_name"]:
+        db.execute("UPDATE documents SET actor_name=? WHERE fingerprint=?", (actor_name, fingerprint))
+        return 0, 1
+    return 0, 0
+
+
+def upsert_technology_signal(
+    db: sqlite3.Connection,
+    *,
+    fact_key: str,
+    axis: str,
+    maturity_stage: str,
+    bucket: str,
+    actor_names: list[str],
+    source_url: str,
+    quote: str,
+    field_confidence: float,
+    project_name: str | None = None,
+    source_title: str | None = None,
+) -> tuple[int, int]:
+    """Insère un signal technologique, ou fusionne ses acteurs s'il existe déjà.
+
+    Cœur commun à cordis._upsert_technology_signal (un axe pour un projet européen) et
+    scrapers.upsert_document_technology_signal (les axes détectés dans un document) : les deux
+    dérivaient leur ``fact_key`` différemment -- (axe, projet) contre (axe, URL du document) --
+    mais écrivaient ensuite exactement la même ligne, avec la même règle de fusion.
+
+    Cette règle est le point important : un même axe peut être porté par plusieurs acteurs d'un
+    même consortium, donc ``actor_names`` fusionne au lieu de dupliquer la ligne.
+
+    Renvoie ``(1 si créé sinon 0, id du signal)``. L'écriture de la ligne de preuve associée
+    (technology_signal_sources) reste à l'appelant : CORDIS en écrit une, la passe documentaire
+    non.
+    """
+    stamp = utc_now()
+    row = db.execute("SELECT id,actor_names FROM technology_signals WHERE fact_key=?", (fact_key,)).fetchone()
+    if row:
+        signal_id = int(row["id"])
+        if actor_names:
+            merged = sorted(set(json.loads(row["actor_names"] or "[]")) | set(actor_names))
+            db.execute(
+                "UPDATE technology_signals SET actor_names=?,updated_at=?,last_seen_at=? WHERE id=?",
+                (json.dumps(merged, ensure_ascii=False), stamp, stamp, signal_id),
+            )
+        return 0, signal_id
+    new_id = db.execute(
+        """INSERT INTO technology_signals(
+               axis,maturity_stage,bucket,project_name,actor_names,source_url,source_title,quote,
+               fact_key,fingerprint,review_status,field_confidence,created_at,updated_at,last_seen_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?,?)""",
+        (
+            axis, maturity_stage, bucket, project_name,
+            json.dumps(sorted(set(actor_names)), ensure_ascii=False),
+            source_url, source_title, quote, fact_key,
+            hashlib.sha256(fact_key.encode()).hexdigest(), field_confidence, stamp, stamp, stamp,
+        ),
+    ).lastrowid
+    assert new_id is not None  # garanti par sqlite3 juste après un INSERT AUTOINCREMENT réussi
+    return 1, int(new_id)
+
+
 def _normalize_domain(url: str) -> str:
     host = urlparse(url).netloc.casefold()
     return host[4:] if host.startswith("www.") else host

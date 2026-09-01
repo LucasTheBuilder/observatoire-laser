@@ -17,8 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import db as dbmod
+from db import upsert_actor_event
 from hybrid import SECTION_SCORES, ContentBlock, classify_source
-from scrapers import CAREER_ROLE_TERMS, _extract_career_signal, _select_market_sources, _upsert_career_event
+from scrapers import CAREER_ROLE_TERMS, _extract_career_signal, _select_market_sources
 from site_profiles import DEFAULT_SITE_PROFILE
 
 
@@ -159,7 +160,7 @@ class UpsertCareerEventTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             actors_db, actor_id = self._fresh_actors_db(tmp)
             with dbmod.connect(actors_db) as db:
-                added = _upsert_career_event(db, actor_id, "Process Engineer -- Ultrafast Laser", "https://example.test/careers/")
+                added = upsert_actor_event(db, actor_id, "hiring", "Process Engineer -- Ultrafast Laser", source_url="https://example.test/careers/", dedupe_on_description=True)
             self.assertEqual(1, added)
             row = dbmod.rows(actors_db, "SELECT event_type,review_status,description FROM actor_events WHERE actor_id=?", (actor_id,))[0]
             self.assertEqual("hiring", row["event_type"])
@@ -169,8 +170,8 @@ class UpsertCareerEventTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             actors_db, actor_id = self._fresh_actors_db(tmp)
             with dbmod.connect(actors_db) as db:
-                _upsert_career_event(db, actor_id, "Process Engineer -- Ultrafast Laser", "https://example.test/careers/")
-                _upsert_career_event(db, actor_id, "Photonics Engineer -- R&D", "https://example.test/careers/")
+                upsert_actor_event(db, actor_id, "hiring", "Process Engineer -- Ultrafast Laser", source_url="https://example.test/careers/", dedupe_on_description=True)
+                upsert_actor_event(db, actor_id, "hiring", "Photonics Engineer -- R&D", source_url="https://example.test/careers/", dedupe_on_description=True)
             count = dbmod.scalar(actors_db, "SELECT COUNT(*) FROM actor_events WHERE actor_id=?", (actor_id,))
             self.assertEqual(2, count)
 
@@ -178,8 +179,8 @@ class UpsertCareerEventTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             actors_db, actor_id = self._fresh_actors_db(tmp)
             with dbmod.connect(actors_db) as db:
-                first = _upsert_career_event(db, actor_id, "Process Engineer -- Ultrafast Laser", "https://example.test/careers/")
-                second = _upsert_career_event(db, actor_id, "Process Engineer -- Ultrafast Laser", "https://example.test/careers/")
+                first = upsert_actor_event(db, actor_id, "hiring", "Process Engineer -- Ultrafast Laser", source_url="https://example.test/careers/", dedupe_on_description=True)
+                second = upsert_actor_event(db, actor_id, "hiring", "Process Engineer -- Ultrafast Laser", source_url="https://example.test/careers/", dedupe_on_description=True)
             self.assertEqual(1, first)
             self.assertEqual(0, second)
 

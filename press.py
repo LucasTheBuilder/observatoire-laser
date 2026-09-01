@@ -41,7 +41,7 @@ from xml.etree import ElementTree
 import httpx
 from bs4 import BeautifulSoup, Tag
 
-from db import ACTORS_DB, connect, utc_now
+from db import ACTORS_DB, connect, upsert_actor_event, utc_now
 from http_client import connector_client
 
 FEED_URLS: dict[str, str] = {
@@ -178,27 +178,6 @@ def classify_press_event(title: str, description: str) -> str:
     return "press_mention"
 
 
-def _upsert_press_event(db, actor_id: int, event_type: str, description: str, event_date: str | None, source_url: str) -> int:
-    """Dédoublonne sur (actor_id, source_url) : le lien d'un article est stable, un run répété
-    ne recrée jamais le même événement -- même principe que cordis._upsert_actor_event. Une
-    reclassification (event_type a changé depuis la dernière collecte, ex: le mot-clé ajouté
-    plus tard) met à jour la ligne existante plutôt que de la laisser figée sur son ancien
-    type -- le lien reste la clé de dédoublonnage, le type peut s'affiner."""
-    existing = db.execute(
-        "SELECT id,event_type FROM actor_events WHERE actor_id=? AND source_url=?", (actor_id, source_url),
-    ).fetchone()
-    if existing:
-        if existing["event_type"] != event_type:
-            db.execute("UPDATE actor_events SET event_type=? WHERE id=?", (event_type, existing["id"]))
-        return 0
-    db.execute(
-        """INSERT INTO actor_events(actor_id,event_type,description,event_date,source_url,review_status,created_at)
-           VALUES(?,?,?,?,?,'pending',?)""",
-        (actor_id, event_type, description[:500], event_date, source_url, utc_now()),
-    )
-    return 1
-
-
 def collect_press_mentions() -> dict:
     """Point d'entrée (voir app.py: collectors["press"])."""
     with connect(ACTORS_DB) as db:
@@ -239,8 +218,9 @@ def collect_press_mentions() -> dict:
                             continue
                         label = SIGNAL_EVENT_LABELS[signal_type]
                         description = f"{label} ({feed_name}) : {title}"
-                        events_added += _upsert_press_event(
-                            db, actor_id, signal_type, description, item["event_date"], str(item["link"]),
+                        events_added += upsert_actor_event(
+                            db, actor_id, signal_type, description[:500], source_url=str(item["link"]),
+                            event_date=item["event_date"], refresh_event_type=True,
                         )
 
     return {
@@ -325,8 +305,9 @@ def collect_actor_feeds() -> dict:
                     signal_type = classify_press_event(title, item["description"] or "")
                     label = SIGNAL_EVENT_LABELS[signal_type]
                     description = f"{label} (flux propre) : {title}"
-                    added = _upsert_press_event(
-                        db, actor["id"], signal_type, description, item["event_date"], str(item["link"]),
+                    added = upsert_actor_event(
+                        db, actor["id"], signal_type, description[:500], source_url=str(item["link"]),
+                        event_date=item["event_date"], refresh_event_type=True,
                     )
                     events_added += added
                     if added:
