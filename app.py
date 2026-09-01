@@ -925,12 +925,24 @@ def actor_candidates_list(status: Literal["pending", "promoted", "rejected"] = "
            FROM actor_candidates WHERE review_status=? ORDER BY score DESC,last_seen_at DESC""",
         (status,),
     )
+    # Une seule requête pour TOUTES les sources, puis regroupement en Python -- même patron que
+    # list_actors(). Auparavant cette fonction bouclait sur les candidats en appelant rows() pour
+    # chacun : comme rows() ouvre une connexion SQLite par appel (mkdir + 2 PRAGMA + commit +
+    # close), 441 candidats en attente coûtaient 442 connexions et ~6,8 s par requête, soit plus
+    # que les 22 autres endpoints réunis.
+    sources_by_candidate: dict[int, list[dict[str, Any]]] = {}
+    for row in rows(
+        ACTORS_DB,
+        """SELECT s.candidate_id,s.source_type,s.context,s.source_url,s.created_at
+           FROM actor_candidate_sources s JOIN actor_candidates c ON c.id=s.candidate_id
+           WHERE c.review_status=? ORDER BY s.created_at""",
+        (status,),
+    ):
+        # candidate_id ne sert qu'au regroupement : retiré pour que la forme de chaque source
+        # renvoyée reste strictement celle d'avant.
+        sources_by_candidate.setdefault(row.pop("candidate_id"), []).append(row)
     for candidate in candidates:
-        candidate["sources"] = rows(
-            ACTORS_DB,
-            "SELECT source_type,context,source_url,created_at FROM actor_candidate_sources WHERE candidate_id=? ORDER BY created_at",
-            (candidate["id"],),
-        )
+        candidate["sources"] = sources_by_candidate.get(candidate["id"], [])
     return candidates
 
 
