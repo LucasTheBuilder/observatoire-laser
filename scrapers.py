@@ -1335,13 +1335,48 @@ def _ai_candidates(
     candidates: list[dict] = []
 
     for fact in facts[:AI_FACTS_PER_PAGE_LIMIT]:
+        # Audit du 01/09/2026 : `ai_fact_malformed` regroupait quatre échecs distincts sous un
+        # seul compteur, ce qui suffisait à savoir QUE le modèle produit du non-exploitable
+        # (20.6% des 359 faits examinés, et jusqu'à 32.5% sur la seule passe à l'échelle réelle)
+        # mais jamais POURQUOI -- donc impossible de choisir le correctif. Les sous-compteurs
+        # ci-dessous répondent à une question précise : est-ce la forme de la réponse (champ
+        # absent, type faux) ou l'index de bloc (le modèle renumérote 0..N alors que les index
+        # envoyés sont ceux de la liste COMPLÈTE des blocs, donc non contigus -- voir `relevant`
+        # plus haut) ? Le second cas se corrige par un enum sur block_index, le premier par un
+        # schéma typé ; instrumenter d'abord évite de concevoir le schéma contre une hypothèse.
+        #
+        # `ai_fact_malformed` reste incrémenté dans TOUS les cas, comme avant : c'est le total
+        # qui garde la télémétrie comparable aux passes antérieures (même raisonnement que
+        # AI_LOW_CONFIDENCE_MARK). Les sous-compteurs s'ajoutent, ils ne le remplacent pas.
+        if not isinstance(fact, dict):
+            _inc_diagnostic(diagnostics, "ai_fact_malformed")
+            _inc_diagnostic(diagnostics, "ai_fact_not_a_mapping")
+            continue
         try:
             original_index = int(fact["block_index"])
-            block, section = block_by_index[original_index]
-            quote = str(fact["quote"]).strip()
-            confidence = float(fact.get("confidence", 0))
         except (KeyError, ValueError, TypeError, IndexError):
             _inc_diagnostic(diagnostics, "ai_fact_malformed")
+            _inc_diagnostic(diagnostics, "ai_fact_block_index_invalid")
+            continue
+        if original_index not in block_by_index:
+            # L'index est un entier valide, mais ne fait pas partie de ceux envoyés : le modèle
+            # a désigné un bloc qu'il n'a jamais reçu. C'est l'hypothèse principale derrière la
+            # corrélation entre taux de malformés et nombre de blocs envoyés.
+            _inc_diagnostic(diagnostics, "ai_fact_malformed")
+            _inc_diagnostic(diagnostics, "ai_fact_block_index_unknown")
+            continue
+        block, section = block_by_index[original_index]
+        try:
+            quote = str(fact["quote"]).strip()
+        except (KeyError, TypeError, IndexError):
+            _inc_diagnostic(diagnostics, "ai_fact_malformed")
+            _inc_diagnostic(diagnostics, "ai_fact_quote_missing")
+            continue
+        try:
+            confidence = float(fact.get("confidence", 0))
+        except (ValueError, TypeError):
+            _inc_diagnostic(diagnostics, "ai_fact_malformed")
+            _inc_diagnostic(diagnostics, "ai_fact_confidence_invalid")
             continue
         if not quote or quote not in block.text:
             _inc_diagnostic(diagnostics, "ai_fact_quote_not_verbatim")

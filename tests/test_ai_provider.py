@@ -342,6 +342,80 @@ class AiCandidatesLowConfidenceTests(unittest.TestCase):
         self.assertEqual(1, diagnostics.get("ai_fact_quote_not_verbatim", 0))
 
 
+class AiCandidatesMalformedBreakdownTests(unittest.TestCase):
+    """Audit du 01/09/2026 : `ai_fact_malformed` regroupait quatre échecs distincts, donc on
+    savait QUE le modèle produit du non-exploitable (20.6% des faits examinés, 32.5% sur la
+    seule passe à l'échelle réelle) sans jamais savoir POURQUOI. Ces sous-compteurs séparent la
+    forme de la réponse (champ absent / type faux -> schéma typé) de l'index de bloc (le modèle
+    désigne un bloc qu'il n'a pas reçu -> enum sur block_index).
+
+    Contrat vérifié partout ici : le total `ai_fact_malformed` monte TOUJOURS en plus du
+    sous-compteur, pour rester comparable aux passes antérieures.
+    """
+
+    TEXT = "Femtosecond laser surface texturing of medical stents for production customers."
+
+    def _diagnostics_for(self, fact: dict | object) -> dict:
+        block = ContentBlock(heading="Medical stents", h2="Medical", text=self.TEXT, path="main > article")
+        diagnostics: dict[str, int] = {}
+        candidates = _ai_candidates(
+            "Example", "https://example.test/medical", "Applications", [block],
+            FakeAiClient([fact]), diagnostics,
+        )
+        self.assertEqual([], candidates)
+        # Le roll-up historique reste alimenté quel que soit le sous-cas.
+        self.assertEqual(1, diagnostics.get("ai_fact_malformed", 0))
+        return diagnostics
+
+    def test_a_fact_that_is_not_an_object_is_counted_as_such(self):
+        diagnostics = self._diagnostics_for("juste une chaîne au lieu d'un objet")
+        self.assertEqual(1, diagnostics.get("ai_fact_not_a_mapping", 0))
+
+    def test_missing_block_index_is_counted_as_invalid(self):
+        diagnostics = self._diagnostics_for({"quote": self.TEXT, "confidence": 0.9})
+        self.assertEqual(1, diagnostics.get("ai_fact_block_index_invalid", 0))
+
+    def test_non_numeric_block_index_is_counted_as_invalid(self):
+        diagnostics = self._diagnostics_for({"block_index": "premier", "quote": self.TEXT, "confidence": 0.9})
+        self.assertEqual(1, diagnostics.get("ai_fact_block_index_invalid", 0))
+
+    def test_block_index_the_model_never_received_is_counted_separately(self):
+        # L'hypothèse principale : un seul bloc a été envoyé (index 0), le modèle en désigne un
+        # autre. Distinguer ce cas d'un champ absent est tout l'intérêt du découpage -- c'est
+        # lui qui se corrige par un enum, et lui seul qui explique que le taux de malformés
+        # grimpe avec le nombre de blocs envoyés.
+        diagnostics = self._diagnostics_for({"block_index": 7, "quote": self.TEXT, "confidence": 0.9})
+        self.assertEqual(1, diagnostics.get("ai_fact_block_index_unknown", 0))
+        self.assertEqual(0, diagnostics.get("ai_fact_block_index_invalid", 0))
+
+    def test_missing_quote_is_counted_separately(self):
+        diagnostics = self._diagnostics_for({"block_index": 0, "confidence": 0.9})
+        self.assertEqual(1, diagnostics.get("ai_fact_quote_missing", 0))
+
+    def test_non_numeric_confidence_is_counted_separately(self):
+        diagnostics = self._diagnostics_for({"block_index": 0, "quote": self.TEXT, "confidence": "élevée"})
+        self.assertEqual(1, diagnostics.get("ai_fact_confidence_invalid", 0))
+
+    def test_a_well_formed_fact_triggers_no_malformed_counter_at_all(self):
+        # Non-régression : le découpage ne doit rejeter personne de plus qu'avant.
+        block = ContentBlock(heading="Medical stents", h2="Medical", text=self.TEXT, path="main > article")
+        diagnostics: dict[str, int] = {}
+        candidates = _ai_candidates(
+            "Example", "https://example.test/medical", "Applications", [block],
+            FakeAiClient([{
+                "block_index": 0, "market": "Médical", "component": "Stents", "operation": "Texturation",
+                "quote": self.TEXT, "confidence": 0.9,
+            }]),
+            diagnostics,
+        )
+        self.assertEqual(1, len(candidates))
+        self.assertNotIn("ai_fact_malformed", diagnostics)
+        self.assertEqual(
+            [], [key for key in diagnostics if key.startswith(("ai_fact_block_index", "ai_fact_quote_missing",
+                                                              "ai_fact_confidence_invalid", "ai_fact_not_a_mapping"))],
+        )
+
+
 class VocabularyCandidateUpsertTests(unittest.TestCase):
     def test_repeated_upsert_dedupes_by_fingerprint_and_bumps_last_seen(self):
         with tempfile.TemporaryDirectory() as tmp:
