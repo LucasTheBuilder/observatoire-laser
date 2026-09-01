@@ -1615,6 +1615,64 @@ def init_databases() -> None:
                 last_seen_at TEXT
             );
             CREATE INDEX IF NOT EXISTS demand_signals_published_idx ON demand_signals(published_at);
+
+            -- Taille de marché (§4.B.2 audit veille, 30/08/2026, Lot 4 §14) : "les chiffres de
+            -- marché laser publiés mélangent allègrement machines, services et composants" --
+            -- jamais moyennée entre sources, toujours affichée avec son périmètre exact. Saisie
+            -- semi-manuelle depuis un rapport public/communiqué d'analyste réel : source_url est
+            -- donc NOT NULL, il n'existe aucun mode "sans source" pour cette table. Rien n'est
+            -- pré-rempli -- market_sizing.py n'a ni collecteur ni valeur par défaut, seulement un
+            -- CRUD, exactement comme vocabulary_candidates -> custom_lexicon_entries.
+            CREATE TABLE IF NOT EXISTS market_sizing (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                value REAL NOT NULL,
+                currency TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                cagr REAL,
+                method TEXT,
+                source_url TEXT NOT NULL,
+                added_by TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS market_sizing_market_idx ON market_sizing(market);
+
+            -- Matrice de référence marché x composant x opération (§4.B.1 audit veille, Lot 4
+            -- §13) : "l'app ne peut afficher que ce qu'elle a trouvé ; elle ne peut pas afficher
+            -- ce que personne ne fait." Une cellule déclarée ici est une AMBITION (ce qui devrait
+            -- exister d'après le métier), indépendante de ce que evidence a réellement observé --
+            -- reference_matrix.py calcule le taux de couverture et les zones blanches en
+            -- comparant les deux, jamais en devinant une cellule à partir des faits déjà connus
+            -- (ça reviendrait à ne jamais pouvoir détecter une zone blanche).
+            CREATE TABLE IF NOT EXISTS market_reference_matrix (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market TEXT NOT NULL,
+                component TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                rationale TEXT,
+                added_by TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(market,component,operation)
+            );
+
+            -- Golden set (§5.H audit veille, Lot 4 §17) : "sur un golden set de 30 à 50 faits
+            -- vérifiés à la main [...], combien le pipeline retrouve-t-il ? À rejouer à chaque
+            -- évolution des lexiques -- le seul garde-fou contre une régression silencieuse."
+            -- Un fait golden est saisi à la main par un humain qui a vérifié la page lui-même ;
+            -- jamais copié depuis evidence (ça ferait du golden set une simple redite de ce que
+            -- le pipeline croit déjà, plus un vrai test de rappel indépendant).
+            CREATE TABLE IF NOT EXISTS golden_facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_name TEXT NOT NULL,
+                market TEXT NOT NULL,
+                component TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                expected_quote TEXT NOT NULL,
+                added_by TEXT,
+                created_at TEXT NOT NULL
+            );
             """
         )
         _add_columns(db, "vocabulary_candidates", dict(_REVIEW_TRACE_COLUMNS))

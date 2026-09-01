@@ -61,6 +61,12 @@ from actor_discovery import discover_actor_candidates, promote_candidate, reject
 from alerts import capture_alerts
 from capabilities import collect_capability_specs
 from cordis import collect_cordis
+from data_quality import (
+    add_golden_fact,
+    data_quality_report,
+    delete_golden_fact,
+    list_golden_facts,
+)
 from db import (
     ACTORS_DB,
     MARKET_DB,
@@ -85,9 +91,11 @@ from demand_signals import collect_demand_signals
 from firmographics import collect_french_registry
 from gleif import collect_gleif_group_identity
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
+from market_sizing import add_market_sizing, delete_market_sizing, list_market_sizing
 from openalex import collect_openalex_publications, discover_global_actor_candidates
 from patent import collect_patents
 from press import collect_actor_feeds, collect_press_mentions
+from reference_matrix import add_reference_cell, delete_reference_cell, list_reference_matrix
 from review_queue import REJECT_REASONS, decide_review_item, list_review_queue
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
@@ -1304,6 +1312,118 @@ def demand_signals_list():
         """SELECT signal_type,source,buyer_name,title,published_at,source_url
            FROM demand_signals ORDER BY published_at DESC""",
     )
+
+
+# --- Lot 4 §14/§13/§17 audit veille (30/08/2026) : infrastructure CRUD pour les trois dimensions
+# qui ont besoin d'un contenu réel saisi par un humain plutôt que d'un collecteur -- jamais de
+# valeur fabriquée, voir market_sizing.py/reference_matrix.py/data_quality.py pour le détail.
+
+class MarketSizingRequest(BaseModel):
+    market: str
+    scope: str
+    value: float
+    currency: str
+    year: int
+    cagr: float | None = None
+    method: str | None = None
+    source_url: str
+    added_by: str | None = None
+
+
+@app.get("/api/market-sizing")
+def market_sizing_list(market: str | None = None):
+    return list_market_sizing(market=market)
+
+
+@app.post("/api/market-sizing")
+def market_sizing_create(payload: MarketSizingRequest):
+    try:
+        entry_id = add_market_sizing(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": entry_id}
+
+
+@app.delete("/api/market-sizing/{entry_id}")
+def market_sizing_remove(entry_id: int):
+    try:
+        delete_market_sizing(entry_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"id": entry_id, "status": "deleted"}
+
+
+class ReferenceCellRequest(BaseModel):
+    market: str
+    component: str
+    operation: str
+    rationale: str | None = None
+    added_by: str | None = None
+
+
+@app.get("/api/reference-matrix")
+def reference_matrix_list():
+    """Chaque cellule de référence déclarée, avec son statut de couverture calculé contre les
+    faits marché réellement observés (voir reference_matrix.list_reference_matrix)."""
+    return list_reference_matrix()
+
+
+@app.post("/api/reference-matrix")
+def reference_matrix_create(payload: ReferenceCellRequest):
+    try:
+        cell_id = add_reference_cell(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": cell_id}
+
+
+@app.delete("/api/reference-matrix/{cell_id}")
+def reference_matrix_remove(cell_id: int):
+    try:
+        delete_reference_cell(cell_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"id": cell_id, "status": "deleted"}
+
+
+@app.get("/api/data-quality")
+def data_quality_endpoint():
+    """Les quatre indicateurs du §5.H audit veille : rappel (golden set), précision (faits
+    rejetés en revue par extraction_mode), latence de détection médiane, santé de couverture."""
+    return data_quality_report()
+
+
+class GoldenFactRequest(BaseModel):
+    actor_name: str
+    market: str
+    component: str
+    operation: str
+    source_url: str
+    expected_quote: str
+    added_by: str | None = None
+
+
+@app.get("/api/golden-facts")
+def golden_facts_list():
+    return list_golden_facts()
+
+
+@app.post("/api/golden-facts")
+def golden_facts_create(payload: GoldenFactRequest):
+    try:
+        fact_id = add_golden_fact(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": fact_id}
+
+
+@app.delete("/api/golden-facts/{fact_id}")
+def golden_facts_remove(fact_id: int):
+    try:
+        delete_golden_fact(fact_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"id": fact_id, "status": "deleted"}
 
 
 @app.get("/api/vocabulary-candidates")
