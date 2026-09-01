@@ -1004,6 +1004,7 @@ const ACTOR_TYPE_LABELS = {
   partenaire_adjacent: "Partenaire adjacent",
 };
 const BUSINESS_MODEL_LABELS = {equipment: "Équipement", service: "Service", process: "Procédé", research: "Recherche", internal: "Interne"};
+const RELATION_TYPE_LABELS = {partner: "Partenaire", supplier: "Fournisseur", client: "Client"};
 
 function cardSummaryLine(a) {
   const text = a.strategic_summary || a.role || "";
@@ -1128,6 +1129,43 @@ function factLine(f) {
   return `<li>${esc(f.value)}${f.source_url ? ` <a href="${esc(f.source_url)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`;
 }
 
+// revenue_eur/parent_group (actor_profile) restent NULL tant qu'aucune source n'est branchée
+// (voir firmographics.py) -- jamais fabriqués, juste affichés dès qu'ils existent. Les
+// investissements viennent des événements déjà classés event_type='investment' (press.py) :
+// pas une nouvelle collecte, seulement une vue dédiée pour ne plus les noyer dans la liste
+// chronologique générale des événements.
+function investmentEvents(a) { return (a.events || []).filter(e => e.event_type === "investment"); }
+
+function financialRows(a) {
+  const rows = [];
+  if (a.revenue_eur != null) rows.push(["Chiffre d'affaires", `${a.revenue_eur.toLocaleString("fr-FR")} €`]);
+  if (a.parent_group) rows.push(["Groupe", a.parent_group]);
+  return rows;
+}
+
+// Relations (partner/supplier/client, voir actor_relations) : jamais affichées sur la fiche
+// avant (seulement dans le graphe global /api/network, qui omet les acteurs pausés/candidats
+// et ne porte pas note/source_url par arête) -- ici groupées par type pour rester lisibles.
+function relationsByType(a) {
+  const groups = {};
+  for (const r of a.relations || []) (groups[r.relation_type] ||= []).push(r);
+  return groups;
+}
+
+function relationLine(r) {
+  return `<li>${esc(r.related_name)}${r.note ? ` — ${esc(r.note)}` : ""}${r.source_url ? ` <a href="${esc(r.source_url)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`;
+}
+
+// Brevets/publications/projets (documents.db, voir patent.py/openalex.py) : déjà collectés et
+// rattachés à l'acteur (documents.actor_name) mais jusqu'ici seulement visibles agrégés, sans
+// filtre par acteur, sur la page globale "Technologies futures" -- jamais sur la fiche elle-même.
+function documentsFor(a) { return (state.documents || []).filter(d => d.actor_name === a.name); }
+
+function documentLine(d) {
+  const extra = d.document_type === "patent" && d.patent_number ? ` (${esc(d.patent_number)})` : "";
+  return `<li>${d.published_at ? `<b>${esc(d.published_at)}</b> — ` : ""}${esc(d.title)}${extra}${d.source_url ? ` <a href="${esc(d.source_url)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`;
+}
+
 // Signaux structurés (audit Horizon 2 #13 : "Ajouter brevets, recrutements et investissements
 // comme signaux structurés") -- voir press.classify_press_event côté serveur. press_mention
 // (mention générique, sans mot-clé structurant détecté) n'a pas de badge : c'est le
@@ -1173,15 +1211,41 @@ function actorDetailContent(a) {
 
     ${firmographicsRows(a).length ? `<div class="detail-block"><h4>Identité entreprise</h4><ul class="fact-list">${firmographicsRows(a).map(([label, val]) => `<li><b>${esc(label)}</b> : ${esc(val)}</li>`).join("")}</ul>${a.registry_source_url ? `<a href="${esc(a.registry_source_url)}" target="_blank" rel="noopener" class="signal-link">Source registre ↗</a>` : ""}</div>` : ""}
 
-    ${capabilitySpecRows(a).length || (a.materials_qualified || []).length ? `<div class="detail-block"><h4>Capacités chiffrées</h4>${capabilitySpecRows(a).length ? `<ul class="fact-list">${capabilitySpecRows(a).map(([label, val, sourceUrl]) => `<li><b>${esc(label)}</b> : ${esc(val)}${sourceUrl ? ` <a href="${esc(sourceUrl)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`).join("")}</ul>` : ""}${(a.materials_qualified || []).length ? `<div class="subtheme-chips">${a.materials_qualified.map(m => `<span class="subtheme-chip">${esc(m)}</span>`).join("")}</div>${a.materials_qualified_source_url ? `<a href="${esc(a.materials_qualified_source_url)}" target="_blank" rel="noopener" class="signal-link">Source matériaux ↗</a>` : ""}` : ""}</div>` : ""}
+    <div class="detail-block">
+      <h4>Financier</h4>
+      ${financialRows(a).length ? `<ul class="fact-list">${financialRows(a).map(([label, val]) => `<li><b>${esc(label)}</b> : ${esc(val)}</li>`).join("")}</ul>` : ""}
+      ${investmentEvents(a).length ? `<ul class="fact-list">${investmentEvents(a).map(eventLine).join("")}</ul>` : ""}
+      ${!financialRows(a).length && !investmentEvents(a).length ? `<p class="coverage-note">Aucune donnée financière collectée pour cet acteur (chiffre d'affaires, levées de fonds) — aucune source n'est aujourd'hui branchée pour le chiffre d'affaires ; seules des mentions presse de levées de fonds peuvent alimenter cette section.</p>` : ""}
+    </div>
+
+    ${capabilitySpecRows(a).length || (a.materials_qualified || []).length ? `<div class="detail-block"><h4>Capacités chiffrées</h4>${a.capability_review_status === "review" ? `<p class="coverage-note" title="Audit veille §9.4/§10.12 item 0.8 : contrôle de plausibilité (raies laser connues, durées d'impulsion, tailles de motif/pièce)">⚠ ${esc(a.capability_review_note || "Valeur(s) écartée(s) par le contrôle de plausibilité, à vérifier.")}</p>` : ""}${capabilitySpecRows(a).length ? `<ul class="fact-list">${capabilitySpecRows(a).map(([label, val, sourceUrl]) => `<li><b>${esc(label)}</b> : ${esc(val)}${sourceUrl ? ` <a href="${esc(sourceUrl)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`).join("")}</ul>` : ""}${(a.materials_qualified || []).length ? `<div class="subtheme-chips">${a.materials_qualified.map(m => `<span class="subtheme-chip">${esc(m)}</span>`).join("")}</div>${a.materials_qualified_source_url ? `<a href="${esc(a.materials_qualified_source_url)}" target="_blank" rel="noopener" class="signal-link">Source matériaux ↗</a>` : ""}` : ""}</div>` : ""}
 
     ${differentiatorFacts(a).length ? `<div class="detail-block"><h4>Différenciateurs</h4><ul class="fact-list">${differentiatorFacts(a).map(f => factLine(f)).join("")}</ul></div>` : ""}
 
     ${certificationFacts(a).length ? `<div class="detail-block"><h4>Certifications</h4><ul class="fact-list">${certificationFacts(a).map(f => factLine(f)).join("")}</ul></div>` : ""}
 
+    ${(() => {
+      const docs = documentsFor(a);
+      if (!docs.length) return "";
+      const byType = {};
+      for (const d of docs) (byType[d.document_type] ||= []).push(d);
+      return `<div class="detail-block"><h4>Brevets &amp; publications</h4>${DOC_TYPE_ORDER.filter(t => byType[t]?.length).map(t =>
+        `<p class="coverage-note"><b>${esc(DOC_TYPE_LABELS[t] || t)}</b> (${byType[t].length})</p><ul class="fact-list">${byType[t].slice(0, 10).map(documentLine).join("")}</ul>`
+      ).join("")}</div>`;
+    })()}
+
     ${(a.events || []).length ? `<div class="detail-block"><h4>Événements</h4><ul class="fact-list">${a.events.map(eventLine).join("")}</ul></div>` : ""}
 
     ${a.parent_actor ? `<div class="detail-block"><h4>Mouvement capitalistique</h4><p class="actor-entity-note">Racheté par <b>${esc(a.parent_actor)}</b>${a.entity_note ? ` — ${esc(a.entity_note)}` : ""}</p></div>` : ""}
+
+    ${(() => {
+      const groups = relationsByType(a);
+      const types = Object.keys(groups);
+      if (!types.length) return "";
+      return `<div class="detail-block"><h4>Relations</h4>${types.map(t =>
+        `<p class="coverage-note"><b>${esc(RELATION_TYPE_LABELS[t] || t)}</b></p><ul class="fact-list">${groups[t].map(relationLine).join("")}</ul>`
+      ).join("")}</div>`;
+    })()}
 
     <div class="detail-block">
       <h4>Preuves</h4>
@@ -1199,6 +1263,7 @@ function actorDetailContent(a) {
     <div class="detail-block admin-block">
       <h4>Administration technique</h4>
       <div class="profile-line"><span class="profile-badge ${a.needs_reprofile ? "warning" : a.strategy}">${a.needs_reprofile ? "À recalibrer" : a.strategy === "adaptive" ? "Adaptatif" : "Générique"}</span><small>${a.profile_status === "ready" ? "Profil prêt" : a.profile_status === "partial" ? "Profil partiel" : a.profile_status === "degraded" ? "Mode dégradé" : "À cartographier"}</small></div>
+      ${a.generated_by ? `<p class="coverage-note">Profil de collecte construit par : <b>${a.generated_by === "deterministic" ? "règles déterministes (sans IA)" : `IA de secours (${esc(a.generated_by)})`}</b>${a.confidence != null ? `, confiance ${Math.round(a.confidence * 100)}%` : ""} — détermine quelles pages de son site sont considérées pertinentes pour l'extraction.</p>` : ""}
       <a href="${esc(a.official_url)}" target="_blank" rel="noopener" class="signal-link">Site officiel ↗</a>
     </div>`;
 }
@@ -2450,7 +2515,7 @@ async function refresh(){
     api("/api/market"),
     api("/api/offers"),
     api("/api/technology-signals"),
-    api("/api/documents"),
+    api("/api/documents?limit=500"),
     api("/api/actors"),
     api("/api/profiles"),
     api("/api/vocabulary-candidates"),

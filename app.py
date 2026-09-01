@@ -11,6 +11,7 @@ Organisation des endpoints (tous préfixés /api/, sauf `/` qui sert index.html)
   à la volée à partir des données déjà en base (aucun appel réseau).
 - /api/actors* : CRUD sur les acteurs suivis, leurs relations, leurs faits/événements sourcés.
 - /api/network : graphe acteurs <-> marchés <-> technologies pour la carte réseau du front.
+- /api/sources : registre des sources externes sollicitées (sources.py) et statut de leur clé API.
 - /api/profiles* : état des profils de crawl adaptatifs (site_profiles).
 - /api/market, /api/market/proofs : faits marché validés et leurs preuves sourcées.
 - /api/market/review* : file de relecture humaine des faits partiels/proposés par l'IA
@@ -99,6 +100,7 @@ from reference_matrix import add_reference_cell, delete_reference_cell, list_ref
 from review_queue import REJECT_REASONS, decide_review_item, list_review_queue
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
+from sources import list_sources
 from timeseries import capture_metric_snapshot, list_timeseries_keys, read_timeseries
 from veille_metrics import VEILLE_METRICS_THRESHOLDS, capture_veille_metrics
 from wayback_retrodating import retrodate_evidence_sources
@@ -616,12 +618,14 @@ def list_actors():
                                p.strategy,p.status AS profile_status,p.confidence,p.generated_by,p.needs_reprofile,p.health_score,
                                p.coverage_ready,p.coverage_discovered,
                                f.founded_year,f.legal_form_code,f.headcount_bracket_code,f.registry_name,f.source_url AS registry_source_url,
+                               f.revenue_eur,f.parent_group,
                                c.min_feature_size_um,c.tolerance_um,c.max_part_size_mm,c.throughput_units_per_h,
                                c.wavelengths_nm,c.pulse_duration_fs,c.materials_qualified,c.batch_size_range,
                                c.source_url AS capability_source_url,
                                c.min_feature_size_um_source_url,c.tolerance_um_source_url,c.max_part_size_mm_source_url,
                                c.throughput_units_per_h_source_url,c.wavelengths_nm_source_url,c.pulse_duration_fs_source_url,
-                               c.materials_qualified_source_url,c.batch_size_range_source_url
+                               c.materials_qualified_source_url,c.batch_size_range_source_url,
+                               c.review_status AS capability_review_status,c.review_note AS capability_review_note
                                FROM actors a LEFT JOIN site_profiles p ON p.actor_id=a.id
                                LEFT JOIN actor_profile f ON f.actor_id=a.id
                                LEFT JOIN capability_spec c ON c.actor_id=a.id
@@ -676,6 +680,13 @@ def list_actors():
     events_by_actor: dict[int, list[dict[str, Any]]] = {}
     for row in rows(ACTORS_DB, "SELECT actor_id,event_type,description,event_date,source_url FROM actor_events WHERE review_status='verified' ORDER BY event_date DESC,id"):
         events_by_actor.setdefault(row["actor_id"], []).append(row)
+    # Relations (partner/supplier/client, voir db.actor_relations) : alimentent déjà /api/network,
+    # mais ce graphe omet les acteurs pausés/candidats (jointure sur actors actifs+verified) et
+    # ne porte pas note/source_url par arête -- ici on les rattache à la fiche elle-même, sans
+    # cette restriction, pour qu'un acteur en pause garde ses relations visibles sur sa fiche.
+    relations_by_actor: dict[int, list[dict[str, Any]]] = {}
+    for row in rows(ACTORS_DB, "SELECT actor_id,related_name,relation_type,note,source_url FROM actor_relations ORDER BY relation_type,related_name"):
+        relations_by_actor.setdefault(row["actor_id"], []).append(row)
     # Scores séparés (audit Horizon 2 #14, voir scoring.py) : confidence_score répond à "peut-on
     # faire confiance aux données de cette fiche" (distinct de completeness_score, qui ne
     # mesure que leur PRÉSENCE) ; threat_score répond à "quel niveau de menace concurrentielle".
@@ -693,6 +704,7 @@ def list_actors():
         actor["coverage_level"] = _coverage_level(len(sources_by_actor.get(actor["name"], set())))
         actor["facts"] = facts_by_actor.get(actor["id"], [])
         actor["events"] = events_by_actor.get(actor["id"], [])
+        actor["relations"] = relations_by_actor.get(actor["id"], [])
         actor["confidence_score"] = confidence_scores.get(actor["name"])
         actor["threat_score"] = threat_scores.get(actor["name"], 0.0)
         actor.update(_completeness({
@@ -1246,6 +1258,13 @@ def collection_health():
     return {"actors": actors, "recent_runs": recent_runs[:20]}
 
 
+@app.get("/api/sources")
+def sources():
+    """Registre des sources externes sollicitées par l'app (sources.py) : une ligne par source
+    déjà connectée ou explicitement écartée, avec le statut de sa clé API le cas échéant."""
+    return {"sources": list_sources()}
+
+
 @app.get("/api/profiles/{actor_id}/sources")
 def profile_sources(actor_id: int):
     return rows(ACTORS_DB, """SELECT url,page_type,source_score,last_http_status,last_checked_at,last_title,
@@ -1603,7 +1622,7 @@ def documents(document_type: Literal["publication", "patent", "project", "other"
     params: tuple = (document_type, limit) if document_type else (limit,)
     return rows(
         TECH_DB,
-        f"""SELECT id,actor_name,document_type,title,source_url,published_at,doi,abstract,created_at
+        f"""SELECT id,actor_name,document_type,title,source_url,published_at,doi,patent_number,abstract,created_at
            FROM documents
            WHERE {clause}
            ORDER BY COALESCE(published_at,created_at) DESC
