@@ -26,7 +26,10 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
-files = ["app.py", "db.py", "scrapers.py", "hybrid.py", "site_profiles.py", "cordis.py", "firmographics.py", "openalex.py", "press.py", "capabilities.py"]
+files = ["app.py", "db.py", "scrapers.py", "hybrid.py", "site_profiles.py", "cordis.py", "firmographics.py", "openalex.py", "press.py", "capabilities.py",
+         # Chaine de la revue et de son analyse : ces modules etaient hors couverture, donc
+         # un "mypy au vert" ne disait rien d'eux.
+         "review_queue.py", "review_journal.py", "feedback_dossier.py", "analyst.py"]
 ignore_missing_imports = true
 # The codebase already carries rich type hints (PEP 604 unions, `from __future__ import
 # annotations`) but candidate/row dicts are intentionally dynamic (sqlite3.Row, scraped
