@@ -1974,14 +1974,33 @@ def _backup_one(path: Path, stamp: str) -> Path | None:
     return backup_path
 
 
+_AUTO_BACKUP_STAMP_RE = re.compile(r"^\d{8}T\d{6}Z$")
+
+
 def _prune_backups(stem: str, keep: int = BACKUP_RETENTION_COUNT) -> None:
-    """Keep only the ``keep`` most recent backups for one database (by filename, which sorts
-    chronologically thanks to the ISO-like timestamp suffix)."""
+    """Keep only the ``keep`` most recent AUTOMATIC backups for one database.
+
+    Only ``<stem>_<stamp>.db`` files are eligible, where <stamp> is the utc_now-style stamp
+    written by _backup_one -- those sort chronologically by name. Manually named checkpoints
+    (``market_pre_ontology_cleanup_...``) are left alone.
+
+    The glob used to be ``{stem}_*.db``, which swept those checkpoints in too. Sorting the
+    mixed list by name put every ``<stem>_pre_...`` above every ``<stem>_<digits>...`` ('p' >
+    '2'), so once a database had ``keep`` named checkpoints -- market and actors both had
+    exactly 14 -- the retention window was full of them and the backup that had JUST been
+    written was always the first thing deleted. backup_all_databases() then returned, and
+    printed, the path of a file it had already removed: every caller relying on it for a
+    rollback point (prune_off_topic_sources.py, backfill_match_terms.py, each scrape run) had
+    no rollback point at all, and no way to notice.
+    """
     backup_dir = _backup_dir()
     if not backup_dir.exists():
         return
-    candidates = sorted(backup_dir.glob(f"{stem}_*.db"), key=lambda p: p.name, reverse=True)
-    for stale in candidates[keep:]:
+    automatic = [
+        path for path in backup_dir.glob(f"{stem}_*.db")
+        if _AUTO_BACKUP_STAMP_RE.match(path.stem[len(stem) + 1:])
+    ]
+    for stale in sorted(automatic, key=lambda p: p.name, reverse=True)[keep:]:
         stale.unlink(missing_ok=True)
 
 

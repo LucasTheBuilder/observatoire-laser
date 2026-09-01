@@ -265,6 +265,33 @@ class BackupRotationTests(unittest.TestCase):
             finally:
                 dbmod.DATA_DIR = original_data_dir
 
+    def test_named_checkpoints_never_evict_the_backup_just_written(self):
+        """Reproduit la panne réelle du 01/09/2026 : market.db et actors.db avaient chacune 14
+        points de contrôle nommés `<stem>_pre_...`. L'ancien tri par nom les plaçait tous au-dessus
+        des sauvegardes horodatées ('p' > '2'), donc la fenêtre de rétention était pleine avant
+        même la nouvelle sauvegarde, qui était supprimée juste après avoir été écrite --
+        backup_all_databases() renvoyait alors le chemin d'un fichier déjà effacé."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            backups_dir = root / "backups"
+            backups_dir.mkdir()
+            original_data_dir = dbmod.DATA_DIR
+            try:
+                dbmod.DATA_DIR = root
+                for name in ("pre_ontology_cleanup", "pre_yalosys", "pre_audit_step1"):
+                    (backups_dir / f"market_{name}_20260825T000000Z.db").write_text("x")
+                fresh = backups_dir / "market_20260901T182557Z.db"
+                fresh.write_text("x")
+
+                dbmod._prune_backups("market", keep=3)
+
+                self.assertTrue(fresh.exists(), "la sauvegarde qui vient d'être prise doit survivre")
+                # Les points de contrôle nommés sont délibérés : la rétention automatique ne les
+                # compte pas et ne les supprime pas non plus.
+                self.assertEqual(3, len(list(backups_dir.glob("market_pre_*.db"))))
+            finally:
+                dbmod.DATA_DIR = original_data_dir
+
 
 if __name__ == "__main__":
     unittest.main()
