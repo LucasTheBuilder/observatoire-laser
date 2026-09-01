@@ -58,6 +58,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import review_journal
 from actor_discovery import discover_actor_candidates, promote_candidate, reject_candidate
 from alerts import capture_alerts
 from capabilities import collect_capability_specs
@@ -995,13 +996,20 @@ def actor_candidate_promote(candidate_id: int, payload: PromoteCandidateRequest)
     à défaut, la valeur suggérée par la source (candidate.suggested_official_url/country, ex:
     organizationURL/country réels de CORDIS) est utilisée si connue (voir
     actor_discovery.promote_candidate) -- jamais devinée si absente des deux côtés."""
+    snapshot = review_journal.snapshot_item("candidates", candidate_id)
     try:
-        return promote_candidate(
+        result = promote_candidate(
             candidate_id, official_url=payload.official_url, country=payload.country,
             role=payload.role, reviewed_by=payload.reviewed_by,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Promouvoir EST la décision d'accepter ce candidat -- l'acteur créé passera ensuite par sa
+    # propre file ('actors'), qui journalisera sa propre décision, distincte de celle-ci.
+    review_journal.record_decision(
+        "candidates", candidate_id, "accept", decided_by=payload.reviewed_by, snapshot=snapshot,
+    )
+    return result
 
 
 class RejectCandidateRequest(BaseModel):
@@ -1019,10 +1027,16 @@ def actor_candidate_reject(candidate_id: int, payload: RejectCandidateRequest):
     découverte (CORDIS, OpenAlex, liens sortants) qui a proposé le candidat."""
     if payload.reject_reason not in REJECT_REASONS:
         raise HTTPException(status_code=400, detail=f"reject_reason must be one of {REJECT_REASONS}")
+    snapshot = review_journal.snapshot_item("candidates", candidate_id)
     try:
-        return reject_candidate(candidate_id, reviewed_by=payload.reviewed_by, reject_reason=payload.reject_reason)
+        result = reject_candidate(candidate_id, reviewed_by=payload.reviewed_by, reject_reason=payload.reject_reason)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    review_journal.record_decision(
+        "candidates", candidate_id, "reject",
+        reject_reason=payload.reject_reason, decided_by=payload.reviewed_by, snapshot=snapshot,
+    )
+    return result
 
 
 # --- CRUD acteurs : les modèles Pydantic ci-dessous valident/documentent automatiquement le
@@ -1583,10 +1597,14 @@ def market_review(status: Literal["pending", "accepted", "rejected"] = "pending"
 def accept_market_review(evidence_id: int):
     """Valide un fait partiel/proposé par l'IA : il rejoint la matrice marché (/api/market)
     dès cet appel, avec fact_status='validated'."""
+    # Instantané pris avant l'écriture, comme dans review_queue.decide_review_item.
+    snapshot = review_journal.snapshot_item("evidence", evidence_id)
     try:
-        return accept_evidence_review(evidence_id)
+        result = accept_evidence_review(evidence_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    review_journal.record_decision("evidence", evidence_id, "accept", snapshot=snapshot)
+    return result
 
 
 class RejectMarketReviewRequest(BaseModel):
@@ -1605,12 +1623,17 @@ def reject_market_review(evidence_id: int, payload: RejectMarketReviewRequest):
     volumineuse était la seule à ne rien enseigner."""
     if payload.reject_reason not in REJECT_REASONS:
         raise HTTPException(status_code=400, detail=f"reject_reason must be one of {REJECT_REASONS}")
+    snapshot = review_journal.snapshot_item("evidence", evidence_id)
     try:
         reject_evidence_review(
             evidence_id, reviewed_by=payload.reviewed_by, reject_reason=payload.reject_reason
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    review_journal.record_decision(
+        "evidence", evidence_id, "reject",
+        reject_reason=payload.reject_reason, decided_by=payload.reviewed_by, snapshot=snapshot,
+    )
     return {"id": evidence_id, "status": "rejected", "reject_reason": payload.reject_reason}
 
 

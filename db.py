@@ -1736,6 +1736,38 @@ def _init_market_db() -> None:
                 added_by TEXT,
                 created_at TEXT NOT NULL
             );
+
+            -- Journal des décisions de revue, en APPEND-ONLY : une ligne par décision prise,
+            -- jamais mise à jour ni supprimée. Les colonnes reviewed_by/reviewed_at/
+            -- reject_reason posées sur chaque table restent la source pour "quel est l'état
+            -- actuel de cet item" ; ce journal répond à deux questions qu'elles ne peuvent pas
+            -- couvrir.
+            --
+            -- 1. L'HISTORIQUE. Une colonne ne garde qu'un état : un fait rejeté puis rouvert et
+            --    accepté ne laisse aucune trace de son premier passage, alors que c'est
+            --    exactement le genre de revirement dont une analyse des rejets doit tenir compte.
+            -- 2. LA SURVIE À LA DISPARITION DE LA LIGNE. _canonicalise_existing_evidence et
+            --    _migrate_evidence_fact_model SUPPRIMENT des lignes d'evidence en fusionnant les
+            --    doublons : la décision part avec elles, silencieusement.
+            --
+            -- D'où les colonnes d'instantané (actor_name/summary/source_url) : elles figent
+            -- l'identité métier de l'item au moment de la décision, pour que le journal reste
+            -- lisible seul quand la ligne d'origine n'existe plus. Pas de clé étrangère, à
+            -- dessein : les huit files vivent dans trois bases différentes, (queue,item_id) est
+            -- une référence logique et rien d'autre.
+            CREATE TABLE IF NOT EXISTS review_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue TEXT NOT NULL,
+                item_id INTEGER NOT NULL,
+                decision TEXT NOT NULL CHECK(decision IN ('accept','reject')),
+                reject_reason TEXT,
+                decided_by TEXT,
+                decided_at TEXT NOT NULL,
+                actor_name TEXT,
+                summary TEXT,
+                source_url TEXT
+            );
+            CREATE INDEX IF NOT EXISTS review_decisions_item_idx ON review_decisions(queue,item_id);
             """
         )
         _add_columns(db, "vocabulary_candidates", dict(_REVIEW_TRACE_COLUMNS))

@@ -39,7 +39,11 @@ def _patch_dbs(actors_db: Path, market_db: Path, tech_db: Path) -> ExitStack:
     needs -- its own rq.ACTORS_DB/MARKET_DB/TECH_DB, but ALSO db.MARKET_DB: for the evidence
     and vocabulary queues it delegates to db.accept_evidence_review/reject_evidence_review/
     accept_vocabulary_candidate/reject_vocabulary_candidate, which read db.py's own
-    module-level MARKET_DB, not review_queue's copy of the name."""
+    module-level MARKET_DB, not review_queue's copy of the name.
+
+
+    review_journal, lui, n'a rien à patcher : il lit db.MARKET_DB au moment de l'appel plutôt que
+    d'en garder une copie, précisément pour qu'un test ne puisse pas oublier de le rediriger."""
     stack = ExitStack()
     stack.enter_context(patch.object(rq, "ACTORS_DB", actors_db))
     stack.enter_context(patch.object(rq, "MARKET_DB", market_db))

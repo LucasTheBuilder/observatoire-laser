@@ -382,7 +382,13 @@ class ActorCandidateEndpointTests(unittest.TestCase):
                     ("New Laser Co", "NEW LASER CO", 1, dbmod.utc_now(), dbmod.utc_now()),
                 ).lastrowid
             payload = appmod.PromoteCandidateRequest(official_url="https://newlaserco.example/", country="France", role="Prestataire", reviewed_by="lucas")
-            with patch.object(ad, "ACTORS_DB", actors_db), patch.object(dbmod, "ACTORS_DB", actors_db):
+            # MARKET_DB est patché ici aussi depuis que promouvoir journalise la décision
+            # (review_journal écrit dans market.db) : sans ça le test écrirait dans la vraie base.
+            with (
+                patch.object(ad, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+            ):
                 result = appmod.actor_candidate_promote(candidate_id, payload)
             self.assertEqual("promoted", result["status"])
             actor_row = dbmod.rows(actors_db, "SELECT name FROM actors WHERE id=?", (result["actor_id"],))[0]

@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
+import review_journal
 from db import (
     ACTORS_DB,
     MARKET_DB,
@@ -365,6 +366,19 @@ def decide_review_item(
     if decision == "reject" and reject_reason not in REJECT_REASONS:
         raise ValueError(f"reject_reason must be one of {REJECT_REASONS} for a rejection")
 
+    # Instantané pris AVANT la décision : accepter un candidat vocabulaire le promeut, accepter
+    # un fait change son statut, et une fusion de doublons peut faire disparaître la ligne plus
+    # tard. Lire l'identité maintenant garantit que le journal reste lisible dans tous ces cas.
+    snapshot = review_journal.snapshot_item(queue, item_id)
+
+    def _journal() -> None:
+        # Appelé seulement après une écriture réussie -- jamais sur le chemin d'erreur, sinon le
+        # journal enregistrerait des décisions qui n'ont pas eu lieu.
+        review_journal.record_decision(
+            queue, item_id, decision, reject_reason=reject_reason if decision == "reject" else None,
+            decided_by=reviewed_by, snapshot=snapshot,
+        )
+
     if queue == "evidence":
         if decision == "accept":
             result = accept_evidence_review(item_id)
@@ -378,6 +392,7 @@ def decide_review_item(
             ).rowcount
         if not updated:
             raise ValueError(f"Evidence {item_id} not found")
+        _journal()
         return result
 
     if queue == "vocabulary":
@@ -391,6 +406,7 @@ def decide_review_item(
         updated = _mark_vocabulary_decision(item_id, reviewed_by=reviewed_by, reject_reason=reject_reason if decision == "reject" else None)
         if not updated:
             raise ValueError(f"Vocabulary candidate {item_id} not found")
+        _journal()
         return result
 
     review_status = _STATUS_MAP_3WAY[queue]["accepted" if decision == "accept" else "rejected"]
@@ -407,4 +423,5 @@ def decide_review_item(
     )
     if not updated:
         raise ValueError(f"{queue} item {item_id} not found")
+    _journal()
     return {"id": item_id, "queue": queue, "status": review_status}
