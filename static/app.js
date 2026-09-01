@@ -39,6 +39,11 @@ const state = {
   marketDrill: null,
   actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
   marketReviewFilters: {origin: "", factStatus: "", actor: ""},
+  // Échantillon d'audit : chargé à la demande (comme state.trends), parce qu'il dépend d'une
+  // configuration -- file auditée et taille du tirage -- et non d'un simple GET fixe.
+  auditSample: null,
+  auditLoading: false,
+  auditConfig: {queue: "offers", size: 30},
   // Séries temporelles (audit Horizon 2 #12) : chargées à la demande (pas dans refresh()) --
   // 85+ clés possibles (acteurs+marchés+axes), un fetch par clé au clic évite un chargement
   // initial disproportionné. keys/points restent en cache tant que la dimension/clé ne change
@@ -1740,9 +1745,106 @@ function reviewQueueCard(item) {
       <button class="vocab-accept" data-accept-review="${key}">✓ Valider</button>
       ${rejectReasonSelect(item.queue, key)}
       <button class="vocab-reject" data-reject-review="${key}">✕ Rejeter</button>
+      ${item.queue === "evidence" && detail.market && detail.component && detail.operation && detail.quote && detail.source_url
+        ? `<button class="export-btn" data-golden-from-queue="${key}" title="J'ai vérifié cette page moi-même : garder ce fait comme référence de non-régression.">★ Garder comme référence</button>`
+        : ""}
     </div>
     ${detail.source_url ? `<a class="signal-link" href="${esc(detail.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>` : ""}
   </article>`;
+}
+
+// Pendant de keepMarketReviewItemAsGoldenFact pour les cartes de la file unifiée (donc de
+// l'échantillon d'audit) : mêmes champs, lus dans `detail` au lieu de la ligne brute de
+// /api/market/review. Auditer un fait déjà accepté et le garder comme référence sont deux
+// gestes distincts -- le second dit « j'ai vérifié la page », pas seulement « ça a l'air bon ».
+async function keepQueueItemAsGoldenFact(queue, itemId, button) {
+  const sample = state.auditSample;
+  const item = (sample && sample.items || []).find(i => i.queue === queue && i.id === itemId);
+  if (!item) return;
+  const detail = item.detail || {};
+  try {
+    await api("/api/golden-facts", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        actor_name: item.actor_name, market: detail.market, component: detail.component,
+        operation: detail.operation, source_url: detail.source_url, expected_quote: detail.quote,
+        added_by: "échantillon d'audit",
+      }),
+    });
+    button.textContent = "★ Référence gardée";
+    button.disabled = true;
+    toast("Gardé comme référence de non-régression.");
+  } catch (error) { toast(error.message); }
+}
+
+// --- Échantillon d'audit -------------------------------------------------------------------
+// La file de revue ne montre que ce dont le pipeline a DOUTÉ. Ce qu'il a accepté seul -- 363
+// offres, 31 faits marché, 14 signaux, 117 faits acteurs, aucun avec reviewed_at -- ne passe
+// jamais devant personne. Une erreur systématique dans une règle confiante est donc invisible
+// par construction : c'est le pipeline qui choisit l'échantillon relu, avec la logique même qui
+// pourrait être fausse. Tirer au hasard dans la population acceptée est le seul moyen d'estimer
+// sa précision, et c'est le complément exact de la file, pas son remplacement.
+const AUDIT_QUEUE_LABELS = {
+  offers: "Offres / capacités",
+  evidence: "Faits marché",
+  tech_signals: "Signaux technologiques",
+  facts: "Faits acteurs",
+};
+
+const AUDIT_SIZES = [10, 30, 50, 80];
+
+async function loadAuditSample({render = true} = {}) {
+  state.auditLoading = true;
+  const {queue, size, seed} = state.auditConfig;
+  const seedParam = seed ? `&seed=${encodeURIComponent(seed)}` : "";
+  try {
+    state.auditSample = await api(`/api/review/sample?queue=${encodeURIComponent(queue)}&size=${size}${seedParam}`);
+  } catch (error) {
+    state.auditSample = {error: error.message, items: []};
+  }
+  state.auditLoading = false;
+  if (render) renderMarketReview();
+}
+
+function auditSampleTally(sample) {
+  if (!sample.audited) {
+    return `<p class="actor-summary-counts">${sample.population} ligne${sample.population > 1 ? "s" : ""} acceptée${sample.population > 1 ? "s" : ""} sans aucune relecture. Aucune n'a encore été auditée — la précision reste incalculable.</p>`;
+  }
+  const kept = sample.audited - sample.rejected;
+  const precision = Math.round((100 * kept) / sample.audited);
+  // Sous ~20 décisions le pourcentage bouge de plusieurs points à chaque clic : on l'affiche
+  // quand même (c'est le premier chiffre de précision que l'app ait jamais produit) mais en
+  // disant franchement qu'il n'est pas encore stable.
+  const caveat = sample.audited < 20
+    ? ` — encore trop peu pour être stable, continuez jusqu'à ~30`
+    : "";
+  return `<p class="actor-summary-counts"><b>Précision courante : ${precision} %</b> (${kept} confirmés / ${sample.audited} audités, ${sample.rejected} rejeté${sample.rejected > 1 ? "s" : ""})${caveat}</p>`
+    + `<p class="actor-summary-counts">${sample.population} ligne${sample.population > 1 ? "s" : ""} acceptée${sample.population > 1 ? "s" : ""} encore jamais relue${sample.population > 1 ? "s" : ""}.</p>`;
+}
+
+function auditSampleSection() {
+  const cfg = state.auditConfig;
+  const sample = state.auditSample;
+  const option = (value, label, selected) => `<option value="${esc(value)}" ${selected ? "selected" : ""}>${esc(label)}</option>`;
+  const controls = `<div class="actor-filters">
+    <div class="filter-group"><label>Population auditée</label><select id="audit-queue">
+      ${Object.entries(AUDIT_QUEUE_LABELS).map(([v, l]) => option(v, l, cfg.queue === v)).join("")}
+    </select></div>
+    <div class="filter-group"><label>Taille du tirage</label><select id="audit-size">
+      ${AUDIT_SIZES.map(n => option(String(n), `${n} lignes`, cfg.size === n)).join("")}
+    </select></div>
+    <div class="filter-group"><label>&nbsp;</label><button class="export-btn" data-audit-reshuffle>↻ Nouveau tirage</button></div>
+  </div>`;
+  let body;
+  if (state.auditLoading || !sample) body = `<div class="empty">Tirage en cours…</div>`;
+  else if (sample.error) body = `<div class="empty">${esc(sample.error)}</div>`;
+  else if (!sample.items.length) body = `<div class="empty">Rien à auditer dans cette population.</div>`;
+  else body = auditSampleTally(sample) + `<div class="vocab-list">${sample.items.map(reviewQueueCard).join("")}</div>`;
+  return `<section><div class="section-title"><div><span>✽</span><div><h2>Échantillon d'audit</h2>
+      <p>Tirage aléatoire dans ce que le pipeline a accepté <em>seul</em>, sans jamais le soumettre. La file ci-dessus ne montre que ce dont il a douté — une règle confiante mais fausse n'y apparaîtrait jamais. Le tirage est reproductible : un audit interrompu reprend sur le même échantillon.</p>
+    </div></div><b>${sample && !sample.error ? sample.items.length : "—"}</b></div>
+    ${controls}${body}
+  </section>`;
 }
 
 function reviewQueueSection(symbol, title, description, items) {
@@ -1769,7 +1871,27 @@ function renderMarketReview() {
         : `<div class="empty">Aucun fait ne correspond à ces filtres.</div>`)
     : `<div class="empty">Aucun fait marché en attente de revue.</div>`)
   + reviewQueueSection("◈", "Capacités à valider", "Offres/capacités extraites mais pas encore confirmées comme fait retenu.", state.reviewOffers || [])
-  + reviewQueueSection("⚑", "Événements à valider", "Événements datés (M&A, financement, mentions presse) détectés mais pas encore vérifiés — jamais visibles ailleurs dans l'app tant qu'ils restent ici.", state.reviewEvents || []);
+  + reviewQueueSection("⚑", "Événements à valider", "Événements datés (M&A, financement, mentions presse) détectés mais pas encore vérifiés — jamais visibles ailleurs dans l'app tant qu'ils restent ici.", state.reviewEvents || [])
+  + auditSampleSection();
+  // Chargement paresseux, même principe que state.trends : le premier passage sur la page
+  // déclenche le tirage, les suivants réutilisent l'échantillon déjà en mémoire (sans quoi il
+  // changerait à chaque re-render, donc à chaque décision).
+  if (!state.auditSample && !state.auditLoading) loadAuditSample();
+  const bindAudit = (id, key, cast = v => v) => {
+    const select = document.querySelector(id);
+    if (select) select.addEventListener("change", e => {
+      state.auditConfig[key] = cast(e.target.value);
+      loadAuditSample();
+    });
+  };
+  bindAudit("#audit-queue", "queue");
+  bindAudit("#audit-size", "size", Number);
+  document.querySelector("[data-audit-reshuffle]")?.addEventListener("click", () => {
+    // Un tirage neuf = une graine neuve. La graine par défaut est stable exprès (un audit
+    // interrompu doit reprendre sur le même échantillon) ; ce bouton est la sortie explicite.
+    state.auditConfig.seed = `audit-${Date.now()}`;
+    loadAuditSample();
+  });
   const bindFilter = (id, key) => {
     const select = document.querySelector(id);
     if (select) select.addEventListener("change", e => { state.marketReviewFilters[key] = e.target.value; renderMarketReview(); });
@@ -1790,6 +1912,10 @@ async function decideReviewItem(queue, itemId, decision, rejectReason) {
     toast(decision === "accept" ? "Validé." : "Rejeté.");
     if (queue === "offers") state.reviewOffers = (await api("/api/review?queue=offers")).items;
     if (queue === "events") state.reviewEvents = (await api("/api/review?queue=events")).items;
+    // Une décision peut venir de l'échantillon d'audit : il faut alors recharger le tirage (la
+    // ligne décidée sort de la population) ET le décompte, sinon la précision courante affichée
+    // resterait figée sur l'état d'avant le clic. `render: false` évite un double rendu.
+    if (state.auditSample) await loadAuditSample({render: false});
     renderMarketReview();
   } catch (error) { toast(error.message); }
 }
@@ -2556,6 +2682,10 @@ function wireActions(){
     decideMarketReview(Number(button.dataset.rejectMarketReview),"reject",select.value);
   }));
   document.querySelectorAll("[data-golden-from-review]").forEach(button=>button.addEventListener("click",()=>keepMarketReviewItemAsGoldenFact(Number(button.dataset.goldenFromReview),button)));
+  document.querySelectorAll("[data-golden-from-queue]").forEach(button=>button.addEventListener("click",()=>{
+    const [queue, id] = button.dataset.goldenFromQueue.split(":");
+    keepQueueItemAsGoldenFact(queue, Number(id), button);
+  }));
   document.querySelectorAll("[data-accept-review]").forEach(button=>button.addEventListener("click",()=>{
     const [queue, id] = button.dataset.acceptReview.split(":");
     decideReviewItem(queue, Number(id), "accept");

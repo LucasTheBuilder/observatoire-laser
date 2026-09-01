@@ -24,6 +24,7 @@ une nouvelle, symétrique.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Literal
 
@@ -176,7 +177,15 @@ def _list_evidence(status: str) -> list[dict]:
         items.append(_item(
             item_id=row["id"], queue="evidence", actor_name=row["actor_name"],
             summary=f"{row['market'] or '?'} / {row['component'] or '?'} / {row['operation'] or '?'}",
-            detail={"fact_status": row["fact_status"], "bucket": row["bucket"], "quote": row["quote"], "source_url": row["source_url"]},
+            # market/component/operation exposés séparément en plus de `summary` : l'échantillon
+            # d'audit propose « garder comme référence » sur les faits marché, et
+            # POST /api/golden-facts attend les trois dimensions distinctes. Les relire en
+            # reparsant `summary` côté JS ferait dépendre le golden set d'un format d'affichage.
+            detail={
+                "fact_status": row["fact_status"], "bucket": row["bucket"], "quote": row["quote"],
+                "source_url": row["source_url"], "market": row["market"],
+                "component": row["component"], "operation": row["operation"],
+            },
             confidence=confidence,
             priority=_priority(weights.get(row["actor_name"], _DEFAULT_COMPETITIVE_WEIGHT), impact, confidence),
             reviewed_by=row["reviewed_by"], reviewed_at=row["reviewed_at"], reject_reason=row["reject_reason"],
@@ -362,6 +371,58 @@ def list_review_queue(queue: str, status: Literal["pending", "accepted", "reject
     items = _LISTERS[queue](status)
     items.sort(key=lambda item: item["priority"], reverse=True)
     return items
+
+
+AUDIT_REVIEWED_BY = "audit"
+DEFAULT_AUDIT_SEED = "audit-1"
+
+
+def sample_review_queue(
+    queue: str, status: Literal["pending", "accepted", "rejected"] = "accepted",
+    *, size: int = 30, seed: str = DEFAULT_AUDIT_SEED,
+) -> dict[str, Any]:
+    """Échantillon ALÉATOIRE d'une file, pour auditer ce que le pipeline n'a jamais soumis.
+
+    La file de revue ne montre que ce dont le pipeline a DOUTÉ. Les lignes qu'il a acceptées
+    seul -- 363 offres, 31 faits marché, 14 signaux, 117 faits acteurs au 01/09/2026, aucune
+    avec ``reviewed_at`` -- ne passent jamais devant personne. Une erreur systématique dans une
+    règle confiante est donc invisible par construction : c'est le pipeline qui choisit
+    l'échantillon relu, avec la logique même qui pourrait être fausse. Tirer au hasard dans la
+    population acceptée est le seul moyen d'estimer sa précision.
+
+    Le tirage est REPRODUCTIBLE : classement par sha256(seed:queue:id), donc le même (seed,
+    size) redonne les mêmes items d'une session à l'autre -- un audit interrompu se reprend là
+    où il s'est arrêté au lieu de repartir sur un échantillon différent, ce qui invaliderait la
+    mesure. Changer ``seed`` tire un échantillon franchement neuf.
+
+    Les items déjà audités (``reviewed_at`` renseigné) sortent de la population : l'échantillon
+    se recharge donc en items encore jamais vus au fur et à mesure des décisions. ``population``
+    renvoie le nombre restant, ``audited``/``rejected`` le cumul déjà traité, de quoi afficher
+    une précision courante sans requête supplémentaire.
+    """
+    if queue not in _LISTERS:
+        raise ValueError(f"Unknown queue {queue!r} -- expected one of {QUEUES}")
+    if size < 1:
+        raise ValueError("size must be >= 1")
+    everything = _LISTERS[queue](status)
+    unaudited = [item for item in everything if not item["reviewed_at"]]
+    ranked = sorted(
+        unaudited,
+        key=lambda item: hashlib.sha256(f"{seed}:{queue}:{item['id']}".encode()).hexdigest(),
+    )
+    items = ranked[:size]
+    items.sort(key=lambda item: item["priority"], reverse=True)
+    # Les rejets quittent `status='accepted'`, donc ils ne sont pas dans `everything` : le cumul
+    # audité se lit sur les deux statuts, sans quoi la précision affichée n'aurait pas de
+    # dénominateur (et vaudrait toujours 100 %).
+    rejected_audited = [item for item in _LISTERS[queue]("rejected") if item["reviewed_at"]]
+    accepted_audited = [item for item in everything if item["reviewed_at"]]
+    return {
+        "queue": queue, "status": status, "seed": seed, "items": items,
+        "population": len(unaudited),
+        "audited": len(accepted_audited) + len(rejected_audited),
+        "rejected": len(rejected_audited),
+    }
 
 
 def _mark_offer_decision(item_id: int, *, review_status: str, reviewed_by: str | None, reject_reason: str | None) -> int:

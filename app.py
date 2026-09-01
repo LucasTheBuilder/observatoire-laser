@@ -100,12 +100,14 @@ from patent import collect_patents
 from press import collect_actor_feeds, collect_press_mentions
 from reference_matrix import add_reference_cell, delete_reference_cell, list_reference_matrix
 from review_queue import (
+    DEFAULT_AUDIT_SEED,
     REJECT_REASON_LABELS,
     REJECT_REASONS,
     REJECT_REASONS_BY_QUEUE,
     decide_review_item,
     list_review_queue,
     reasons_for_queue,
+    sample_review_queue,
 )
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
@@ -930,6 +932,30 @@ def review_queue_list(
     déjà `accepted`, actor_events/actor_facts n'avaient aucun filtre de revue, et les candidats
     acteurs n'étaient jamais exposés du tout."""
     return {"queue": queue, "status": status, "items": list_review_queue(queue, status)}
+
+
+@app.get("/api/review/sample")
+def review_queue_sample(
+    queue: Literal["evidence", "offers", "tech_signals", "events", "facts", "actors", "vocabulary"] = Query(...),
+    status: Literal["pending", "accepted", "rejected"] = "accepted",
+    size: int = Query(30, ge=1, le=200),
+    seed: str = DEFAULT_AUDIT_SEED,
+):
+    """Échantillon d'audit : tire au hasard dans ce que le pipeline a accepté SEUL.
+
+    Complément exact de /api/review, qui ne montre que ce dont le pipeline a douté. Ici on tire
+    dans la population qu'il n'a jamais soumise -- 363 offres acceptées sans un seul
+    `reviewed_at` au 01/09/2026 -- parce qu'une erreur dans une règle confiante ne peut pas
+    remonter autrement : c'est le pipeline qui choisit l'échantillon relu, avec la logique même
+    qui pourrait être fausse.
+
+    Tirage reproductible (voir review_queue.sample_review_queue) : un audit interrompu se
+    reprend sur le même échantillon. Renvoie aussi population/audited/rejected, de quoi afficher
+    une précision courante."""
+    try:
+        return sample_review_queue(queue, status, size=size, seed=seed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class ReviewDecisionRequest(BaseModel):

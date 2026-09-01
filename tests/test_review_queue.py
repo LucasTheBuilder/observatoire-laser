@@ -356,6 +356,77 @@ _EVIDENCE_CANDIDATE = {
 }
 
 
+class AuditSampleTests(unittest.TestCase):
+    """La file de revue ne montre que ce dont le pipeline a DOUTÉ. Ce qu'il accepte seul (363
+    offres au 01/09/2026, aucune avec reviewed_at) ne passe jamais devant personne : une erreur
+    dans une règle confiante est invisible par construction, puisque c'est le pipeline qui
+    choisit l'échantillon relu avec la logique même qui pourrait être fausse.
+    """
+
+    def _seed_accepted_offers(self, market_db, count: int) -> None:
+        with dbmod.connect(market_db) as db:
+            for i in range(count):
+                db.execute(
+                    """INSERT INTO offers(actor_name,offer_type,capability,operation,source_url,quote,
+                           fact_key,fingerprint,review_status,field_confidence,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
+                    ("Example", "service", f"capacité {i}", "Découpe", f"https://example.test/{i}",
+                     "citation", f"key-{i}", f"fp-{i}", 0.8, "2026-08-20", "2026-08-20"),
+                )
+
+    def test_the_same_seed_and_size_redraw_exactly_the_same_items(self):
+        # Un audit interrompu doit reprendre sur le MÊME échantillon : un tirage qui bouge à
+        # chaque rechargement ne mesure plus rien.
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            self._seed_accepted_offers(market_db, 40)
+            with _patch_dbs(actors_db, market_db, tech_db):
+                first = rq.sample_review_queue("offers", "accepted", size=10)
+                second = rq.sample_review_queue("offers", "accepted", size=10)
+        self.assertEqual(10, len(first["items"]))
+        self.assertEqual([i["id"] for i in first["items"]], [i["id"] for i in second["items"]])
+
+    def test_a_different_seed_draws_a_different_sample(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            self._seed_accepted_offers(market_db, 40)
+            with _patch_dbs(actors_db, market_db, tech_db):
+                a = rq.sample_review_queue("offers", "accepted", size=10, seed="audit-1")
+                b = rq.sample_review_queue("offers", "accepted", size=10, seed="audit-2")
+        self.assertNotEqual([i["id"] for i in a["items"]], [i["id"] for i in b["items"]])
+
+    def test_the_sample_only_draws_from_lines_no_human_has_reviewed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            self._seed_accepted_offers(market_db, 5)
+            with _patch_dbs(actors_db, market_db, tech_db):
+                rq.decide_review_item("offers", 1, "accept", reviewed_by="lucas")
+                sample = rq.sample_review_queue("offers", "accepted", size=10)
+        self.assertNotIn(1, [i["id"] for i in sample["items"]])
+        self.assertEqual(4, sample["population"])
+
+    def test_the_running_tally_counts_decisions_across_both_statuses(self):
+        # Un rejet quitte status='accepted' : sans le relire sur 'rejected', le dénominateur
+        # perdrait les rejets et la précision affichée vaudrait toujours 100 %.
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            self._seed_accepted_offers(market_db, 6)
+            with _patch_dbs(actors_db, market_db, tech_db):
+                rq.decide_review_item("offers", 1, "accept", reviewed_by="lucas")
+                rq.decide_review_item("offers", 2, "accept", reviewed_by="lucas")
+                rq.decide_review_item("offers", 3, "reject", reviewed_by="lucas", reject_reason="wrong_actor")
+                sample = rq.sample_review_queue("offers", "accepted", size=10)
+        self.assertEqual(3, sample["audited"])
+        self.assertEqual(1, sample["rejected"])
+        self.assertEqual(3, sample["population"])
+
+    def test_an_unknown_queue_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            with _patch_dbs(actors_db, market_db, tech_db), self.assertRaises(ValueError):
+                rq.sample_review_queue("nope", "accepted", size=10)
+
+
 class HumanDecisionSurvivesRecrawlTests(unittest.TestCase):
     """Audit du 01/09/2026, reproduit avant correctif : le crawler recalculait review_status (et
     pour l'evidence fact_status) à CHAQUE réobservation, sans regarder si un humain avait déjà
