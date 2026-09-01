@@ -342,6 +342,72 @@ class AiCandidatesLowConfidenceTests(unittest.TestCase):
         self.assertEqual(1, diagnostics.get("ai_fact_quote_not_verbatim", 0))
 
 
+class AiRelationStrengthTests(unittest.TestCase):
+    """Audit du 01/09/2026 : les 12 faits IA en base avaient tous relation_strength=NULL, alors
+    que le chemin déterministe gradue toujours la solidité du lien entre citation et dimensions.
+    Le relecteur ne pouvait donc pas distinguer « la citation le démontre » de « la page le
+    suggère » -- or c'est exactement le mode d'échec observé : le classement est souvent juste
+    et c'est la citation qui est mal choisie.
+    """
+
+    QUOTE_COMPLETE = "Femtosecond laser surface texturing of medical stents for production customers."
+
+    def test_a_quote_carrying_all_three_dimensions_is_direct(self):
+        block = ContentBlock(heading="Medical stents", h2="Medical", text=self.QUOTE_COMPLETE, path="main > article")
+        fake = FakeAiClient([{
+            "block_index": 0, "market": "Médical", "component": "Stents", "operation": "Texturation",
+            "quote": self.QUOTE_COMPLETE, "confidence": 0.9,
+        }])
+        candidates = _ai_candidates("Example", "https://example.test/medical", "Applications", [block], fake)
+        self.assertEqual("direct", candidates[0]["relation_strength"])
+
+    def test_a_market_carried_by_the_url_and_not_the_quote_is_page_context(self):
+        # Le cas réel qui a motivé ce correctif : LASEA #100, tiré de
+        # /applications/watch-hands-manufacturing/, correctement rangé en Luxe alors que la
+        # citation ne parle que de performance industrielle générique. Ici la citation porte
+        # composant et opération, mais le marché ne vient que de l'URL.
+        text = "Femtosecond laser microcutting of stents for production customers."
+        block = ContentBlock(heading="Découpe", h2="Découpe", text=text, path="main > article")
+        fake = FakeAiClient([{
+            "block_index": 0, "market": "Médical", "component": "Stents", "operation": "Microdécoupe",
+            "quote": text, "confidence": 0.9,
+        }])
+        candidates = _ai_candidates(
+            "Example", "https://example.test/applications/medical", "Applications", [block], fake,
+            page_market="Médical",
+        )
+        self.assertEqual(1, len(candidates))
+        self.assertEqual("page_context", candidates[0]["relation_strength"])
+
+    def test_without_any_page_hint_a_partly_supported_quote_stays_contextual(self):
+        text = "Femtosecond laser microcutting of stents for production customers."
+        block = ContentBlock(heading="Découpe", h2="Découpe", text=text, path="main > article")
+        fake = FakeAiClient([{
+            "block_index": 0, "market": "Médical", "component": "Stents", "operation": "Microdécoupe",
+            "quote": text, "confidence": 0.9,
+        }])
+        candidates = _ai_candidates("Example", "https://example.test/x", "Applications", [block], fake)
+        self.assertEqual("contextual", candidates[0]["relation_strength"])
+
+    def test_relation_strength_never_drops_a_fact(self):
+        # Garde-fou : qualifier la preuve ne doit JAMAIS filtrer. Refuser les faits que la
+        # citation ne prouve pas rétablirait le verrou que l'audit a levé (l'IA ne pouvait
+        # alors que confirmer les règles, jamais trouver ce qu'elles ratent).
+        text = "Femtosecond laser microcutting of stents for production customers."
+        block = ContentBlock(heading="Découpe", h2="Découpe", text=text, path="main > article")
+        fake = FakeAiClient([{
+            "block_index": 0, "market": "Médical", "component": "Stents", "operation": "Microdécoupe",
+            "quote": text, "confidence": 0.9,
+        }])
+        for page_market in (None, "Médical", "Aéronautique"):
+            with self.subTest(page_market=page_market):
+                candidates = _ai_candidates(
+                    "Example", "https://example.test/x", "Applications", [block], fake, page_market=page_market,
+                )
+                self.assertEqual(1, len(candidates))
+                self.assertIn(candidates[0]["relation_strength"], {"direct", "page_context", "contextual"})
+
+
 class AiCandidatesMalformedBreakdownTests(unittest.TestCase):
     """Audit du 01/09/2026 : `ai_fact_malformed` regroupait quatre échecs distincts, donc on
     savait QUE le modèle produit du non-exploitable (20.6% des faits examinés, 32.5% sur la

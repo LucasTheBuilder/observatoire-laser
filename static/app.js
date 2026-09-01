@@ -37,6 +37,7 @@ const state = {
   offerDrill: {family: null, level2: null, level3: null},
   marketDrill: null,
   actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
+  marketReviewFilters: {origin: "", factStatus: "", actor: ""},
   // Séries temporelles (audit Horizon 2 #12) : chargées à la demande (pas dans refresh()) --
   // 85+ clés possibles (acteurs+marchés+axes), un fetch par clé au clic évite un chargement
   // initial disproportionné. keys/points restent en cache tant que la dimension/clé ne change
@@ -1536,10 +1537,70 @@ function renderVocabulary() {
 // ET bucket in existing/radar), ces faits n'apparaissent nulle part ailleurs dans l'app tant
 // qu'ils ne sont pas traités ici -- voir app.py: /api/market/review.
 
-const MARKET_REVIEW_STATUS_LABELS = {partial: "Partiel · 2 dimensions sur 3", review: "Proposé par l'IA"};
+// fact_status ne dit RIEN de l'origine : 'review' signifie seulement « pas encore validé ».
+// L'ancienne étiquette "Proposé par l'IA" sur toute ligne 'review' était donc fausse -- sur les
+// 123 faits en attente au 01/09/2026, 53 sont 'review' mais 12 seulement viennent du modèle ;
+// les 41 autres n'ont pas d'extraction_mode enregistré ou sortent des règles. Juger la
+// précision de l'IA sur les 53 la sous-estimerait d'un facteur 4. L'origine réelle se lit dans
+// extraction_mode, et elle est affichée séparément (voir marketReviewMeta/marketReviewOrigin).
+const MARKET_REVIEW_STATUS_LABELS = {partial: "Partiel · 2 dimensions sur 3", review: "Proposé · 3 dimensions"};
 
 function marketReviewStatusLabel(item) {
   return MARKET_REVIEW_STATUS_LABELS[item.fact_status] || item.fact_status;
+}
+
+// Même règle que marketReviewMeta, qui n'affiche "IA : ..." que hors "block-rules" : tout mode
+// renseigné et différent des règles est un fournisseur de modèle ("anthropic:..."/"ollama:...").
+const MARKET_REVIEW_ORIGIN_LABELS = {ai: "IA", rules: "Règles déterministes", unknown: "Origine non renseignée"};
+
+function marketReviewOrigin(item) {
+  if (!item.extraction_mode) return "unknown";
+  return item.extraction_mode === "block-rules" ? "rules" : "ai";
+}
+
+function marketReviewMatchesFilters(item) {
+  const f = state.marketReviewFilters;
+  if (f.origin && marketReviewOrigin(item) !== f.origin) return false;
+  if (f.factStatus && item.fact_status !== f.factStatus) return false;
+  if (f.actor && item.actor_name !== f.actor) return false;
+  return true;
+}
+
+function marketReviewFilterBar(items) {
+  const f = state.marketReviewFilters;
+  const actors = [...new Set(items.map(i => i.actor_name))].sort();
+  const option = (value, label, selected) => `<option value="${esc(value)}" ${selected ? "selected" : ""}>${esc(label)}</option>`;
+  return `<div class="actor-filters">
+    <div class="filter-group"><label>Origine</label><select id="mr-origin">
+      ${option("", "Toutes", !f.origin)}
+      ${Object.entries(MARKET_REVIEW_ORIGIN_LABELS).map(([v, l]) => option(v, l, f.origin === v)).join("")}
+    </select></div>
+    <div class="filter-group"><label>Type</label><select id="mr-status">
+      ${option("", "Tous", !f.factStatus)}
+      ${option("partial", "Partiel · 2 dimensions sur 3", f.factStatus === "partial")}
+      ${option("review", "Proposé · 3 dimensions", f.factStatus === "review")}
+    </select></div>
+    <div class="filter-group"><label>Acteur</label><select id="mr-actor">
+      ${option("", "Tous", !f.actor)}
+      ${actors.map(a => option(a, a, f.actor === a)).join("")}
+    </select></div>
+  </div>`;
+}
+
+// Les compteurs portent TOUJOURS sur la file entière, jamais sur la vue filtrée : filtrer sert
+// à lire, pas à changer la mesure. Le nombre d'éléments réellement affichés est indiqué à part.
+function marketReviewCounts(items) {
+  const byStatus = {partial: 0, review: 0};
+  const byOrigin = {ai: 0, rules: 0, unknown: 0};
+  items.forEach(item => {
+    if (byStatus[item.fact_status] !== undefined) byStatus[item.fact_status]++;
+    byOrigin[marketReviewOrigin(item)]++;
+  });
+  const plural = n => (n > 1 ? "s" : "");
+  return `<p class="actor-summary-counts">${items.length} fait${plural(items.length)} en attente · `
+    + `${byStatus.partial} partiel${plural(byStatus.partial)} · ${byStatus.review} proposé${plural(byStatus.review)}</p>`
+    + `<p class="actor-summary-counts">Origine réelle : <b>${byOrigin.ai} IA</b> · `
+    + `${byOrigin.rules} règles déterministes · ${byOrigin.unknown} non renseignée</p>`;
 }
 
 function marketReviewDims(item) {
@@ -1548,12 +1609,24 @@ function marketReviewDims(item) {
     .join("");
 }
 
+// D'où vient réellement la preuve du fait -- la distinction qui manquait le plus au relecteur :
+// « la citation le démontre » n'est pas « la page le suggère ». Un fait en page_context peut
+// être parfaitement juste (une page /applications/medical/ porte son marché pour tous ses
+// blocs) ; il demande simplement d'aller vérifier sur la page plutôt que de se fier à l'extrait.
+const RELATION_STRENGTH_LABELS = {
+  direct: "la citation démontre les 3 dimensions",
+  structured: "structure de la page",
+  contextual: "contexte proche de la citation",
+  page_context: "porté par la page, pas par la citation",
+  partial: "partielle",
+};
+
 // mode/extraction_mode carries either "block-rules" (deterministic lexicon) or a provider tag
 // like "anthropic:claude-..."/"ollama:..." -- surfaced so a reviewer knows at a glance whether
 // they're checking a rules-based partial match or an AI proposal the lexicon couldn't confirm.
 function marketReviewMeta(item) {
   const parts = [];
-  if (item.relation_strength) parts.push(`Relation : ${item.relation_strength === "partial" ? "partielle" : esc(item.relation_strength)}`);
+  if (item.relation_strength) parts.push(`Preuve : ${RELATION_STRENGTH_LABELS[item.relation_strength] || esc(item.relation_strength)}`);
   if (item.extraction_mode && item.extraction_mode !== "block-rules") parts.push(`IA : ${esc(item.extraction_mode)}`);
   if (typeof item.field_confidence === "number") parts.push(`Confiance : ${Math.round(item.field_confidence * 100)}%`);
   // A handful of existing rows store the literal string "None" instead of a real NULL --
@@ -1660,18 +1733,29 @@ function reviewQueueSection(symbol, title, description, items) {
 
 function renderMarketReview() {
   const items = state.marketReview || [];
-  const partialCount = items.filter(i => i.fact_status === "partial").length;
-  const aiCount = items.filter(i => i.fact_status === "review").length;
+  const visible = items.filter(marketReviewMatchesFilters);
+  const filtered = visible.length !== items.length;
   content.innerHTML = header(
     "Administration",
     "Faits marché à valider",
-    "Faits où seules 2 des 3 dimensions marché/composant/opération sont reliées, ou proposés par l'IA sur un bloc que le lexique déterministe avait rejeté. Valider marque le fait comme retenu et le retire de cette file — un fait partiel reste toutefois incomplet et n'apparaîtra dans la matrice Marché que si les trois dimensions finissent par y être explicitement reliées."
+    "Faits où seules 2 des 3 dimensions marché/composant/opération sont reliées, ou proposés sur un bloc que le lexique déterministe avait rejeté. Valider marque le fait comme retenu et le retire de cette file — un fait partiel reste toutefois incomplet et n'apparaîtra dans la matrice Marché que si les trois dimensions finissent par y être explicitement reliées."
   ) +
   (items.length
-    ? `<p class="actor-summary-counts">${partialCount} partiel${partialCount > 1 ? "s" : ""} · ${aiCount} proposé${aiCount > 1 ? "s" : ""} par l'IA</p><div class="vocab-list">${items.map(marketReviewCard).join("")}</div>`
+    ? marketReviewCounts(items) + marketReviewFilterBar(items)
+      + (visible.length
+        ? (filtered ? `<p class="actor-summary-counts">${visible.length} affiché${visible.length > 1 ? "s" : ""} sur ${items.length}</p>` : "")
+          + `<div class="vocab-list">${visible.map(marketReviewCard).join("")}</div>`
+        : `<div class="empty">Aucun fait ne correspond à ces filtres.</div>`)
     : `<div class="empty">Aucun fait marché en attente de revue.</div>`)
   + reviewQueueSection("◈", "Capacités à valider", "Offres/capacités extraites mais pas encore confirmées comme fait retenu.", state.reviewOffers || [])
   + reviewQueueSection("⚑", "Événements à valider", "Événements datés (M&A, financement, mentions presse) détectés mais pas encore vérifiés — jamais visibles ailleurs dans l'app tant qu'ils restent ici.", state.reviewEvents || []);
+  const bindFilter = (id, key) => {
+    const select = document.querySelector(id);
+    if (select) select.addEventListener("change", e => { state.marketReviewFilters[key] = e.target.value; renderMarketReview(); });
+  };
+  bindFilter("#mr-origin", "origin");
+  bindFilter("#mr-status", "factStatus");
+  bindFilter("#mr-actor", "actor");
   wireActions();
 }
 

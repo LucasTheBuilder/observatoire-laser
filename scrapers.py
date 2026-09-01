@@ -1173,6 +1173,40 @@ def _validate_ai_value(value: object, allowed: set[str]) -> str:
     return text if text in allowed else "Non identifié"
 
 
+def _ai_relation_strength(quote: str, resolved: dict[str, str | None], page_market: str | None) -> str:
+    """Qualifie à quel point la CITATION retenue soutient elle-même le triplet d'un fait IA.
+
+    Audit du 01/09/2026 : les 12 faits IA en base avaient tous ``relation_strength`` à NULL. Le
+    chemin déterministe, lui, exige une fenêtre de relation validée qui RELIE les dimensions
+    entre elles, et la gradue (voir _relation_evidence) ; le chemin IA sautait entièrement ce
+    mécanisme et faisait confiance au modèle. C'est cette asymétrie qui explique le mode
+    d'échec dominant observé : le contrôle verbatim garantit que la citation est réelle, jamais
+    qu'elle SOUTIENT les libellés.
+
+    Le classement est d'ailleurs souvent juste et c'est la citation qui est mal choisie -- un
+    fait tiré de /applications/watch-hands-manufacturing/ est correctement rangé en « Luxe /
+    Composants horlogers » alors que la phrase citée ne parle que de performance industrielle
+    générique. Le fait paraissait alors reposer sur sa citation quand il repose sur la page.
+    ``page_context`` nomme exactement ce cas, comme il le fait déjà pour les règles.
+
+    Ne FILTRE rien : renseigne seulement la provenance. Refuser les faits que la citation ne
+    prouve pas reviendrait au verrou que l'audit a précisément levé (l'IA ne pouvait alors que
+    confirmer les règles, jamais trouver ce qu'elles ratent -- voir la docstring de
+    _ai_candidates).
+    """
+    in_quote = {
+        "market": _match_label(quote, MARKETS),
+        "component": _match_label(quote, COMPONENTS),
+        "operation": _match_label(quote, OPERATIONS),
+    }
+    supported = {key for key, value in resolved.items() if value and in_quote.get(key) == value}
+    if len(supported) == 3:
+        return "direct"
+    if "market" not in supported and page_market and resolved.get("market") == page_market:
+        return "page_context"
+    return "contextual"
+
+
 def _ai_mode_label(ollama: AiClient) -> str:
     """Étiquette de traçabilité stockée dans `mode` (ex: "anthropic:claude-...") pour savoir
     quel modèle/fournisseur a produit un candidat donné."""
@@ -1239,6 +1273,7 @@ def _ai_candidates(
     actor_name: str, url: str, title: str, blocks: list[ContentBlock], ollama: AiClient,
     diagnostics: dict[str, int] | None = None, exclude_indices: set[int] | None = None,
     source_date: str | None = None, date_confidence: str | None = None,
+    page_market: str | None = None,
 ) -> list[dict]:
     """AI fallback for market applications the deterministic lexicon rejected, with an
     open-vocabulary escape hatch (chantier 2 item 3).
@@ -1490,6 +1525,11 @@ def _ai_candidates(
             "block_path": block.path,
             "mode": mode,
             "confidence": min(0.98, max(0.0, confidence)),
+            # Provenance de la preuve, jamais un filtre -- voir _ai_relation_strength. Comble le
+            # relation_strength=NULL que portaient tous les faits IA, seule dimension où la file
+            # de revue ne pouvait pas distinguer « la citation le prouve » de « la page le
+            # suggère ».
+            "relation_strength": _ai_relation_strength(quote, resolved, page_market),
         })
     return candidates
 
@@ -2687,6 +2727,10 @@ def scrape_market(max_pages: int | None = None, actor_names: list[str] | None = 
                     for candidate in _ai_candidates(
                         source["name"], source_url, source_title, blocks, ollama, diagnostics,
                         exclude_indices=covered_indices, source_date=source_date, date_confidence=date_confidence,
+                        # Le marché "ambiant" de l'URL était déjà calculé pour _candidate() mais
+                        # jamais transmis ici : c'est lui qui permet de dire qu'un fait tient de
+                        # la page et non de sa citation (voir _ai_relation_strength).
+                        page_market=page_market,
                     ):
                         if candidate.get("kind") == "vocabulary_candidate":
                             vocabulary_candidates.append(candidate)
