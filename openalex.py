@@ -38,11 +38,12 @@ import httpx
 
 from actor_discovery import _known_actor_names_and_domains, _normalize_name, upsert_actor_candidate
 from db import ACTORS_DB, TECH_DB, compute_is_backfill, connect, utc_now
-from scrapers import CRAWLER_CONTACT, HEADERS, TECHNOLOGY_QUERIES, is_on_topic, upsert_document_technology_signal
+from http_client import CRAWLER_CONTACT, connector_client
+from scrapers import TECHNOLOGY_QUERIES, is_on_topic, upsert_document_technology_signal
 
 OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "").strip()
 OPENALEX_API = "https://api.openalex.org"
-OPENALEX_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
+
 OPENALEX_LOOKBACK_DAYS_DEFAULT = 365
 OPENALEX_WORKS_PER_ACTOR = 25
 # §4.D/§10.8 audit veille (30/08/2026, Lot 3 §3.2/§3.3) : recherche globale, indépendante de
@@ -224,7 +225,7 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
 
     matched_actors = added = attributed = off_topic = candidates_added = technology_signals_added = errors = 0
-    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=OPENALEX_TIMEOUT) as client:
+    with connector_client("api") as client:
         for actor in actors:
             try:
                 institution = _find_institution(client, actor["name"], actor["official_url"])
@@ -306,7 +307,7 @@ def discover_global_actor_candidates(lookback_days: int = 60) -> dict:
 
     works_scanned = works_on_topic = candidates_added = errors = 0
     seen_work_ids: set[str] = set()
-    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=OPENALEX_TIMEOUT) as client, connect(ACTORS_DB) as adb:
+    with connector_client("api") as client, connect(ACTORS_DB) as adb:
         for query in TECHNOLOGY_QUERIES:
             try:
                 works = _fetch_global_on_topic_works(client, query, from_date)

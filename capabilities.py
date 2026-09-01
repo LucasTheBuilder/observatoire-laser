@@ -59,11 +59,10 @@ import re
 from collections import defaultdict
 from typing import Any
 
-import httpx
-
 from db import ACTORS_DB, connect, utc_now
+from http_client import connector_client
 from hybrid import is_pdf_response, parse_document, parse_pdf_document
-from scrapers import HEADERS, MATERIALS, TIMEOUT, _fetch, _match_all_labels, _stored_blocks
+from scrapers import MATERIALS, _fetch, _match_all_labels, _stored_blocks
 from site_profiles import get_site_profile
 
 CAPABILITY_PAGE_TYPES = ("product", "equipment", "capability", "service", "about", "datasheet")
@@ -447,7 +446,7 @@ def collect_capability_specs() -> dict:
 
     actors_scanned = pages_analyzed = pages_fetched = profiles_added = profiles_updated = errors = 0
     certifications_added = cleanroom_facts_added = 0
-    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=TIMEOUT) as client:
+    with connector_client("crawl") as client:
         for actor_id, sources in by_actor.items():
             meta = actor_meta[actor_id]
             actors_scanned += 1

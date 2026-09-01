@@ -62,6 +62,7 @@ from db import (
     technology_signal_key,
     utc_now,
 )
+from http_client import HEADERS, TIMEOUTS
 from hybrid import (
     AnthropicClient,
     ContentBlock,
@@ -83,12 +84,10 @@ from site_profiles import SITE_OVERRIDES, crawl_budget, get_site_profile, seed_u
 
 AiClient = OllamaClient | AnthropicClient
 
-CRAWLER_CONTACT = os.getenv("CRAWLER_CONTACT", "").strip()
-USER_AGENT = "ObservatoireLaser/3.4.1-optimized (+local-relation deterministic crawler" + (
-    f"; contact: {CRAWLER_CONTACT})" if CRAWLER_CONTACT else ")"
-)
-HEADERS = {"User-Agent": USER_AGENT}
-TIMEOUT = httpx.Timeout(18.0, connect=8.0)
+# L'identité HTTP sortante vit dans http_client.py, partagée avec tous les connecteurs (voir le
+# docstring de ce module). Ces noms restent exposés ici parce que plusieurs modules les importent
+# depuis scrapers de longue date ; les nouveaux appelants doivent importer http_client.
+TIMEOUT = TIMEOUTS["crawl"]
 
 # Politeness: a fixed per-host delay plus bounded retries on transient failures. Both are
 # deliberately conservative defaults for small industrial/institutional sites that are not

@@ -26,10 +26,11 @@ import re
 import httpx
 
 from db import MARKET_DB, connect
+from http_client import connector_client
 
 CDX_API = "http://web.archive.org/cdx/search/cdx"
 WAYBACK_RAW_URL = "https://web.archive.org/web/{timestamp}id_/{url}"
-WAYBACK_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
 RETRODATING_BATCH_SIZE_DEFAULT = 20
 # Une citation complète (jusqu'à ~900 caractères ailleurs dans ce projet) risque de tomber sur
 # une balise HTML/un retour à la ligne qui la coupe en plein milieu dans un vieux snapshot --
@@ -114,7 +115,7 @@ def retrodate_evidence_sources(*, limit: int = RETRODATING_BATCH_SIZE_DEFAULT) -
         ).fetchall()
 
     scanned = dated = no_snapshots = not_found = errors = 0
-    with httpx.Client(timeout=WAYBACK_TIMEOUT) as client, connect(MARKET_DB) as db:
+    with connector_client("slow", follow_redirects=False) as client, connect(MARKET_DB) as db:
         for row in candidates:
             scanned += 1
             term_upper = _search_term(row["quote"])

@@ -42,13 +42,13 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from db import ACTORS_DB, connect, utc_now
-from scrapers import HEADERS
+from http_client import connector_client
 
 FEED_URLS: dict[str, str] = {
     "Laser Focus World": "https://www.laserfocusworld.com/__rss/website-scheduled-content.xml?input=%7B%22sectionAlias%22%3A%22home%22%7D",
     "Photonics Spectra": "https://www.photonics.com/rss.aspx",
 }
-FEED_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
+
 # Un nom d'acteur plus court que ça (une fois normalisé) est trop générique pour être cherché
 # sans risque dans du texte libre (titre/résumé d'article) -- même logique que
 # cordis.MIN_ALIAS_LENGTH, seuil relevé ici car la prose est plus permissive qu'un nom
@@ -208,7 +208,7 @@ def collect_press_mentions() -> dict:
     actor_ids = {actor["name"]: actor["id"] for actor in actors}
 
     feeds_ok = events_added = near_duplicates_skipped = errors = 0
-    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=FEED_TIMEOUT) as client:
+    with connector_client("api") as client:
         for feed_name, feed_url in FEED_URLS.items():
             try:
                 response = client.get(feed_url)
@@ -289,7 +289,7 @@ def collect_actor_feeds() -> dict:
         ]
 
     feeds_discovered = feeds_ok = events_added = near_duplicates_skipped = errors = 0
-    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=FEED_TIMEOUT) as client:
+    with connector_client("api") as client:
         for actor in actors:
             feed_url = actor["rss_feed_url"]
             if feed_url is None and actor["rss_feed_checked_at"] is None:

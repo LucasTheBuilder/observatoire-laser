@@ -41,13 +41,14 @@ import httpx
 
 from actor_discovery import _known_actor_names_and_domains, _normalize_name, upsert_actor_candidate
 from db import ACTORS_DB, TECH_DB, compute_is_backfill, connect, utc_now
+from http_client import connector_client
 
 EPO_OPS_KEY = os.getenv("EPO_OPS_KEY", "").strip()
 EPO_OPS_SECRET = os.getenv("EPO_OPS_SECRET", "").strip()
 
 OPS_TOKEN_URL = "https://ops.epo.org/3.2/auth/accesstoken"
 OPS_SEARCH_BIBLIO_URL = "https://ops.epo.org/3.2/rest-services/published-data/search/biblio"
-OPS_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
 
 # Format d'échange EPO (DOCDB) -- voir l'avertissement de vérification dans le docstring du module.
 EXCHANGE_NS = {"ex": "http://www.epo.org/exchange"}
@@ -229,7 +230,7 @@ def collect_patents(*, lookback_days: int = 365) -> dict:
     actors_matched = patents_added = patents_attributed = candidates_added = errors = 0
 
     try:
-        with httpx.Client(timeout=OPS_TIMEOUT) as client:
+        with connector_client("slow", follow_redirects=False) as client:
             token = _get_access_token(client)
 
             with connect(TECH_DB) as tech_db:

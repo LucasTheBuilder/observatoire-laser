@@ -29,13 +29,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import httpx
-
 from db import ACTORS_DB, connect, utc_now
-from scrapers import HEADERS
+from http_client import connector_client
 
 FRENCH_REGISTRY_API = "https://recherche-entreprises.api.gouv.fr/search"
-FRENCH_REGISTRY_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
+
 FRENCH_REGISTRY_LABEL = "France (INSEE/RNE, recherche-entreprises.api.gouv.fr)"
 
 # SIREN vérifié à la main, un par un, contre recherche-entreprises.api.gouv.fr (recoupé avec
@@ -112,7 +110,7 @@ def collect_french_registry() -> dict:
         }
 
     matched = added = updated = errors = 0
-    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=FRENCH_REGISTRY_TIMEOUT) as client:
+    with connector_client("api") as client:
         for actor_name, siren in FRENCH_REGISTRY_ALIASES.items():
             actor_id = actor_ids.get(actor_name)
             if not actor_id:

@@ -32,10 +32,10 @@ from __future__ import annotations
 import httpx
 
 from db import ACTORS_DB, connect, utc_now
-from scrapers import HEADERS
+from http_client import connector_client
 
 GLEIF_API = "https://api.gleif.org/api/v1"
-GLEIF_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
+
 # NB : la valeur "GLEIF (api.gleif.org, LEI)" était écrite dans actor_profile.registry_name
 # jusqu'à la séparation des colonnes lei_*. Elle ne sert plus qu'à identifier les lignes
 # héritées, dans db._migrate_lei_out_of_registry_columns -- plus aucune écriture ici.
@@ -123,7 +123,7 @@ def collect_gleif_group_identity() -> dict:
         }
 
     matched = added = updated = parent_groups_found = errors = 0
-    with httpx.Client(headers=HEADERS, timeout=GLEIF_TIMEOUT) as client:
+    with connector_client("api", follow_redirects=False) as client:
         for actor_name, lei in GLEIF_LEI_ALIASES.items():
             actor_id = actor_ids.get(actor_name)
             if not actor_id:

@@ -44,14 +44,15 @@ import httpx
 
 from actor_discovery import upsert_actor_candidate
 from db import ACTORS_DB, DATA_DIR, TECH_DB, connect, technology_signal_key, utc_now
-from scrapers import HEADERS, PROCESS_TECHNOLOGIES, _detect_maturity, _match_label_details, _quote, is_on_topic
+from http_client import connector_client
+from scrapers import PROCESS_TECHNOLOGIES, _detect_maturity, _match_label_details, _quote, is_on_topic
 
 CORDIS_PROJECTS_ZIP_URL = "https://cordis.europa.eu/data/cordis-HORIZONprojects-csv.zip"
 CORDIS_CACHE_PATH = DATA_DIR / "cordis_cache" / "horizon_projects.zip"
 # CORDIS republie ce jeu de données une fois par mois (voir la page du dataset sur
 # data.europa.eu, "Accrual Periodicity: monthly") -- inutile de le re-télécharger plus souvent.
 CORDIS_CACHE_MAX_AGE_DAYS = 25
-CORDIS_FETCH_TIMEOUT = httpx.Timeout(180.0, connect=15.0)
+# Telechargement du dump complet : profil "bulk" de http_client (voir TIMEOUTS).
 
 # Alias explicite quand le nom légal utilisé par CORDIS diffère du nom suivi dans l'app --
 # même principe que site_profiles.SITE_OVERRIDES : la liste reste courte et volontaire, jamais
@@ -126,7 +127,9 @@ def _ensure_cache(client: httpx.Client) -> Path:
         if age_days < CORDIS_CACHE_MAX_AGE_DAYS:
             return CORDIS_CACHE_PATH
     tmp_path = CORDIS_CACHE_PATH.with_suffix(".zip.part")
-    with client.stream("GET", CORDIS_PROJECTS_ZIP_URL, timeout=CORDIS_FETCH_TIMEOUT) as response:
+    # Pas de timeout par requête : le client est construit avec le profil "bulk" de
+    # http_client (180 s), calibré précisément pour ce téléchargement.
+    with client.stream("GET", CORDIS_PROJECTS_ZIP_URL) as response:
         response.raise_for_status()
         with open(tmp_path, "wb") as handle:
             for chunk in response.iter_bytes(chunk_size=1 << 20):
@@ -352,7 +355,7 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
         if cache_path is not None:
             zip_path = cache_path
         else:
-            with httpx.Client(headers=HEADERS, follow_redirects=True) as client:
+            with connector_client("bulk") as client:
                 zip_path = _ensure_cache(client)
     except Exception as exc:
         return {

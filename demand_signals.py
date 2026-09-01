@@ -46,11 +46,12 @@ from typing import Any
 import httpx
 
 from db import MARKET_DB, connect, utc_now
-from scrapers import HEADERS, TECHNOLOGY_QUERIES, is_on_topic
+from http_client import connector_client
+from scrapers import TECHNOLOGY_QUERIES, is_on_topic
 
 TED_SEARCH_URL = "https://api.ted.europa.eu/v3/notices/search"
 BOAMP_SEARCH_URL = "https://boamp-datadila.opendatasoft.com/api/explore/v2.0/catalog/datasets/boamp/records"
-DEMAND_SIGNALS_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
 DEMAND_SIGNALS_LOOKBACK_DAYS_DEFAULT = 180
 RESULTS_PER_QUERY = 10
 
@@ -158,7 +159,7 @@ def collect_demand_signals(*, lookback_days: int = DEMAND_SIGNALS_LOOKBACK_DAYS_
     from_date_iso = from_date.isoformat()
 
     ted_scanned = ted_added = boamp_scanned = boamp_added = errors = 0
-    with httpx.Client(headers=HEADERS, timeout=DEMAND_SIGNALS_TIMEOUT) as client, connect(MARKET_DB) as db:
+    with connector_client("slow", follow_redirects=False) as client, connect(MARKET_DB) as db:
         for query in TECHNOLOGY_QUERIES:
             try:
                 notices = _fetch_ted_notices(client, query, from_date_yyyymmdd)

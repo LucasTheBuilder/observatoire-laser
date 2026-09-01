@@ -111,7 +111,7 @@ class CollectFrenchRegistryTests(unittest.TestCase):
                         FRENCH_REGISTRY_ALIASES["IREPA LASER"], date_creation="1995-08-02", nature_juridique="9220", tranche="31",
                     )],
                 }
-                with patch.object(firmographics.httpx, "Client", FakeClient):
+                with patch.object(firmographics, "connector_client", lambda *a, **k: FakeClient()):
                     result = collect_french_registry()
 
                 self.assertEqual(3, result["matched"])
@@ -152,7 +152,7 @@ class CollectFrenchRegistryTests(unittest.TestCase):
                         FRENCH_REGISTRY_ALIASES["ALPHANOV"], date_creation="2006-11-24", nature_juridique="9220", tranche="22",
                     )],
                 }
-                with patch.object(firmographics.httpx, "Client", FakeClient):
+                with patch.object(firmographics, "connector_client", lambda *a, **k: FakeClient()):
                     first = collect_french_registry()
                     second = collect_french_registry()
 
@@ -176,7 +176,7 @@ class CollectFrenchRegistryTests(unittest.TestCase):
                 with dbmod.connect(actors_db) as db:
                     db.execute("DELETE FROM actors")  # none of the aliased actors exist any more
                 FakeClient.canned = {}
-                with patch.object(firmographics.httpx, "Client", FakeClient):
+                with patch.object(firmographics, "connector_client", lambda *a, **k: FakeClient()):
                     result = collect_french_registry()
                 self.assertEqual(0, result["matched"])
                 self.assertEqual(0, result["errors"])
@@ -198,7 +198,7 @@ class CollectFrenchRegistryTests(unittest.TestCase):
                         "000000000", date_creation="2006-11-24", nature_juridique="9220", tranche="22",
                     )],
                 }
-                with patch.object(firmographics.httpx, "Client", FakeClient):
+                with patch.object(firmographics, "connector_client", lambda *a, **k: FakeClient()):
                     result = collect_french_registry()
                 self.assertEqual(0, result["matched"])
                 self.assertEqual(1, result["errors"])
