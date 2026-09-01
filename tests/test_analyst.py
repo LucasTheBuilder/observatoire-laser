@@ -156,5 +156,51 @@ class ToolSchemaTests(unittest.TestCase):
             self.assertIn(widening, analyst.PROPOSAL_KINDS)
 
 
+class CostCapTests(unittest.TestCase):
+    """Le plafond du chemin d'extraction est CUMULATIF : il déclenche quand la dépense a déjà eu
+    lieu. L'analyste ne fait qu'un appel par passe, donc le sien doit s'appliquer EN AMONT, sur
+    le pire cas, sinon il ne protège de rien."""
+
+    def _client(self, model: str, input_tokens: int) -> analyst.AnalystClient:
+        client = analyst.AnalystClient.__new__(analyst.AnalystClient)
+        client.model = model
+        client._client = object()  # présence suffisante : aucun appel réseau n'est atteint
+        client.total_input_tokens = 0
+        client.total_output_tokens = 0
+        client.count_input_tokens = lambda *a, **k: input_tokens  # type: ignore[method-assign]
+        return client
+
+    def test_projection_covers_the_worst_case_output_not_just_the_input(self):
+        client = self._client("claude-opus-5", 10_000)
+        projected = client.projected_cost_usd("sys", "prompt", analyst.PROPOSAL_TOOL)
+        # 10k entrée à 5 $/M = 0,05 $ ; 16k sortie à 25 $/M = 0,40 $.
+        self.assertAlmostEqual(0.45, projected or 0, places=4)
+
+    def test_an_unpriced_model_fails_closed(self):
+        """Le plafond de l'extraction s'annulait en silence sur un modèle sans tarif
+        (`cost is not None and cost >= cap` -> False). Ne pas savoir ce que coûte un appel est
+        une raison de le refuser, pas de le laisser passer."""
+        client = self._client("modele-sans-tarif", 1_000)
+        self.assertIsNone(client.projected_cost_usd("sys", "prompt", analyst.PROPOSAL_TOOL))
+        with self.assertRaises(RuntimeError) as ctx:
+            client.propose("sys", "prompt", analyst.PROPOSAL_TOOL)
+        self.assertIn("Tarif inconnu", str(ctx.exception))
+
+    def test_an_oversized_dossier_is_refused_before_spending(self):
+        # 400k tokens d'entrée sur Opus 5 = 2 $ d'entrée seule, déjà au plafond.
+        client = self._client("claude-opus-5", 400_000)
+        with self.assertRaises(RuntimeError) as ctx:
+            client.propose("sys", "prompt", analyst.PROPOSAL_TOOL)
+        self.assertIn("plafond", str(ctx.exception))
+        self.assertEqual(0, client.total_input_tokens, "rien ne doit avoir été dépensé")
+
+    def test_a_normal_dossier_passes_the_cap(self):
+        """Une passe réaliste doit rester loin du plafond, sinon la garde bloquerait l'usage
+        normal au lieu du cas pathologique."""
+        client = self._client("claude-opus-5", 25_000)
+        projected = client.projected_cost_usd("sys", "prompt", analyst.PROPOSAL_TOOL)
+        self.assertLess(projected or 0, analyst.AI_COST_CAP_USD_PER_RUN)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1612,8 +1612,16 @@ def get_ai_client() -> OllamaClient | AnthropicClient:
 # it if ANTHROPIC_EXTRACTION_MODEL changes to a model not listed here.
 ANTHROPIC_PRICING_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.00, 5.00),
-    "claude-sonnet-5": (3.00, 15.00),
+    # 3.00/15.00 ici jusqu'au 01/09/2026 : c'est le tarif de Sonnet 4.6, pas celui de Sonnet 5.
+    # Pour un PLAFOND l'erreur allait dans le bon sens (couper trop tôt), mais le coût affiché
+    # dans /api/overview était surestimé de 50 %.
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-sonnet-4-6": (3.00, 15.00),
     "claude-opus-5": (5.00, 25.00),
+    "claude-opus-4-8": (5.00, 25.00),
+    "claude-opus-4-7": (5.00, 25.00),
+    "claude-opus-4-6": (5.00, 25.00),
+    "claude-fable-5": (10.00, 50.00),
 }
 
 

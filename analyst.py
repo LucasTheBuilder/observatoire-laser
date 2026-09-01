@@ -37,6 +37,11 @@ import anthropic
 from anthropic.types import ToolParam
 
 from feedback_dossier import build_feedback_dossier
+from hybrid import AI_COST_CAP_USD_PER_RUN, estimate_anthropic_cost_usd
+
+# Plafond de sortie d'un appel. Sert deux fois : à borner la réponse, et à calculer le PIRE CAS
+# de coût avant d'envoyer quoi que ce soit (voir projected_cost_usd).
+MAX_OUTPUT_TOKENS = 16000
 
 # Charge distincte de l'extraction, donc réglage distinct. L'extraction tourne en volume sur
 # chaque page (d'où Haiku) ; l'analyste tourne une fois par lot de décisions, sur une petite
@@ -168,9 +173,56 @@ class AnalystClient:
     def available(self) -> bool:
         return self._client is not None
 
+    def count_input_tokens(self, system: str, prompt: str, tool: ToolParam) -> int:
+        """Nombre exact de tokens d'entrée, via l'endpoint de comptage (non facturé).
+
+        Repli délibérément PESSIMISTE si le comptage échoue : ~2 caractères par token surestime
+        largement, donc un plafond calculé dessus coupe trop tôt plutôt que trop tard. Un garde
+        qui s'annule quand il n'arrive pas à mesurer ne garde rien."""
+        assert self._client is not None
+        try:
+            counted = self._client.messages.count_tokens(
+                model=self.model,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[tool],
+            )
+            return int(counted.input_tokens)
+        except anthropic.APIError:
+            return (len(system) + len(prompt) + len(json.dumps(tool))) // 2
+
+    def projected_cost_usd(self, system: str, prompt: str, tool: ToolParam) -> float | None:
+        """Coût du PIRE CAS de cet appel : entrée réelle + sortie saturée à MAX_OUTPUT_TOKENS.
+
+        Estimé AVANT d'envoyer. L'analyste ne fait qu'un appel par passe, donc un compteur
+        cumulatif comme celui de l'extraction ne protégerait de rien : quand il déclencherait,
+        la dépense aurait déjà eu lieu. Renvoie None si le modèle n'a pas de tarif connu.
+        """
+        input_tokens = self.count_input_tokens(system, prompt, tool)
+        return estimate_anthropic_cost_usd(self.model, input_tokens, MAX_OUTPUT_TOKENS)
+
     def propose(self, system: str, prompt: str, tool: ToolParam) -> dict[str, Any]:
         if not self._client:
             raise RuntimeError("ANTHROPIC_API_KEY absente : l'analyste ne peut pas fonctionner.")
+
+        # Même plafond que le chemin d'extraction (AI_COST_CAP_USD_PER_RUN), mais appliqué en
+        # AMONT plutôt qu'en cumul, pour la raison ci-dessus.
+        projected = self.projected_cost_usd(system, prompt, tool)
+        if projected is None:
+            # Un modèle absent d'ANTHROPIC_PRICING_PER_MTOK rendait le plafond de l'extraction
+            # silencieusement inopérant (`cost is not None and cost >= cap` -> False). Ici on
+            # échoue fermé : ne pas savoir ce que coûte un appel n'est pas une raison de le
+            # passer, c'en est une de refuser.
+            raise RuntimeError(
+                f"Tarif inconnu pour {self.model!r} : impossible de garantir le plafond de coût. "
+                f"Ajouter le modèle à hybrid.ANTHROPIC_PRICING_PER_MTOK ou en choisir un autre."
+            )
+        if projected >= AI_COST_CAP_USD_PER_RUN:
+            raise RuntimeError(
+                f"Appel refusé : coût projeté {projected:.2f} $ >= plafond {AI_COST_CAP_USD_PER_RUN:.2f} $ "
+                f"(AI_COST_CAP_USD_PER_RUN). Réduire le dossier envoyé ou relever le plafond."
+            )
+
         # tool_choice reste "auto" avec un outil unique, au lieu de forcer l'appel : forcer un
         # outil précis est incompatible avec le raisonnement étendu sur plusieurs modèles, et
         # l'analyste est précisément le cas où l'on veut laisser le modèle réfléchir. Avec un
@@ -178,7 +230,7 @@ class AnalystClient:
         # d'appel est traitée plus bas plutôt que supposée impossible.
         response = self._client.messages.create(
             model=self.model,
-            max_tokens=16000,
+            max_tokens=MAX_OUTPUT_TOKENS,
             system=system,
             messages=[{"role": "user", "content": prompt}],
             tools=[tool],
