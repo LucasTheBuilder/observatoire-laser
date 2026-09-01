@@ -90,6 +90,7 @@ from db import (
     update_actor_classification,
 )
 from demand_signals import collect_demand_signals
+from feedback_dossier import build_feedback_dossier
 from firmographics import collect_french_registry
 from gleif import collect_gleif_group_identity
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
@@ -1479,6 +1480,18 @@ def data_quality_endpoint():
     """Les quatre indicateurs du §5.H audit veille : rappel (golden set), précision (faits
     rejetés en revue par extraction_mode), latence de détection médiane, santé de couverture."""
     return data_quality_report()
+
+
+@app.get("/api/feedback-dossier")
+def feedback_dossier_endpoint(limit: int = 400):
+    """Ce que les décisions humaines disent du scraping : rejets avec leur provenance (motif
+    typé, citation, termes du lexique qui ont déclenché chaque dimension), contre-exemples
+    acceptés, et faits de référence NON retrouvés classés par cause.
+
+    Purement calculé en SQL, aucun appel de modèle -- c'est ce que lira l'agent d'analyse, mais
+    ça se lit très bien seul. Complémentaire de /api/data-quality, qui donne des taux : ici ce
+    sont les cas eux-mêmes, avec de quoi remonter à la règle en cause."""
+    return build_feedback_dossier(limit=limit)
 
 
 class GoldenFactRequest(BaseModel):
