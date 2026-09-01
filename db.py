@@ -1476,8 +1476,17 @@ def _init_market_db() -> None:
             # dimension de ce fait (voir scrapers._candidate). Calculés depuis toujours, jetés
             # jusqu'ici : sans eux, un rejet humain n'est rattachable à aucune règle, donc rien
             # ne peut être appris des rejets. NULL sur les lignes antérieures que le backfill
-            # (_backfill_evidence_match_terms) ne sait pas reconstituer.
+            # (backfill_match_terms.py) ne sait pas reconstituer.
             "match_terms": "TEXT",
+            # 1 = match_terms reconstitué après coup par backfill_match_terms.py, jamais observé
+            # à l'extraction. Ces lignes ne portent QUE les 3 dimensions de cœur : elles sont
+            # re-dérivées depuis relation_evidence, la fenêtre que _candidate() utilise pour le
+            # cœur -- la fenêtre `section` dont dépendent process/architecture/material/
+            # performance n'est stockée nulle part et ne peut donc pas être rejouée. Sans ce
+            # drapeau, comparer la fréquence de déclenchement d'une règle complémentaire entre
+            # lignes anciennes et récentes conclurait à tort qu'elle ne tire jamais sur les
+            # anciennes -- exactement le genre de mesure fausse que match_terms doit éviter.
+            "match_terms_backfilled": "INTEGER",
         })
         db.executescript(
             """
