@@ -2397,6 +2397,58 @@ def upsert_technology_signal(
     return 1, int(new_id)
 
 
+# Les trois tables de preuve qui partagent le même contrat : une citation sourcée rattachée à un
+# fait, dédoublonnée sur son empreinte. La clé étrangère et les colonnes acceptées sont listées
+# ici plutôt que déduites à l'exécution -- le nom de table entrant dans le SQL, il ne doit jamais
+# venir d'ailleurs que de cette table blanche.
+_FACT_SOURCE_TABLES: dict[str, tuple[str, frozenset[str]]] = {
+    "evidence_sources": ("evidence_id", frozenset({
+        "source_url", "source_title", "source_date", "quote", "is_verbatim", "language",
+        "block_heading", "block_path", "extraction_mode", "field_confidence",
+        "relation_strength", "relation_evidence", "source_role", "fingerprint", "created_at",
+    })),
+    "offer_sources": ("offer_id", frozenset({
+        "source_url", "source_title", "source_date", "quote", "is_verbatim", "language",
+        "block_heading", "block_path", "extraction_mode", "field_confidence",
+        "fingerprint", "created_at",
+    })),
+    "technology_signal_sources": ("signal_id", frozenset({
+        "source_url", "source_title", "quote", "language", "field_confidence",
+        "fingerprint", "created_at",
+    })),
+}
+
+
+def upsert_fact_source(db: sqlite3.Connection, table: str, fact_id: int, **fields: Any) -> int:
+    """Écrit une citation sourcée rattachée à un fait, sans jamais la dupliquer.
+
+    Le patron « un fait + ses preuves » est implémenté par trois tables au contrat identique
+    (evidence_sources, offer_sources, technology_signal_sources), chacune avec sa propre copie
+    du même INSERT OR IGNORE + comptage via total_changes. Cette fonction les remplace : les
+    champs non pertinents pour une table donnée sont simplement ignorés, ce qui évite d'écrire
+    trois signatures différentes pour la même opération.
+
+    N'inclut délibérément PAS actor_candidate_sources : cette table porte (source_type, context)
+    et ni citation ni empreinte -- elle décrit d'où vient un candidat, pas ce qui prouve un fait.
+    L'aligner supposerait une migration de schéma, pas un simple partage de code.
+
+    Renvoie 1 si une ligne a été insérée, 0 si l'empreinte était déjà connue.
+    """
+    if table not in _FACT_SOURCE_TABLES:
+        raise ValueError(f"Table de preuve inconnue : {table!r} (attendues : {sorted(_FACT_SOURCE_TABLES)})")
+    fact_id_column, allowed = _FACT_SOURCE_TABLES[table]
+    fields.setdefault("created_at", utc_now())
+    payload = {k: v for k, v in fields.items() if k in allowed}
+    columns = [fact_id_column, *payload]
+    placeholders = ",".join("?" for _ in columns)
+    before = db.total_changes
+    db.execute(
+        f"INSERT OR IGNORE INTO {table}({','.join(columns)}) VALUES({placeholders})",
+        (fact_id, *payload.values()),
+    )
+    return int(db.total_changes > before)
+
+
 def _normalize_domain(url: str) -> str:
     host = urlparse(url).netloc.casefold()
     return host[4:] if host.startswith("www.") else host

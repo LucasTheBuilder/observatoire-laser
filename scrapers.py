@@ -60,6 +60,7 @@ from db import (
     technology_signal_key,
     upsert_actor_event,
     upsert_document,
+    upsert_fact_source,
     upsert_technology_signal,
     utc_now,
 )
@@ -2334,21 +2335,19 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
     # the fact was observed again. Keeping both is essential for monthly-delta reporting.
     db.execute("UPDATE evidence SET last_seen_at=? WHERE id=?", (stamp, evidence_id))
 
-    before = db.total_changes
-    db.execute(
-        """INSERT OR IGNORE INTO evidence_sources(
-               evidence_id,source_url,source_title,source_date,quote,is_verbatim,language,block_heading,block_path,extraction_mode,field_confidence,relation_strength,relation_evidence,source_role,
-               fingerprint,created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            evidence_id, candidate["url"], candidate["title"], candidate.get("source_date"), candidate["quote"],
-            int(candidate.get("is_verbatim", True)), language_from_url(candidate["url"]),
-            candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
-            candidate.get("relation_strength"), candidate.get("relation_evidence"), candidate.get("source_role"),
-            candidate["source_fingerprint"], stamp,
-        ),
+    source_added = upsert_fact_source(
+        db, "evidence_sources", evidence_id,
+        source_url=candidate["url"], source_title=candidate["title"],
+        source_date=candidate.get("source_date"), quote=candidate["quote"],
+        is_verbatim=int(candidate.get("is_verbatim", True)),
+        language=language_from_url(candidate["url"]),
+        block_heading=candidate["block_heading"], block_path=candidate["block_path"],
+        extraction_mode=candidate["mode"], field_confidence=candidate["confidence"],
+        relation_strength=candidate.get("relation_strength"),
+        relation_evidence=candidate.get("relation_evidence"),
+        source_role=candidate.get("source_role"),
+        fingerprint=candidate["source_fingerprint"], created_at=stamp,
     )
-    source_added = int(db.total_changes > before)
     return fact_added, source_added
 
 
@@ -2449,18 +2448,16 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
     # even when this pass's own confidence doesn't beat the stored field_confidence.
     db.execute("UPDATE offers SET last_seen_at=?,review_status=? WHERE id=?", (stamp, review_status, offer_id))
 
-    before = db.total_changes
-    db.execute(
-        """INSERT OR IGNORE INTO offer_sources(
-               offer_id,source_url,source_title,source_date,quote,is_verbatim,language,block_heading,block_path,extraction_mode,field_confidence,fingerprint,created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            offer_id, candidate["url"], candidate["title"], candidate.get("source_date"), candidate["quote"],
-            int(candidate.get("is_verbatim", True)), language_from_url(candidate["url"]),
-            candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"], candidate["source_fingerprint"], stamp,
-        ),
+    source_added = upsert_fact_source(
+        db, "offer_sources", offer_id,
+        source_url=candidate["url"], source_title=candidate["title"],
+        source_date=candidate.get("source_date"), quote=candidate["quote"],
+        is_verbatim=int(candidate.get("is_verbatim", True)),
+        language=language_from_url(candidate["url"]),
+        block_heading=candidate["block_heading"], block_path=candidate["block_path"],
+        extraction_mode=candidate["mode"], field_confidence=candidate["confidence"],
+        fingerprint=candidate["source_fingerprint"], created_at=stamp,
     )
-    source_added = int(db.total_changes > before)
     return fact_added, source_added
 
 

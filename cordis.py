@@ -49,6 +49,7 @@ from db import (
     connect,
     technology_signal_key,
     upsert_actor_event,
+    upsert_fact_source,
     upsert_technology_signal,
     utc_now,
 )
@@ -309,14 +310,13 @@ def _upsert_technology_signal(db, *, axis: str, project: dict[str, str], actor_n
         source_title=project.get("title"),
     )
 
-    source_fingerprint = hashlib.sha256(f"{fact_key}|{source_url}|{quote}".encode()).hexdigest()
-    before = db.total_changes
-    db.execute(
-        """INSERT OR IGNORE INTO technology_signal_sources(signal_id,source_url,source_title,quote,language,field_confidence,fingerprint,created_at)
-           VALUES(?,?,?,?,?,?,?,?)""",
-        (signal_id, source_url, project.get("title"), quote, "en", 0.9, source_fingerprint, stamp),
+    source_added = upsert_fact_source(
+        db, "technology_signal_sources", signal_id,
+        source_url=source_url, source_title=project.get("title"), quote=quote,
+        language="en", field_confidence=0.9,
+        fingerprint=hashlib.sha256(f"{fact_key}|{source_url}|{quote}".encode()).hexdigest(),
+        created_at=stamp,
     )
-    source_added = int(db.total_changes > before)
     return added, source_added
 
 
