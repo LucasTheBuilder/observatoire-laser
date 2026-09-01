@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 import app as appmod
 import db as dbmod
 import review_queue as rq
+import scrapers
 
 
 def _setup(tmp: str) -> tuple[Path, Path, Path]:
@@ -325,6 +326,113 @@ class ReviewEndpointTests(unittest.TestCase):
                 with self.assertRaises(appmod.HTTPException) as ctx:
                     appmod.review_queue_decide("evidence", evidence_id, payload)
             self.assertEqual(400, ctx.exception.status_code)
+
+
+_OFFER_CANDIDATE = {
+    "actor": "Example", "offer_type": "service", "capability": "soudage laser", "operation": "assemblage",
+    "process": "fiber", "material": None, "performance": None, "stage": "production", "page_type": "service",
+    "url": "https://example.test/services/soudage", "title": "Soudage laser", "source_date": "2026-01-01",
+    "quote": "Nous réalisons le soudage laser de composants pour l'assemblage de batteries.",
+    "is_verbatim": True, "evidence_type": "claim", "date_confidence": "published",
+    "fact_key": "example|service|soudage laser|assemblage|fiber", "fingerprint": "off-fp1",
+    "source_fingerprint": "off-sfp1", "confidence": 0.83, "block_heading": "Soudage",
+    "block_path": "/main/section[1]", "mode": "block-rules",
+}
+
+_EVIDENCE_CANDIDATE = {
+    "actor": "Example", "bucket": "existing", "market": "Médical", "component": "Stents",
+    "operation": "Découpe", "stage": "production", "url": "https://example.test/marches/medical",
+    "title": "Médical", "source_date": "2026-01-01",
+    "quote": "Nous découpons des stents pour l'industrie médicale.", "is_verbatim": True,
+    "evidence_type": "claim", "date_confidence": "published",
+    "fact_key": "example|existing|medical|stents|decoupe",
+    "application_key": "example|medical|stents|decoupe", "fingerprint": "ev-fp1",
+    "source_fingerprint": "ev-sfp1", "block_heading": "Marchés", "block_path": "/main",
+    "mode": "block-rules", "confidence": 0.60,
+}
+
+
+class HumanDecisionSurvivesRecrawlTests(unittest.TestCase):
+    """Audit du 01/09/2026, reproduit avant correctif : le crawler recalculait review_status (et
+    pour l'evidence fact_status) à CHAQUE réobservation, sans regarder si un humain avait déjà
+    tranché. Un fait rejeté redevenait donc 'accepted' à la collecte suivante, son reject_reason
+    toujours collé dessus -- et repassait dans la matrice marché et le scoring.
+
+    La garde teste `reviewed_at IS NULL`. Elle couvre les DEUX colonnes de statut : la matrice,
+    le scoring et les séries temporelles filtrent sur fact_status='validated' sans jamais
+    regarder review_status (app.py:375-377, timeseries.py:121), donc ne protéger que
+    review_status laissait quand même ressortir un fait rejeté.
+    """
+
+    def test_offer_rejected_through_the_unified_queue_stays_rejected_after_a_recrawl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            with _patch_dbs(actors_db, market_db, tech_db):
+                with dbmod.connect(market_db) as db:
+                    scrapers._upsert_offer_candidate(db, _OFFER_CANDIDATE)
+                    # Deuxième source distincte : l'offre franchit le seuil qui la ferait
+                    # basculer en 'accepted' toute seule -- c'est précisément ce qui écrasait
+                    # le rejet.
+                    scrapers._upsert_offer_candidate(db, dict(
+                        _OFFER_CANDIDATE, url="https://example.test/actu/soudage", source_fingerprint="off-sfp2",
+                    ))
+                rq.decide_review_item("offers", 1, "reject", reviewed_by="lucas", reject_reason="wrong_actor")
+                with dbmod.connect(market_db) as db:
+                    scrapers._upsert_offer_candidate(db, _OFFER_CANDIDATE)
+                    row = db.execute("SELECT review_status,reject_reason,last_seen_at FROM offers WHERE id=1").fetchone()
+        self.assertEqual("rejected", row["review_status"])
+        self.assertEqual("wrong_actor", row["reject_reason"])
+        # last_seen_at continue d'être rafraîchi : savoir qu'une offre rejetée est toujours en
+        # ligne reste une information, ce n'est pas une remise en cause du rejet.
+        self.assertIsNotNone(row["last_seen_at"])
+
+    def test_evidence_rejected_through_the_legacy_endpoint_survives_being_re_seen_as_validated(self):
+        # Chemin HÉRITÉ (/api/market/review/{id}/reject -> db.reject_evidence_review), celui de
+        # l'écran marché. Il ne posait pas reviewed_at avant ce correctif, donc la garde
+        # n'aurait pas reconnu ses décisions : c'était le trou principal.
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            with _patch_dbs(actors_db, market_db, tech_db):
+                with dbmod.connect(market_db) as db:
+                    scrapers._upsert_market_candidate(db, dict(_EVIDENCE_CANDIDATE, fact_status="review"))
+                dbmod.reject_evidence_review(1)
+                with dbmod.connect(market_db) as db:
+                    scrapers._upsert_market_candidate(db, dict(_EVIDENCE_CANDIDATE, fact_status="validated"))
+                    row = db.execute("SELECT review_status,fact_status,reviewed_at FROM evidence WHERE id=1").fetchone()
+        self.assertEqual("rejected", row["review_status"])
+        # Le point décisif : sans la garde sur fact_status, le fait rejeté ressortait dans la
+        # matrice marché, qui ne filtre que sur cette colonne.
+        self.assertNotEqual("validated", row["fact_status"])
+        self.assertIsNotNone(row["reviewed_at"])
+
+    def test_evidence_rejected_stays_rejected_when_re_seen_with_higher_confidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            with _patch_dbs(actors_db, market_db, tech_db):
+                with dbmod.connect(market_db) as db:
+                    scrapers._upsert_market_candidate(db, dict(_EVIDENCE_CANDIDATE, fact_status="review"))
+                dbmod.reject_evidence_review(1)
+                with dbmod.connect(market_db) as db:
+                    scrapers._upsert_market_candidate(db, dict(_EVIDENCE_CANDIDATE, fact_status="review", confidence=0.95))
+                    row = db.execute("SELECT review_status,field_confidence FROM evidence WHERE id=1").fetchone()
+        # Avant le correctif il repassait en 'review' et revenait dans la file, à re-rejeter
+        # indéfiniment.
+        self.assertEqual("rejected", row["review_status"])
+        # Les données, elles, restent rafraîchies : rejeter fige la DÉCISION, pas la preuve.
+        self.assertAlmostEqual(0.95, row["field_confidence"])
+
+    def test_a_row_no_human_ever_reviewed_is_still_promoted_normally(self):
+        # Non-régression : la garde ne doit rien figer d'autre que les décisions humaines.
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            with _patch_dbs(actors_db, market_db, tech_db):
+                with dbmod.connect(market_db) as db:
+                    scrapers._upsert_market_candidate(db, dict(_EVIDENCE_CANDIDATE, fact_status="review"))
+                    scrapers._upsert_market_candidate(db, dict(_EVIDENCE_CANDIDATE, fact_status="validated"))
+                    row = db.execute("SELECT review_status,fact_status,reviewed_at FROM evidence WHERE id=1").fetchone()
+        self.assertEqual("accepted", row["review_status"])
+        self.assertEqual("validated", row["fact_status"])
+        self.assertIsNone(row["reviewed_at"])
 
 
 if __name__ == "__main__":

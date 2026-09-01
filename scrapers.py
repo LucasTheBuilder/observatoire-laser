@@ -2316,8 +2316,20 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
         # Validity is independent from maturity and from confidence ranking: a fresh deterministic
         # relation may validate an older review fact even when its numeric confidence is not higher.
         if candidate.get("fact_status") == "validated":
+            # Une décision humaine (reviewed_at renseigné) n'est JAMAIS réécrite par une
+            # réobservation -- audit du 01/09/2026, reproduit : un fait rejeté que le pipeline
+            # revoyait comme 'validated' repassait 'accepted' au crawl suivant, avec son
+            # reject_reason encore collé dessus. La garde couvre fact_status ET review_status :
+            # la matrice marché, le scoring et les séries temporelles filtrent sur
+            # fact_status='validated' SANS regarder review_status (app.py:375-377,
+            # timeseries.py:121), donc ne protéger que review_status laissait quand même le
+            # fait rejeté ressortir en production. `bucket` reste mis à jour : la maturité est
+            # une donnée observée, pas une décision de revue.
             db.execute(
-                "UPDATE evidence SET fact_status='validated',review_status='accepted',bucket=?,updated_at=? WHERE id=?",
+                """UPDATE evidence SET
+                       fact_status=CASE WHEN reviewed_at IS NULL THEN 'validated' ELSE fact_status END,
+                       review_status=CASE WHEN reviewed_at IS NULL THEN 'accepted' ELSE review_status END,
+                       bucket=?,updated_at=? WHERE id=?""",
                 (effective_bucket, stamp, evidence_id),
             )
         if float(candidate.get("confidence", 0)) > old_confidence:
@@ -2340,6 +2352,11 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
                 next_date_confidence = None
                 next_source_date = None
                 next_is_backfill = None
+            # Mêmes gardes CASE sur fact_status/review_status que dans la branche 'validated'
+            # ci-dessus : sans elles, un fait rejeté revu avec une confiance supérieure
+            # repassait en 'review' et se retrouvait à nouveau dans la file d'attente, à
+            # re-rejeter indéfiniment. Tous les autres champs restent rafraîchis : rejeter un
+            # fait ne fige pas sa citation ni sa source, ça fige la DÉCISION.
             db.execute(
                 """UPDATE evidence SET industrial_stage=?,source_url=?,source_title=?,source_date=COALESCE(?,source_date),
                           quote=?,is_verbatim=?,evidence_type=COALESCE(?,evidence_type),field_confidence=?,
@@ -2347,7 +2364,10 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
                           architecture=COALESCE(?,architecture),
                           maturity_level=COALESCE(?,maturity_level),relation_strength=COALESCE(?,relation_strength),source_role=COALESCE(?,source_role),
                           date_confidence=COALESCE(?,date_confidence),is_backfill=COALESCE(?,is_backfill),
-                          bucket=?,fact_status=?,review_status=?,updated_at=? WHERE id=?""",
+                          bucket=?,
+                          fact_status=CASE WHEN reviewed_at IS NULL THEN ? ELSE fact_status END,
+                          review_status=CASE WHEN reviewed_at IS NULL THEN ? ELSE review_status END,
+                          updated_at=? WHERE id=?""",
                 (
                     candidate["stage"], candidate["url"], candidate["title"], next_source_date,
                     candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), candidate["confidence"],
@@ -2505,7 +2525,18 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
     # review_status is recomputed here regardless of the confidence branch above: source_count_
     # after can cross the single-source threshold (the dominant _offer_review_reasons signal)
     # even when this pass's own confidence doesn't beat the stored field_confidence.
-    db.execute("UPDATE offers SET last_seen_at=?,review_status=? WHERE id=?", (stamp, review_status, offer_id))
+    #
+    # ...mais jamais par-dessus une décision humaine (reviewed_at renseigné) -- audit du
+    # 01/09/2026, reproduit : une offre rejetée redevenait 'accepted' dès qu'une deuxième
+    # source la confirmait, et repassait donc dans le scoring (scoring.py:128). last_seen_at
+    # continue d'être mis à jour : savoir qu'une offre rejetée est toujours en ligne reste une
+    # information utile, ce n'est pas une remise en cause du rejet.
+    db.execute(
+        """UPDATE offers SET last_seen_at=?,
+               review_status=CASE WHEN reviewed_at IS NULL THEN ? ELSE review_status END
+           WHERE id=?""",
+        (stamp, review_status, offer_id),
+    )
 
     source_added = upsert_fact_source(
         db, "offer_sources", offer_id,

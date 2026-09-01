@@ -2552,9 +2552,17 @@ def accept_evidence_review(evidence_id: int) -> dict[str, Any]:
             raise ValueError(f"Evidence {evidence_id} not found")
         if row["fact_status"] == "validated":
             raise ValueError(f"Evidence {evidence_id} is already validated")
+        # reviewed_at est posé ICI, pas seulement par review_queue.decide_review_item : les
+        # endpoints hérités /api/market/review/{id}/accept|reject (ceux que l'écran marché
+        # utilise) appellent cette fonction directement. Sans ce marquage, une décision prise
+        # depuis cet écran restait indiscernable d'une ligne jamais relue -- et la garde
+        # "ne jamais écraser une décision humaine" de scrapers._upsert_market_candidate, qui
+        # teste reviewed_at, l'aurait donc laissée se faire écraser au crawl suivant.
+        # data_quality.compute_precision (WHERE reviewed_at IS NOT NULL) y gagne au passage :
+        # elle comptait jusqu'ici les seules décisions passées par la file unifiée.
         db.execute(
-            "UPDATE evidence SET fact_status='validated',review_status='accepted',updated_at=? WHERE id=?",
-            (utc_now(), evidence_id),
+            "UPDATE evidence SET fact_status='validated',review_status='accepted',reviewed_at=?,updated_at=? WHERE id=?",
+            (stamp := utc_now(), stamp, evidence_id),
         )
     return {"id": evidence_id, "fact_status": "validated"}
 
@@ -2568,9 +2576,11 @@ def reject_evidence_review(evidence_id: int) -> None:
     (which filters on review_status='review').
     """
     with connect(MARKET_DB) as db:
+        # reviewed_at : même raison que dans accept_evidence_review ci-dessus -- c'est ce
+        # marquage qui rend la décision reconnaissable par la garde du crawler.
         updated = db.execute(
-            "UPDATE evidence SET review_status='rejected',updated_at=? WHERE id=? AND fact_status!='validated'",
-            (utc_now(), evidence_id),
+            "UPDATE evidence SET review_status='rejected',reviewed_at=?,updated_at=? WHERE id=? AND fact_status!='validated'",
+            (stamp := utc_now(), stamp, evidence_id),
         ).rowcount
     if not updated:
         raise ValueError(f"Evidence {evidence_id} not found or already validated")
