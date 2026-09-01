@@ -18,6 +18,10 @@ const state = {
   veilleMetrics: null,
   digest: null,
   demandSignals: [],
+  marketSizing: [],
+  referenceMatrix: [],
+  dataQuality: null,
+  goldenFacts: [],
   network: {nodes: [], edges: []},
   duplicates: [],
   pipelineFunnel: {discovered: 0, fetched: 0, parsed: 0, evidence: 0, validated: 0},
@@ -446,6 +450,134 @@ function demandSignalsPanel() {
   </section>`;
 }
 
+// §4.B.2 audit veille (30/08/2026, Lot 4 §14) : "les chiffres de marché laser publiés mélangent
+// allègrement machines, services et composants -- jamais moyennée entre sources, toujours
+// affichée avec son périmètre." CRUD sourcé, jamais de collecteur (market_sizing.py) -- vide
+// tant qu'un humain n'a pas saisi une vraie figure depuis un rapport/communiqué réel.
+function marketSizingCard(item) {
+  return `<article class="vocab-card">
+    <header><span>${esc(item.market)} · ${item.year}</span><span>${esc(item.currency)} ${item.value.toLocaleString('fr-FR')}${item.cagr != null ? ` · CAGR ${(item.cagr * 100).toFixed(1)}%` : ""}</span></header>
+    <p class="dialog-operation">${esc(item.scope)}</p>
+    ${item.method ? `<small class="block-label">Méthode : ${esc(item.method)}</small>` : ""}
+    <div class="vocab-dims" style="margin-top:12px"><button class="vocab-reject" data-delete-market-sizing="${item.id}">✕ Retirer</button></div>
+    <a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>
+  </article>`;
+}
+
+function marketSizingPanel() {
+  const items = state.marketSizing || [];
+  return `<section><div class="section-title"><div><span>05</span><div><h2>Taille de marché</h2><p>Saisie sourcée depuis des rapports publics/communiqués d'analystes -- jamais moyennée entre sources, toujours affichée avec son périmètre exact.</p></div></div><b>${items.length}</b></div>
+    <button class="export-btn" data-open-market-sizing-add>+ Ajouter une taille de marché</button>
+    ${items.length ? `<div class="vocab-list" style="margin-top:14px">${items.map(marketSizingCard).join("")}</div>` : `<div class="empty">Aucune taille de marché saisie.</div>`}
+  </section>`;
+}
+
+function showMarketSizingAdd() {
+  document.querySelector("#proof-content").innerHTML = `<p class="eyebrow">Nouvelle entrée</p>
+    <h2>Ajouter une taille de marché</h2>
+    <form id="market-sizing-add-form" class="detail-form">
+      <label>Marché<input type="text" name="market" placeholder="ex: Médical" required></label>
+      <label>Périmètre exact<input type="text" name="scope" placeholder="ex: machines uniquement, hors services" required></label>
+      <label>Valeur<input type="number" step="any" name="value" required></label>
+      <label>Devise<input type="text" name="currency" value="EUR" required></label>
+      <label>Année<input type="number" name="year" required></label>
+      <label>CAGR (optionnel, ex: 0.08 pour 8%)<input type="number" step="any" name="cagr"></label>
+      <label>Méthode (optionnel)<input type="text" name="method"></label>
+      <label>URL source<input type="url" name="source_url" placeholder="https://..." required></label>
+      <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Ajouter</button></div>
+    </form>`;
+  dialog.classList.remove("wide");
+  dialog.showModal();
+  document.querySelector("#market-sizing-add-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const data = new FormData(e.target);
+    try {
+      await api("/api/market-sizing", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          market: data.get("market"), scope: data.get("scope"), value: Number(data.get("value")),
+          currency: data.get("currency"), year: Number(data.get("year")),
+          cagr: data.get("cagr") ? Number(data.get("cagr")) : null,
+          method: data.get("method") || null, source_url: data.get("source_url"),
+        }),
+      });
+      toast("Taille de marché ajoutée.");
+      dialog.close();
+      state.marketSizing = await api("/api/market-sizing");
+      renderMarket();
+    } catch (error) { toast(error.message); }
+  });
+  document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
+}
+
+async function deleteMarketSizing(entryId) {
+  try {
+    await api(`/api/market-sizing/${entryId}`, {method: "DELETE"});
+    toast("Entrée retirée.");
+    state.marketSizing = await api("/api/market-sizing");
+    renderMarket();
+  } catch (error) { toast(error.message); }
+}
+
+// §4.B.1 audit veille (Lot 4 §13) : une cellule déclarée ici est une AMBITION humaine
+// (marché x composant x opération qui DEVRAIT exister), indépendante de ce qu'evidence a
+// réellement observé -- reference_matrix.py calcule la couverture en comparant les deux.
+function referenceCellRow(cell) {
+  return `<article class="dup-row"><div><strong>${esc(cell.market)}</strong> · ${esc(cell.component)} · ${esc(cell.operation)}</div><span>${cell.covered ? `✓ Couverte (${cell.covered_bucket === "existing" ? "existant" : "radar"})` : "○ Zone blanche"}${cell.rationale ? ` · ${esc(cell.rationale)}` : ""} <button class="vocab-reject" data-delete-reference-cell="${cell.id}" style="margin-left:8px">✕</button></span></article>`;
+}
+
+function referenceMatrixPanel() {
+  const cells = state.referenceMatrix || [];
+  const covered = cells.filter(c => c.covered).length;
+  const whiteSpace = cells.filter(c => !c.covered);
+  return `<section><div class="section-title"><div><span>06</span><div><h2>Matrice de référence & zones blanches</h2><p>Cellules marché x composant x opération déclarées comme pertinentes par le métier -- indépendant de ce qui a déjà été observé.</p></div></div><b>${cells.length ? `${covered}/${cells.length}` : 0}</b></div>
+    <button class="export-btn" data-open-reference-cell-add>+ Déclarer une cellule</button>
+    ${cells.length ? `<div class="dup-list" style="margin-top:14px">${cells.map(referenceCellRow).join("")}</div>` : `<div class="empty">Aucune cellule de référence déclarée.</div>`}
+    ${whiteSpace.length ? `<p class="actor-summary-counts" style="margin-top:10px">${whiteSpace.length} zone${whiteSpace.length > 1 ? "s" : ""} blanche${whiteSpace.length > 1 ? "s" : ""} -- déclarée${whiteSpace.length > 1 ? "s" : ""} mais sans fait observé.</p>` : ""}
+  </section>`;
+}
+
+function showReferenceCellAdd() {
+  document.querySelector("#proof-content").innerHTML = `<p class="eyebrow">Nouvelle cellule</p>
+    <h2>Déclarer une cellule de référence</h2>
+    <form id="reference-cell-add-form" class="detail-form">
+      <label>Marché<input type="text" name="market" placeholder="ex: Médical" required></label>
+      <label>Composant<input type="text" name="component" placeholder="ex: Stents" required></label>
+      <label>Opération<input type="text" name="operation" placeholder="ex: Microperçage" required></label>
+      <label>Justification (optionnel)<textarea name="rationale" rows="3"></textarea></label>
+      <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Déclarer</button></div>
+    </form>`;
+  dialog.classList.remove("wide");
+  dialog.showModal();
+  document.querySelector("#reference-cell-add-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const data = new FormData(e.target);
+    try {
+      await api("/api/reference-matrix", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          market: data.get("market"), component: data.get("component"), operation: data.get("operation"),
+          rationale: data.get("rationale") || null,
+        }),
+      });
+      toast("Cellule déclarée.");
+      dialog.close();
+      state.referenceMatrix = await api("/api/reference-matrix");
+      renderMarket();
+    } catch (error) { toast(error.message); }
+  });
+  document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
+}
+
+async function deleteReferenceCell(cellId) {
+  try {
+    await api(`/api/reference-matrix/${cellId}`, {method: "DELETE"});
+    toast("Cellule retirée.");
+    state.referenceMatrix = await api("/api/reference-matrix");
+    renderMarket();
+  } catch (error) { toast(error.message); }
+}
+
 function renderMarket() {
   const market = state.market || {existing:[], radar:[]};
   const allRows = [...market.existing, ...market.radar];
@@ -469,7 +601,9 @@ function renderMarket() {
   `<section id="market-drill-root">${section01}</section>
    <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${existingRows.length} faits</b></div>${evidenceTable(existingRows, {hideMarketColumn: !!selected, emptyMessage: selected ? `Aucune application existante documentée pour ${selected}.` : undefined})}</section>
    <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${radarRows.length} faits</b></div>${evidenceTable(radarRows, {hideMarketColumn: !!selected, emptyMessage: selected ? `Aucune application radar documentée pour ${selected}.` : undefined})}</section>
-   ${demandSignalsPanel()}`;
+   ${demandSignalsPanel()}
+   ${marketSizingPanel()}
+   ${referenceMatrixPanel()}`;
   wireActions();
   document.querySelectorAll("[data-drill-market]").forEach(el => el.addEventListener("click", () => {
     state.marketDrill = el.dataset.drillMarket || null;
@@ -1767,6 +1901,90 @@ function renderSettings() {
   </div>`;
 }
 
+// --- Qualité de la veille (§5.H audit veille, 30/08/2026, Lot 4 §17) : "_completeness et
+// compute_confidence_scores évaluent les ACTEURS. Rien n'évalue la VEILLE." Quatre indicateurs :
+// rappel (golden set, saisi à la main), précision (faits rejetés en revue par extraction_mode),
+// latence de détection médiane, santé de couverture -- voir data_quality.py pour le calcul de
+// chacun et pourquoi seul le rappel a besoin d'une saisie humaine.
+function goldenFactRow(fact) {
+  return `<article class="dup-row"><div><strong>${esc(fact.actor_name)}</strong> · ${esc(fact.market)} / ${esc(fact.component)} / ${esc(fact.operation)}</div><span>${esc(fact.expected_quote.slice(0, 140))}${fact.expected_quote.length > 140 ? "…" : ""} <a class="signal-link" href="${esc(fact.source_url)}" target="_blank" rel="noopener">↗</a> <button class="vocab-reject" data-delete-golden-fact="${fact.id}" style="margin-left:8px">✕</button></span></article>`;
+}
+
+function renderDataQuality() {
+  const dq = state.dataQuality || {recall: {}, precision: {by_extraction_mode: []}, detection_latency: {}, coverage_health: {}};
+  const recall = dq.recall || {};
+  const precisionRows = (dq.precision?.by_extraction_mode || [])
+    .map(row => `<article class="dup-row"><div><strong>${esc(row.extraction_mode)}</strong></div><span>${row.rejected}/${row.total} rejeté${row.rejected > 1 ? "s" : ""} en revue (${Math.round((row.rejection_rate || 0) * 100)}%)</span></article>`)
+    .join("");
+  const latency = dq.detection_latency || {};
+  const health = dq.coverage_health || {};
+  const goldenFacts = state.goldenFacts || [];
+
+  content.innerHTML = header(
+    "Pilotage des données",
+    "Qualité de la veille",
+    "Quatre indicateurs qui évaluent le DISPOSITIF de veille, pas les fiches acteurs : est-ce qu'il retrouve ce qu'on lui demande, à quel point on lui fait confiance sans relire, avec quel retard, et sur quelle part du périmètre il tourne vraiment."
+  ) +
+  `<section><div class="section-title"><div><span>01</span><div><h2>Rappel (golden set)</h2><p>Sur les faits vérifiés à la main ci-dessous, combien le pipeline en connaît-il actuellement ? À rejouer après toute évolution des lexiques.</p></div></div><b>${recall.recall != null ? `${Math.round(recall.recall * 100)}%` : "—"}</b></div>
+    <p class="actor-summary-counts">${recall.golden_facts ? `${recall.matched}/${recall.golden_facts} faits golden retrouvés` : "Aucun fait golden saisi -- le rappel reste incalculable tant qu'il n'y en a pas."}</p>
+    <button class="export-btn" data-open-golden-fact-add>+ Ajouter un fait golden</button>
+    ${goldenFacts.length ? `<div class="dup-list" style="margin-top:14px">${goldenFacts.map(goldenFactRow).join("")}</div>` : ""}
+  </section>
+  <section><div class="section-title"><div><span>02</span><div><h2>Précision</h2><p>Part des faits rejetés parmi ceux réellement passés par une revue humaine, par mode d'extraction.</p></div></div><b>${dq.precision?.reviewed_total ?? 0}</b></div>
+    ${precisionRows ? `<div class="dup-list">${precisionRows}</div>` : `<div class="empty">Aucun fait n'est encore passé par une revue humaine tracée.</div>`}
+  </section>
+  <section><div class="section-title"><div><span>03</span><div><h2>Latence de détection</h2><p>Délai médian entre la date de publication réelle d'un fait et le moment où l'observatoire l'a détecté.</p></div></div><b>${latency.median_days != null ? `${latency.median_days} j` : "—"}</b></div>
+    <p class="actor-summary-counts">${latency.sample_size ? `Calculé sur ${latency.sample_size} fait(s) à date de publication connue.` : "Aucun fait avec date de publication connue."}</p>
+  </section>
+  <section><div class="section-title"><div><span>04</span><div><h2>Santé de couverture</h2><p>Acteurs sans crawl réussi récent, et catégories de pages stratégiques marquées manquantes.</p></div></div><b>${health.stale_actors ?? "—"}</b></div>
+    <p class="actor-summary-counts">${health.stale_actors ?? 0}/${health.active_actors ?? 0} acteur(s) sans source HTTP 200 depuis ${health.stale_days_threshold ?? "?"} jours · ${health.missing_strategic_pages_total ?? 0} catégorie(s) de page stratégique manquante(s) au total.</p>
+  </section>`;
+  wireActions();
+}
+
+function showGoldenFactAdd() {
+  document.querySelector("#proof-content").innerHTML = `<p class="eyebrow">Nouveau fait golden</p>
+    <h2>Ajouter un fait vérifié à la main</h2>
+    <form id="golden-fact-add-form" class="detail-form">
+      <label>Acteur<input type="text" name="actor_name" placeholder="Nom exact de l'acteur" required></label>
+      <label>Marché<input type="text" name="market" required></label>
+      <label>Composant<input type="text" name="component" required></label>
+      <label>Opération<input type="text" name="operation" required></label>
+      <label>URL source (vérifiée par vous)<input type="url" name="source_url" placeholder="https://..." required></label>
+      <label>Citation attendue<textarea name="expected_quote" rows="3" placeholder="La citation exacte que le pipeline devrait retrouver" required></textarea></label>
+      <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Ajouter</button></div>
+    </form>`;
+  dialog.classList.remove("wide");
+  dialog.showModal();
+  document.querySelector("#golden-fact-add-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const data = new FormData(e.target);
+    try {
+      await api("/api/golden-facts", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          actor_name: data.get("actor_name"), market: data.get("market"), component: data.get("component"),
+          operation: data.get("operation"), source_url: data.get("source_url"), expected_quote: data.get("expected_quote"),
+        }),
+      });
+      toast("Fait golden ajouté.");
+      dialog.close();
+      [state.goldenFacts, state.dataQuality] = await Promise.all([api("/api/golden-facts"), api("/api/data-quality")]);
+      renderDataQuality();
+    } catch (error) { toast(error.message); }
+  });
+  document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
+}
+
+async function deleteGoldenFact(factId) {
+  try {
+    await api(`/api/golden-facts/${factId}`, {method: "DELETE"});
+    toast("Fait golden retiré.");
+    [state.goldenFacts, state.dataQuality] = await Promise.all([api("/api/golden-facts"), api("/api/data-quality")]);
+    renderDataQuality();
+  } catch (error) { toast(error.message); }
+}
+
 // --- Séries temporelles (audit Horizon 2 #12 : "Construire séries temporelles par acteur,
 // marché, technologie, maturité et signal") -- voir timeseries.py côté serveur pour le calcul.
 // Chaque instantané reflète l'état constaté au moment de la capture (jamais un point
@@ -2003,6 +2221,7 @@ function render(){
   if(state.view==="market-review") renderMarketReview();
   if(state.view==="actor-discovery") renderActorDiscovery();
   if(state.view==="digest") renderDigest();
+  if(state.view==="data-quality") renderDataQuality();
   if(state.view==="collections") renderCollections();
   if(state.view==="settings") renderSettings();
 }
@@ -2181,6 +2400,12 @@ function wireActions(){
   document.querySelectorAll("[data-actor-toggle-priority]").forEach(el=>el.addEventListener("click",()=>toggleActorPriority(Number(el.dataset.actorTogglePriority), el.dataset.nextPriority==="1")));
   document.querySelectorAll("[data-actor-delete]").forEach(el=>el.addEventListener("click",()=>deleteActorWithConfirm(Number(el.dataset.actorDelete), el.dataset.actorName)));
   document.querySelectorAll("[data-digest-window]").forEach(button=>button.addEventListener("click",()=>setDigestWindow(Number(button.dataset.digestWindow))));
+  document.querySelector("[data-open-market-sizing-add]")?.addEventListener("click", showMarketSizingAdd);
+  document.querySelectorAll("[data-delete-market-sizing]").forEach(button=>button.addEventListener("click",()=>deleteMarketSizing(Number(button.dataset.deleteMarketSizing))));
+  document.querySelector("[data-open-reference-cell-add]")?.addEventListener("click", showReferenceCellAdd);
+  document.querySelectorAll("[data-delete-reference-cell]").forEach(button=>button.addEventListener("click",()=>deleteReferenceCell(Number(button.dataset.deleteReferenceCell))));
+  document.querySelector("[data-open-golden-fact-add]")?.addEventListener("click", showGoldenFactAdd);
+  document.querySelectorAll("[data-delete-golden-fact]").forEach(button=>button.addEventListener("click",()=>deleteGoldenFact(Number(button.dataset.deleteGoldenFact))));
 }
 
 document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click",()=>{
@@ -2214,6 +2439,7 @@ async function refresh(){
     state.pipelineFunnel,state.marketScores,state.actorDiscovery,
     state.reviewOffers,state.reviewEvents,state.collectionHealth,state.schedulerStatus,
     state.veilleMetrics,state.digest,state.demandSignals,
+    state.marketSizing,state.referenceMatrix,state.dataQuality,state.goldenFacts,
   ]=await Promise.all([
     api("/api/overview"),
     api("/api/monthly?days=30"),
@@ -2237,6 +2463,10 @@ async function refresh(){
     apiOrNull("/api/veille-metrics"),
     api("/api/digest"),
     api("/api/demand-signals"),
+    api("/api/market-sizing"),
+    api("/api/reference-matrix"),
+    api("/api/data-quality"),
+    api("/api/golden-facts"),
   ]);
   render();
 }
