@@ -1,3 +1,7 @@
+import { api, apiOrNull } from "./js/api.js";
+import { downloadCSV } from "./js/export.js";
+import { dateLabel, debounce, esc, header, toast } from "./js/ui.js";
+
 const state = {
   view: "monthly",
   overview: null,
@@ -48,47 +52,7 @@ const dialog = document.querySelector("#proof-dialog");
 const nativeDialogShowModal = dialog.showModal.bind(dialog);
 dialog.showModal = () => { if (!dialog.open) nativeDialogShowModal(); };
 
-async function api(path, options) {
-  const response = await fetch(path, options);
-  if (!response.ok) {
-    let detail = `Erreur ${response.status}`;
-    try { detail = (await response.json()).detail || detail; } catch (_) {}
-    throw new Error(detail);
-  }
-  return response.json();
-}
 
-function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, char => ({
-    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
-  })[char]);
-}
-
-function toast(message) {
-  const node = document.querySelector("#toast");
-  node.textContent = message;
-  node.classList.add("show");
-  setTimeout(() => node.classList.remove("show"), 3500);
-}
-
-function dateLabel(value) {
-  if (!value) return "Jamais";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Date inconnue";
-  return new Intl.DateTimeFormat("fr-FR", {dateStyle:"medium", timeStyle:"short"}).format(date);
-}
-
-function debounce(callback, delay = 180) {
-  let timer;
-  return (...args) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => callback(...args), delay);
-  };
-}
-
-function header(eyebrow, title, description, action="") {
-  return `<header class="page-header"><div><p class="eyebrow">${eyebrow}</p><h1>${title}</h1><p>${description}</p></div>${action}</header>`;
-}
 
 // --- Market family visual metadata (decorative icon + tint, not chart color) -----
 
@@ -114,31 +78,6 @@ function marketIcon(label) {
   return `<span class="market-icon" style="background:${s.bg};color:${s.fg}"><svg viewBox="0 0 20 20" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${s.icon}</svg></span>`;
 }
 
-// --- CSV export -------------------------------------------------------------
-
-function toCSV(rows, columns) {
-  const cell = value => {
-    const str = String(value ?? "");
-    return /[",;\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
-  };
-  const lines = [columns.map(c => cell(c.label)).join(",")];
-  for (const row of rows) lines.push(columns.map(c => cell(row[c.key])).join(","));
-  return lines.join("\r\n");
-}
-
-function downloadCSV(filename, rows, columns) {
-  if (!rows.length) { toast("Rien à exporter pour le moment."); return; }
-  // BOM so Excel opens accented French text as UTF-8 instead of guessing wrong.
-  const blob = new Blob(["﻿" + toCSV(rows, columns)], {type: "text/csv;charset=utf-8;"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
 
 // --- Classification helpers (client-side grouping, no backend schema change) -----
 
@@ -2500,12 +2439,6 @@ document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click
 document.querySelector(".dialog-close").addEventListener("click",()=>dialog.close());
 dialog.addEventListener("click",e=>{if(e.target===dialog)dialog.close()});
 
-// veille_metrics n'a pas encore d'instantané sur une base toute neuve (404) -- ne doit jamais
-// faire échouer tout refresh() pour autant, contrairement aux autres endpoints ci-dessous qui
-// renvoient toujours 200 (éventuellement avec des listes vides).
-async function apiOrNull(path) {
-  try { return await api(path); } catch (_) { return null; }
-}
 
 // Un chargeur par tranche d'état. Auparavant refresh() les appelait TOUS les 26 à chaque
 // chargement de page et après chaque collecte, alors qu'un seul onglet est visible à la fois :
