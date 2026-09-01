@@ -1797,6 +1797,10 @@ function actorCandidateCard(item) {
     ${hiddenCount > 0 ? `<small class="block-label">+ ${hiddenCount} autre${hiddenCount > 1 ? "s" : ""} occurrence${hiddenCount > 1 ? "s" : ""}</small>` : ""}
     <div class="vocab-dims" style="margin-top:12px">
       <button class="vocab-accept" data-promote-candidate="${item.id}">✓ Promouvoir</button>
+      <select class="reject-reason-select" data-reject-reason-for="candidate:${item.id}">
+        <option value="">Motif de rejet…</option>
+        ${Object.entries(REJECT_REASON_LABELS).map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("")}
+      </select>
       <button class="vocab-reject" data-reject-candidate="${item.id}">✕ Rejeter</button>
     </div>
   </article>`;
@@ -1846,9 +1850,15 @@ function showCandidatePromote(candidateId) {
   document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
 }
 
-async function rejectCandidate(candidateId) {
+// Le motif TYPÉ est envoyé ici comme pour les sept autres files (decideReviewItem ci-dessus).
+// Sans lui, un rejet de candidat acteur n'apprend rien : il dit qu'on n'en veut pas, jamais
+// pourquoi -- donc rien ne peut remonter à la source de découverte qui l'a proposé.
+async function rejectCandidate(candidateId, rejectReason) {
   try {
-    await api(`/api/actor-candidates/${candidateId}/reject`, {method: "POST"});
+    await api(`/api/actor-candidates/${candidateId}/reject`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({reject_reason: rejectReason}),
+    });
     toast("Candidat rejeté.");
     state.actorDiscovery = await api("/api/actor-candidates");
     renderActorDiscovery();
@@ -2531,7 +2541,11 @@ function wireActions(){
   }));
   document.querySelectorAll("[data-review-actor]").forEach(button=>button.addEventListener("click",()=>decideActorReview(Number(button.dataset.reviewActor), button.dataset.reviewStatus)));
   document.querySelectorAll("[data-promote-candidate]").forEach(button=>button.addEventListener("click",()=>showCandidatePromote(Number(button.dataset.promoteCandidate))));
-  document.querySelectorAll("[data-reject-candidate]").forEach(button=>button.addEventListener("click",()=>rejectCandidate(Number(button.dataset.rejectCandidate))));
+  document.querySelectorAll("[data-reject-candidate]").forEach(button=>button.addEventListener("click",()=>{
+    const select = button.closest("article").querySelector(".reject-reason-select");
+    if (!select.value) { toast("Choisis un motif de rejet d'abord."); return; }
+    rejectCandidate(Number(button.dataset.rejectCandidate), select.value);
+  }));
   document.querySelectorAll("[data-actor-detail]").forEach(el=>el.addEventListener("click",()=>showActorDetail(Number(el.dataset.actorDetail))));
   document.querySelectorAll("[data-actor-edit]").forEach(el=>el.addEventListener("click",()=>showActorEdit(Number(el.dataset.actorEdit))));
   document.querySelectorAll("[data-actor-toggle-priority]").forEach(el=>el.addEventListener("click",()=>toggleActorPriority(Number(el.dataset.actorTogglePriority), el.dataset.nextPriority==="1")));

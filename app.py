@@ -1006,11 +1006,19 @@ def actor_candidate_promote(candidate_id: int, payload: PromoteCandidateRequest)
 
 class RejectCandidateRequest(BaseModel):
     reviewed_by: str | None = None
-    reject_reason: str | None = None
+    reject_reason: str | None = Field(None, description=f"Requis, un de {REJECT_REASONS}.")
 
 
 @app.post("/api/actor-candidates/{candidate_id}/reject")
 def actor_candidate_reject(candidate_id: int, payload: RejectCandidateRequest):
+    """Rejette un candidat acteur avec un motif TYPÉ, même règle que les sept autres files
+    (review_queue.decide_review_item) : "sans motif typé, on ne peut rien apprendre des rejets".
+    La colonne actor_candidates.reject_reason existait déjà et l'endpoint l'acceptait déjà, mais
+    rien ne la contrôlait et l'UI ne l'envoyait pas -- ces rejets étaient donc les seuls des huit
+    files à ne rien enseigner, alors qu'ils sont ceux qui devraient remonter à la source de
+    découverte (CORDIS, OpenAlex, liens sortants) qui a proposé le candidat."""
+    if payload.reject_reason not in REJECT_REASONS:
+        raise HTTPException(status_code=400, detail=f"reject_reason must be one of {REJECT_REASONS}")
     try:
         return reject_candidate(candidate_id, reviewed_by=payload.reviewed_by, reject_reason=payload.reject_reason)
     except ValueError as exc:

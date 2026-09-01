@@ -1472,6 +1472,12 @@ def _init_market_db() -> None:
             # ci-dessus. date_confidence in ('published','observed_only','unknown').
             "date_confidence": "TEXT",
             "is_backfill": "INTEGER",
+            # JSON {dimension: [termes]} -- les termes du lexique qui ont DÉCLENCHÉ chaque
+            # dimension de ce fait (voir scrapers._candidate). Calculés depuis toujours, jetés
+            # jusqu'ici : sans eux, un rejet humain n'est rattachable à aucune règle, donc rien
+            # ne peut être appris des rejets. NULL sur les lignes antérieures que le backfill
+            # (_backfill_evidence_match_terms) ne sait pas reconstituer.
+            "match_terms": "TEXT",
         })
         db.executescript(
             """
@@ -1739,6 +1745,7 @@ def _init_market_db() -> None:
             # ci-dessus. date_confidence in ('published','observed_only','unknown').
             "date_confidence": "TEXT",
             "is_backfill": "INTEGER",
+            "match_terms": "TEXT",
         })
         _add_columns(db, "evidence_sources", {
             "relation_strength": "TEXT",

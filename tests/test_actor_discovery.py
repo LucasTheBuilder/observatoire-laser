@@ -391,11 +391,28 @@ class ActorCandidateEndpointTests(unittest.TestCase):
     def test_reject_endpoint_raises_400_for_unknown_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             actors_db = _setup(tmp)
-            payload = appmod.RejectCandidateRequest(reviewed_by="lucas", reject_reason="not relevant")
+            # Motif VALIDE volontairement : sinon la validation typée ci-dessous renverrait 400
+            # la première, et ce test cesserait de vérifier ce que son nom annonce (candidat
+            # inconnu) tout en restant vert.
+            payload = appmod.RejectCandidateRequest(reviewed_by="lucas", reject_reason="off_topic")
             with patch.object(ad, "ACTORS_DB", actors_db):
                 with self.assertRaises(appmod.HTTPException) as ctx:
                     appmod.actor_candidate_reject(999, payload)
             self.assertEqual(400, ctx.exception.status_code)
+
+    def test_reject_endpoint_requires_a_typed_reason(self):
+        """Huitième file alignée sur les sept autres : un rejet sans motif typé est refusé, pour
+        que ces décisions soient exploitables (cf. review_queue.REJECT_REASONS)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db = _setup(tmp)
+            with patch.object(ad, "ACTORS_DB", actors_db):
+                for bad_reason in (None, "pas pertinent"):
+                    with self.subTest(reject_reason=bad_reason):
+                        payload = appmod.RejectCandidateRequest(reviewed_by="lucas", reject_reason=bad_reason)
+                        with self.assertRaises(appmod.HTTPException) as ctx:
+                            appmod.actor_candidate_reject(1, payload)
+                        self.assertEqual(400, ctx.exception.status_code)
+                        self.assertIn("reject_reason", str(ctx.exception.detail))
 
 
 if __name__ == "__main__":

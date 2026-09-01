@@ -998,13 +998,20 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
         market, component, operation, relation_text = partial
         relation_strength = "partial"
         is_partial = True
+        # _core_labels() (via _partial_candidate_dims) ne renvoie que les libellés : les termes
+        # qui les ont déclenchés sont re-dérivés ici sur la MÊME fenêtre (`section`), sinon les
+        # faits partiels -- de loin le plus gros contingent -- seraient les seuls à arriver en
+        # revue sans match_terms, donc les seuls dont un rejet resterait inexploitable.
+        market_hits = _match_label_details(section, MARKETS)[1]
+        component_hits = _match_label_details(section, COMPONENTS)[1]
+        operation_hits = _match_label_details(section, OPERATIONS)[1]
         _inc_diagnostic(diagnostics, "relation_partial_accepted")
 
     # Complementary dimensions may use the local section, but they can never substitute a core one.
-    process, _ = _match_label_details(section, PROCESS_TECHNOLOGIES)
-    architecture, _ = _match_label_details(section, APPLICATION_ARCHITECTURES)
-    material, _ = _match_label_details(section, MATERIALS)
-    performance, _ = _match_label_details(section, PERFORMANCE_TERMS)
+    process, process_hits = _match_label_details(section, PROCESS_TECHNOLOGIES)
+    architecture, architecture_hits = _match_label_details(section, APPLICATION_ARCHITECTURES)
+    material, material_hits = _match_label_details(section, MATERIALS)
+    performance, performance_hits = _match_label_details(section, PERFORMANCE_TERMS)
 
     maturity_class, maturity = _detect_maturity(relation_text + " " + section)
     bucket = "existing" if maturity_class == "existing" else ("pending" if is_partial else "radar")
@@ -1034,6 +1041,21 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
     # must collapse to one row instead of showing as duplicate sources.
     source_fingerprint = hashlib.sha256(f"{group}|{url}|{quote}".encode()).hexdigest()
     fact_fingerprint = hashlib.sha256(group.encode()).hexdigest()
+
+    # Les termes qui ont DÉCLENCHÉ chaque dimension, conservés par dimension (et non fondus dans
+    # `quote_terms`, qui n'existe que pour choisir la phrase à citer). Sans eux, un rejet dit
+    # "ce fait est faux" mais jamais "à cause de quelle règle du lexique" -- c'est le seul lien
+    # entre une décision humaine et la règle à corriger. Ils étaient jusqu'ici calculés puis
+    # jetés à la fin de cette fonction.
+    match_terms = {
+        dimension: terms
+        for dimension, terms in (
+            ("market", market_hits), ("component", component_hits), ("operation", operation_hits),
+            ("process", process_hits), ("architecture", architecture_hits),
+            ("material", material_hits), ("performance", performance_hits),
+        )
+        if terms
+    }
 
     result = {
         "kind": "market_application",
@@ -1074,6 +1096,7 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
         "relation_strength": relation_strength,
         "relation_evidence": relation_text[:900],
         "source_role": _section_role(block),
+        "match_terms": match_terms,
     }
     _inc_diagnostic(diagnostics, "candidate_valid")
     _inc_diagnostic(diagnostics, f"relation_{relation_strength}")
@@ -1121,13 +1144,18 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
     performance = performances[0][0] if performances else None
     results: list[dict] = []
     for capability, operation, process in capabilities:
-        terms: list[str] = []
+        # Même dictionnaire par dimension que dans _candidate() : `terms` reste la liste à plat
+        # dont _quote() a besoin pour choisir la phrase, match_terms garde QUELLE dimension
+        # chaque terme a déclenchée -- c'est cette seconde forme qui rend un rejet imputable.
+        by_dimension: dict[str, list[str]] = {}
         if operation:
-            terms.extend(_matching_terms(direct, OPERATIONS))
+            by_dimension["operation"] = _matching_terms(direct, OPERATIONS)
         if process:
-            terms.extend(_matching_terms(direct, PROCESS_TECHNOLOGIES))
-        terms.extend(_matching_terms(direct, MATERIALS))
-        terms.extend(_matching_terms(direct, PERFORMANCE_TERMS))
+            by_dimension["process"] = _matching_terms(direct, PROCESS_TECHNOLOGIES)
+        by_dimension["material"] = _matching_terms(direct, MATERIALS)
+        by_dimension["performance"] = _matching_terms(direct, PERFORMANCE_TERMS)
+        match_terms = {dimension: found for dimension, found in by_dimension.items() if found}
+        terms: list[str] = [term for found in by_dimension.values() for term in found]
         quote = _quote(block.text, terms)
         if not quote:
             continue
@@ -1160,6 +1188,7 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
             "block_path": block.path,
             "mode": mode,
             "confidence": round(confidence, 2),
+            "match_terms": match_terms,
         })
     return results
 
@@ -2306,6 +2335,8 @@ def _ensure_market_fact_status_column(db) -> None:
         db.execute("ALTER TABLE evidence ADD COLUMN date_confidence TEXT")
     if "is_backfill" not in columns:
         db.execute("ALTER TABLE evidence ADD COLUMN is_backfill INTEGER")
+    if "match_terms" not in columns:
+        db.execute("ALTER TABLE evidence ADD COLUMN match_terms TEXT")
     source_columns = {row[1] for row in db.execute("PRAGMA table_info(evidence_sources)").fetchall()}
     if "is_verbatim" not in source_columns:
         db.execute("ALTER TABLE evidence_sources ADD COLUMN is_verbatim INTEGER NOT NULL DEFAULT 1")
@@ -2318,6 +2349,19 @@ def _ensure_market_fact_status_column(db) -> None:
                changed_at TEXT NOT NULL
            )"""
     )
+
+
+def _match_terms_json(candidate: dict) -> str | None:
+    """Sérialise les termes déclencheurs d'un candidat, ou None quand il n'y en a pas.
+
+    None plutôt que '{}' : les UPDATE utilisent COALESCE(?,match_terms), donc une réobservation
+    qui ne résout plus aucun terme (page remaniée, extraction IA qui court-circuite le lexique)
+    ne doit pas écraser une provenance déjà connue par un objet vide. C'est la même règle que
+    pour date_confidence et evidence_type juste à côté : une information acquise ne redescend
+    jamais à "inconnu" toute seule.
+    """
+    terms = candidate.get("match_terms")
+    return json.dumps(terms, ensure_ascii=False, sort_keys=True) if terms else None
 
 
 def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
@@ -2404,6 +2448,7 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
                           architecture=COALESCE(?,architecture),
                           maturity_level=COALESCE(?,maturity_level),relation_strength=COALESCE(?,relation_strength),source_role=COALESCE(?,source_role),
                           date_confidence=COALESCE(?,date_confidence),is_backfill=COALESCE(?,is_backfill),
+                          match_terms=COALESCE(?,match_terms),
                           bucket=?,
                           fact_status=CASE WHEN reviewed_at IS NULL THEN ? ELSE fact_status END,
                           review_status=CASE WHEN reviewed_at IS NULL THEN ? ELSE review_status END,
@@ -2414,7 +2459,7 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
                     candidate.get("process"), candidate.get("material"), candidate.get("performance"),
                     candidate.get("architecture"), candidate.get("maturity"),
                     candidate.get("relation_strength"), candidate.get("source_role"),
-                    next_date_confidence, next_is_backfill, effective_bucket,
+                    next_date_confidence, next_is_backfill, _match_terms_json(candidate), effective_bucket,
                     candidate.get("fact_status", "validated"), "accepted" if candidate.get("fact_status") == "validated" else "review",
                     stamp, evidence_id,
                 ),
@@ -2431,8 +2476,8 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
                    actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,source_date,
                    quote,is_verbatim,evidence_type,source_group,date_confidence,is_backfill,
                    fingerprint,fact_key,application_key,evidence_kind,language,review_status,created_at,updated_at,block_heading,block_path,
-                   extraction_mode,field_confidence,laser_process,material,performance,architecture,maturity_level,relation_strength,relation_evidence,source_role,fact_status
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   extraction_mode,field_confidence,laser_process,material,performance,architecture,maturity_level,relation_strength,relation_evidence,source_role,fact_status,match_terms
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 candidate["actor"], candidate["bucket"], candidate["market"], candidate["component"], candidate["operation"],
                 candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
@@ -2442,6 +2487,7 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
                 candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
                 candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("architecture"), candidate.get("maturity"),
                 candidate.get("relation_strength"), candidate.get("relation_evidence"), candidate.get("source_role"), fact_status,
+                _match_terms_json(candidate),
             ),
         ).lastrowid
         db.execute(
@@ -2534,12 +2580,13 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
                           quote=?,is_verbatim=?,evidence_type=COALESCE(?,evidence_type),field_confidence=?,
                           material=COALESCE(?,material),performance=COALESCE(?,performance),
                           date_confidence=COALESCE(?,date_confidence),is_backfill=COALESCE(?,is_backfill),
+                          match_terms=COALESCE(?,match_terms),
                           updated_at=? WHERE id=?""",
                 (
                     candidate["stage"], candidate["url"], candidate["title"], next_source_date,
                     candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), candidate["confidence"],
                     candidate.get("material"), candidate.get("performance"),
-                    next_date_confidence, next_is_backfill, stamp, offer_id,
+                    next_date_confidence, next_is_backfill, _match_terms_json(candidate), stamp, offer_id,
                 ),
             )
     else:
@@ -2550,14 +2597,15 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
             """INSERT INTO offers(
                    actor_name,offer_type,capability,operation,laser_process,material,performance,industrial_stage,page_type,
                    source_url,source_title,source_date,quote,is_verbatim,evidence_type,date_confidence,is_backfill,
-                   fact_key,fingerprint,review_status,field_confidence,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   fact_key,fingerprint,review_status,field_confidence,created_at,updated_at,match_terms
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 candidate["actor"], candidate["offer_type"], candidate["capability"], candidate.get("operation"), candidate.get("process"),
                 candidate.get("material"), candidate.get("performance"), candidate["stage"], candidate["page_type"], candidate["url"],
                 candidate["title"], candidate.get("source_date"), candidate["quote"], int(candidate.get("is_verbatim", True)),
                 candidate.get("evidence_type"), candidate.get("date_confidence"), is_backfill,
                 candidate["fact_key"], candidate["fingerprint"], review_status, candidate["confidence"], stamp, stamp,
+                _match_terms_json(candidate),
             ),
         ).lastrowid
         fact_added = 1
