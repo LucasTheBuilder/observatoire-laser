@@ -43,9 +43,74 @@ from db import (
 QUEUES = ("evidence", "offers", "tech_signals", "events", "facts", "actors", "vocabulary")
 
 # §5.G item 3 : motifs de rejet typés, pour pouvoir apprendre des rejets (item 4) au lieu de les
-# perdre dans un champ libre. "hors sujet / mauvais acteur / mauvaise dimension / citation non
-# probante / doublon" du §5.G, traduits en slugs stables côté API/DB.
-REJECT_REASONS = ("off_topic", "wrong_actor", "wrong_dimension", "unconvincing_citation", "duplicate")
+# perdre dans un champ libre.
+#
+# Les cinq motifs d'origine ont été conçus pour un FAIT MARCHÉ : un triplet marché/composant/
+# opération adossé à une citation. Servis tels quels aux huit files, deux d'entre eux n'ont
+# aucun sens sur un candidat acteur -- "mauvais acteur" alors que l'item EST l'acteur,
+# "mauvaise dimension" alors qu'un candidat n'a ni marché ni composant ni opération. Une liste
+# où deux entrées sur cinq ne veulent rien dire pousse à choisir "au moins pire", et produit
+# exactement les motifs bruités que l'analyse des rejets devra ensuite lire.
+#
+# D'où un jeu PAR FILE, avec un socle commun (off_topic, duplicate). Les files pour lesquelles
+# aucune décision n'a encore été observée gardent les cinq motifs d'origine : les élargir
+# aujourd'hui serait inventer des modes d'échec au lieu de les constater.
+_CORE_REASONS = ("off_topic", "duplicate")
+_FACT_REASONS = ("off_topic", "wrong_actor", "wrong_dimension", "unconvincing_citation", "duplicate")
+
+REJECT_REASONS_BY_QUEUE: dict[str, tuple[str, ...]] = {
+    # Fait marché : les cinq d'origine, plus deux modes d'échec que la file en attente rend
+    # incontournables. `incomplete_dimension` -- 70 des 123 faits en attente sont `partial`
+    # (2 dimensions sur 3), et wrong_dimension confondait "le libellé est faux" (à corriger dans
+    # le lexique) avec "la dimension manque" (à corriger dans la fenêtre d'extraction), deux
+    # diagnostics opposés. `capability_not_application` -- "nous POUVONS découper des électrodes"
+    # n'est pas une application marché ; rejeter ça en citation non probante serait faux, la
+    # citation est probante, elle prouve autre chose (voir db.classify_evidence_type).
+    "evidence": (*_FACT_REASONS, "incomplete_dimension", "capability_not_application"),
+    "offers": _FACT_REASONS,
+    "tech_signals": _FACT_REASONS,
+    "events": _FACT_REASONS,
+    "facts": _FACT_REASONS,
+    "vocabulary": _FACT_REASONS,
+    # Acteurs (file 'actors') et candidats acteurs : l'objet est une ORGANISATION, pas un fait.
+    # wrong_actor et wrong_dimension sont retirés faute d'objet. Les trois motifs ajoutés
+    # viennent de ce que contient réellement la file : 397 des 441 candidats sont des partenaires
+    # de consortium CORDIS (le projet était on-topic, l'organisation n'est pas un acteur laser --
+    # ce n'est donc pas "hors sujet", la source était pertinente, c'est l'inférence qui ne l'est
+    # pas) ; le haut de liste est saturé d'universités et de laboratoires, réels et on-topic mais
+    # académiques, donc une décision de PÉRIMÈTRE et non de justesse ; et l'extraction de noms
+    # remonte aussi des projets, départements ou personnes, qui ne sont pas des organisations.
+    "actors": (*_CORE_REASONS, "not_an_organization", "consortium_partner_out_of_scope", "out_of_scope_academic"),
+    "candidates": (*_CORE_REASONS, "not_an_organization", "consortium_partner_out_of_scope", "out_of_scope_academic"),
+}
+
+# Libellés en français, tenus ICI et exposés par l'API (voir app.py: GET /api/reject-reasons)
+# plutôt que recopiés dans static/app.js : deux listes à maintenir en parallèle finissent
+# toujours par diverger, et c'est le slug stocké en base qui compte.
+REJECT_REASON_LABELS: dict[str, str] = {
+    "off_topic": "Hors sujet",
+    "wrong_actor": "Mauvais acteur",
+    "wrong_dimension": "Mauvaise dimension",
+    "unconvincing_citation": "Citation non probante",
+    "duplicate": "Doublon",
+    "incomplete_dimension": "Dimension manquante",
+    "capability_not_application": "Capacité, pas une application",
+    "not_an_organization": "Pas une organisation",
+    "consortium_partner_out_of_scope": "Partenaire de consortium hors périmètre",
+    "out_of_scope_academic": "Hors périmètre (académique)",
+}
+
+# Union de tous les motifs : sert aux contrôles génériques et à la documentation d'API. La
+# validation d'une décision, elle, passe TOUJOURS par reasons_for_queue() -- accepter ici un
+# motif valide pour une autre file reviendrait à ne rien avoir typé du tout.
+REJECT_REASONS = tuple(dict.fromkeys(
+    reason for reasons in REJECT_REASONS_BY_QUEUE.values() for reason in reasons
+))
+
+
+def reasons_for_queue(queue: str) -> tuple[str, ...]:
+    """Motifs valides pour une file. Une file inconnue n'en a aucun -- jamais un repli permissif."""
+    return REJECT_REASONS_BY_QUEUE.get(queue, ())
 
 _COMPETITIVE_WEIGHT: dict[str, int] = {"C1": 3, "C2": 2, "A1": 2, "T1": 1}
 _DEFAULT_COMPETITIVE_WEIGHT = 1
@@ -363,8 +428,10 @@ def decide_review_item(
     """
     if queue not in _LISTERS:
         raise ValueError(f"Unknown queue {queue!r} -- expected one of {QUEUES}")
-    if decision == "reject" and reject_reason not in REJECT_REASONS:
-        raise ValueError(f"reject_reason must be one of {REJECT_REASONS} for a rejection")
+    if decision == "reject" and reject_reason not in reasons_for_queue(queue):
+        raise ValueError(
+            f"reject_reason must be one of {reasons_for_queue(queue)} for a rejection on queue {queue!r}"
+        )
 
     # Instantané pris AVANT la décision : accepter un candidat vocabulaire le promeut, accepter
     # un fait change son statut, et une fusion de doublons peut faire disparaître la ligne plus

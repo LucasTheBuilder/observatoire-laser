@@ -479,5 +479,64 @@ class MarketReviewRejectReasonTests(unittest.TestCase):
         self.assertIsNotNone(row["reviewed_at"])
 
 
+class PerQueueRejectReasonTests(unittest.TestCase):
+    """Les cinq motifs d'origine ont été conçus pour un FAIT MARCHÉ. Sur une organisation, deux
+    d'entre eux n'ont pas d'objet -- et une liste dont deux entrées sur cinq ne veulent rien dire
+    pousse à choisir « au moins pire », donc à produire les motifs bruités que l'analyse des
+    rejets devra lire ensuite. Ces tests verrouillent la séparation."""
+
+    def test_reasons_without_an_object_are_refused_on_actor_queues(self):
+        for queue in ("actors", "candidates"):
+            for reason in ("wrong_actor", "wrong_dimension"):
+                with self.subTest(queue=queue, reason=reason):
+                    self.assertNotIn(reason, rq.reasons_for_queue(queue))
+
+    def test_organisation_reasons_are_refused_on_a_market_fact(self):
+        for reason in ("not_an_organization", "consortium_partner_out_of_scope", "out_of_scope_academic"):
+            with self.subTest(reason=reason):
+                self.assertNotIn(reason, rq.reasons_for_queue("evidence"))
+
+    def test_fact_specific_reasons_exist_only_where_they_mean_something(self):
+        for reason in ("incomplete_dimension", "capability_not_application"):
+            with self.subTest(reason=reason):
+                self.assertIn(reason, rq.reasons_for_queue("evidence"))
+                self.assertNotIn(reason, rq.reasons_for_queue("candidates"))
+
+    def test_every_queue_keeps_the_common_core(self):
+        for queue in rq.REJECT_REASONS_BY_QUEUE:
+            with self.subTest(queue=queue):
+                self.assertIn("off_topic", rq.reasons_for_queue(queue))
+                self.assertIn("duplicate", rq.reasons_for_queue(queue))
+
+    def test_an_unknown_queue_has_no_valid_reason(self):
+        """Jamais de repli permissif : une file inconnue ne doit pas accepter n'importe quoi."""
+        self.assertEqual((), rq.reasons_for_queue("pas_une_file"))
+
+    def test_every_reason_has_a_label(self):
+        for reason in rq.REJECT_REASONS:
+            with self.subTest(reason=reason):
+                self.assertIn(reason, rq.REJECT_REASON_LABELS)
+
+    def test_decide_refuses_a_reason_valid_on_another_queue(self):
+        """Le point décisif : accepter un motif d'une autre file reviendrait à ne rien typer."""
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, market_db, tech_db = _setup(tmp)
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                actor_id = dbmod.create_actor("Candidat", "France", "Test", "https://c.test/")
+                dbmod.update_actor_classification(actor_id, review_status="candidate")
+            with _patch_dbs(actors_db, market_db, tech_db):
+                with self.assertRaises(ValueError):
+                    rq.decide_review_item("actors", actor_id, "reject", reject_reason="wrong_dimension")
+                # ... et accepte bien celui de sa propre file.
+                rq.decide_review_item(
+                    "actors", actor_id, "reject", reject_reason="out_of_scope_academic"
+                )
+                row = dbmod.rows(
+                    actors_db, "SELECT review_status,reject_reason FROM actors WHERE id=?", (actor_id,)
+                )[0]
+        self.assertEqual("rejected", row["review_status"])
+        self.assertEqual("out_of_scope_academic", row["reject_reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

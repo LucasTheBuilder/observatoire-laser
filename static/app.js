@@ -14,6 +14,7 @@ const state = {
   profiles: [],
   vocabulary: [],
   marketReview: [],
+  rejectReasons: null,
   actorDiscovery: [],
   reviewOffers: [],
   reviewEvents: [],
@@ -1318,10 +1319,26 @@ function reviewActorCard(a) {
     <div class="review-actions">
       <button class="vocab-accept" data-review-actor="${a.id}" data-review-status="verified">✓ Valider</button>
       ${a.review_status !== "monitor" ? `<button class="review-monitor" data-review-actor="${a.id}" data-review-status="monitor">◷ Surveiller</button>` : ""}
-      <button class="vocab-reject" data-review-actor="${a.id}" data-review-status="rejected">✕ Rejeter</button>
+      ${rejectReasonSelect("actors", `actor:${a.id}`)}
+      <button class="vocab-reject" data-reject-actor="${a.id}">✕ Rejeter</button>
     </div>
     <a class="signal-link" href="${esc(a.official_url)}" target="_blank" rel="noopener">Voir le site ↗</a>
   </article>`;
+}
+
+// Valider et « surveiller » restent un simple changement de statut (PATCH). Rejeter passe par
+// la file unifiée : c'est la seule des trois décisions qui porte un motif, et la seule dont on
+// veut apprendre. Cet écran était le dernier à rejeter sans rien enregistrer.
+async function rejectActorReview(actorId, rejectReason) {
+  try {
+    await api(`/api/review/actors/${actorId}/decide`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({decision: "reject", reject_reason: rejectReason}),
+    });
+    toast("Acteur rejeté.");
+    [state.actors, state.network] = await Promise.all([api("/api/actors"), api("/api/network")]);
+    renderActors();
+  } catch (error) { toast(error.message); }
 }
 
 async function decideActorReview(actorId, reviewStatus) {
@@ -1657,10 +1674,7 @@ function marketReviewCard(item) {
     ${marketReviewMeta(item)}
     <div class="vocab-dims" style="margin-top:12px">
       <button class="vocab-accept" data-accept-market-review="${item.id}">✓ Valider</button>
-      <select class="reject-reason-select" data-reject-reason-for="market:${item.id}">
-        <option value="">Motif de rejet…</option>
-        ${Object.entries(REJECT_REASON_LABELS).map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("")}
-      </select>
+      ${rejectReasonSelect("evidence", `market:${item.id}`)}
       <button class="vocab-reject" data-reject-market-review="${item.id}">✕ Rejeter</button>
       ${canBecomeGoldenFact(item)
         ? `<button class="export-btn" data-golden-from-review="${item.id}" title="J'ai vérifié cette page moi-même : garder ce fait comme référence de non-régression.">★ Garder comme référence</button>`
@@ -1698,19 +1712,25 @@ async function keepMarketReviewItemAsGoldenFact(evidenceId, button) {
 // direct à la base. evidence/vocabulary ont déjà leur propre page dédiée (au-dessus) ; cette
 // section couvre les deux files réellement chargées en production au 31/08/2026 (offers : 29,
 // events : 174, dont une vraie acquisition jamais vue nulle part dans l'app avant ce jour).
-const REJECT_REASON_LABELS = {
-  off_topic: "Hors sujet",
-  wrong_actor: "Mauvais acteur",
-  wrong_dimension: "Mauvaise dimension",
-  unconvincing_citation: "Citation non probante",
-  duplicate: "Doublon",
-};
+// Les motifs valides DÉPENDENT DE LA FILE et viennent de l'API (GET /api/reject-reasons) :
+// « mauvais acteur » et « mauvaise dimension » n'ont aucun sens sur un candidat acteur, où
+// l'item EST l'acteur et n'a ni marché ni composant. Tenir une copie ici finirait par diverger
+// de la liste que le serveur valide -- et c'est le serveur qui a le dernier mot.
+function rejectReasonSelect(queue, key) {
+  const reasons = state.rejectReasons;
+  const values = reasons?.by_queue?.[queue] || [];
+  const options = values
+    .map(value => `<option value="${esc(value)}">${esc(reasons.labels[value] || value)}</option>`)
+    .join("");
+  return `<select class="reject-reason-select" data-reject-reason-for="${esc(key)}">
+    <option value="">Motif de rejet…</option>
+    ${options}
+  </select>`;
+}
 
 function reviewQueueCard(item) {
   const detail = item.detail || {};
   const key = `${item.queue}:${item.id}`;
-  const reasonOptions = Object.entries(REJECT_REASON_LABELS)
-    .map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("");
   return `<article class="vocab-card">
     <header><span>${esc(item.actor_name || "—")} · ${dateLabel(item.created_at)}</span><span>Priorité ${Number(item.priority || 0).toFixed(1)}</span></header>
     <p class="dialog-operation">${esc(item.summary)}</p>
@@ -1718,10 +1738,7 @@ function reviewQueueCard(item) {
     ${detail.laser_process ? `<small class="block-label">${esc(detail.laser_process)}</small>` : ""}
     <div class="vocab-dims" style="margin-top:12px">
       <button class="vocab-accept" data-accept-review="${key}">✓ Valider</button>
-      <select class="reject-reason-select" data-reject-reason-for="${key}">
-        <option value="">Motif de rejet…</option>
-        ${reasonOptions}
-      </select>
+      ${rejectReasonSelect(item.queue, key)}
       <button class="vocab-reject" data-reject-review="${key}">✕ Rejeter</button>
     </div>
     ${detail.source_url ? `<a class="signal-link" href="${esc(detail.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>` : ""}
@@ -1801,10 +1818,7 @@ function actorCandidateCard(item) {
     ${hiddenCount > 0 ? `<small class="block-label">+ ${hiddenCount} autre${hiddenCount > 1 ? "s" : ""} occurrence${hiddenCount > 1 ? "s" : ""}</small>` : ""}
     <div class="vocab-dims" style="margin-top:12px">
       <button class="vocab-accept" data-promote-candidate="${item.id}">✓ Promouvoir</button>
-      <select class="reject-reason-select" data-reject-reason-for="candidate:${item.id}">
-        <option value="">Motif de rejet…</option>
-        ${Object.entries(REJECT_REASON_LABELS).map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("")}
-      </select>
+      ${rejectReasonSelect("candidates", `candidate:${item.id}`)}
       <button class="vocab-reject" data-reject-candidate="${item.id}">✕ Rejeter</button>
     </div>
   </article>`;
@@ -2553,6 +2567,11 @@ function wireActions(){
     decideReviewItem(queue, Number(id), "reject", select.value);
   }));
   document.querySelectorAll("[data-review-actor]").forEach(button=>button.addEventListener("click",()=>decideActorReview(Number(button.dataset.reviewActor), button.dataset.reviewStatus)));
+  document.querySelectorAll("[data-reject-actor]").forEach(button=>button.addEventListener("click",()=>{
+    const select = button.closest("article").querySelector(".reject-reason-select");
+    if (!select.value) { toast("Choisis un motif de rejet d'abord."); return; }
+    rejectActorReview(Number(button.dataset.rejectActor), select.value);
+  }));
   document.querySelectorAll("[data-promote-candidate]").forEach(button=>button.addEventListener("click",()=>showCandidatePromote(Number(button.dataset.promoteCandidate))));
   document.querySelectorAll("[data-reject-candidate]").forEach(button=>button.addEventListener("click",()=>{
     const select = button.closest("article").querySelector(".reject-reason-select");
@@ -2622,6 +2641,7 @@ const LOADERS = {
   referenceMatrix:   () => api("/api/reference-matrix"),
   dataQuality:       () => api("/api/data-quality"),
   goldenFacts:       () => api("/api/golden-facts"),
+  rejectReasons:     () => api("/api/reject-reasons"),
 };
 
 // Ce dont chaque onglet a réellement besoin POUR S'AFFICHER (helpers de rendu inclus, chemins
@@ -2636,11 +2656,11 @@ const VIEW_DEPS = {
   // market/offers/documents ne servent pas à la grille elle-même mais à la fiche détail
   // (showActorDetail -> actorDetailContent), ouverte depuis cette grille : sans eux la fiche
   // s'afficherait sans capacités, marchés ni publications.
-  actors:            ["overview", "actors", "network", "market", "offers", "documents"],
+  actors:            ["overview", "actors", "network", "market", "offers", "documents", "rejectReasons"],
   trends:            ["overview"],
   vocabulary:        ["overview", "vocabulary"],
-  "market-review":   ["overview", "marketReview", "reviewOffers", "reviewEvents"],
-  "actor-discovery": ["overview", "actorDiscovery"],
+  "market-review":   ["overview", "marketReview", "reviewOffers", "reviewEvents", "rejectReasons"],
+  "actor-discovery": ["overview", "actorDiscovery", "rejectReasons"],
   digest:            ["overview", "digest"],
   "data-quality":    ["overview", "dataQuality", "goldenFacts"],
   collections:       ["overview", "collectionHealth", "profiles", "duplicates", "pipelineFunnel", "veilleMetrics"],

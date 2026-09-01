@@ -99,7 +99,14 @@ from openalex import collect_openalex_publications, discover_global_actor_candid
 from patent import collect_patents
 from press import collect_actor_feeds, collect_press_mentions
 from reference_matrix import add_reference_cell, delete_reference_cell, list_reference_matrix
-from review_queue import REJECT_REASONS, decide_review_item, list_review_queue
+from review_queue import (
+    REJECT_REASON_LABELS,
+    REJECT_REASONS,
+    REJECT_REASONS_BY_QUEUE,
+    decide_review_item,
+    list_review_queue,
+    reasons_for_queue,
+)
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 from sources import list_sources
@@ -1015,7 +1022,9 @@ def actor_candidate_promote(candidate_id: int, payload: PromoteCandidateRequest)
 
 class RejectCandidateRequest(BaseModel):
     reviewed_by: str | None = None
-    reject_reason: str | None = Field(None, description=f"Requis, un de {REJECT_REASONS}.")
+    reject_reason: str | None = Field(
+        None, description=f"Requis, un de {reasons_for_queue('candidates')}."
+    )
 
 
 @app.post("/api/actor-candidates/{candidate_id}/reject")
@@ -1026,8 +1035,9 @@ def actor_candidate_reject(candidate_id: int, payload: RejectCandidateRequest):
     rien ne la contrôlait et l'UI ne l'envoyait pas -- ces rejets étaient donc les seuls des huit
     files à ne rien enseigner, alors qu'ils sont ceux qui devraient remonter à la source de
     découverte (CORDIS, OpenAlex, liens sortants) qui a proposé le candidat."""
-    if payload.reject_reason not in REJECT_REASONS:
-        raise HTTPException(status_code=400, detail=f"reject_reason must be one of {REJECT_REASONS}")
+    allowed = reasons_for_queue("candidates")
+    if payload.reject_reason not in allowed:
+        raise HTTPException(status_code=400, detail=f"reject_reason must be one of {allowed}")
     snapshot = review_journal.snapshot_item("candidates", candidate_id)
     try:
         result = reject_candidate(candidate_id, reviewed_by=payload.reviewed_by, reject_reason=payload.reject_reason)
@@ -1482,6 +1492,21 @@ def data_quality_endpoint():
     return data_quality_report()
 
 
+@app.get("/api/reject-reasons")
+def reject_reasons_endpoint():
+    """Motifs de rejet valides PAR FILE, avec leurs libellés.
+
+    Source unique : l'UI lit cette liste au lieu d'en tenir une copie. Les cinq motifs d'origine
+    ont été conçus pour un fait marché ; sur un candidat acteur, "mauvais acteur" et "mauvaise
+    dimension" n'ont pas d'objet, et une liste dont deux entrées sur cinq ne veulent rien dire
+    pousse à choisir "au moins pire" -- donc à produire les motifs bruités que l'analyse des
+    rejets devra lire ensuite."""
+    return {
+        "labels": REJECT_REASON_LABELS,
+        "by_queue": {queue: list(reasons) for queue, reasons in REJECT_REASONS_BY_QUEUE.items()},
+    }
+
+
 @app.get("/api/feedback-dossier")
 def feedback_dossier_endpoint(limit: int = 400):
     """Ce que les décisions humaines disent du scraping : rejets avec leur provenance (motif
@@ -1622,7 +1647,9 @@ def accept_market_review(evidence_id: int):
 
 class RejectMarketReviewRequest(BaseModel):
     reviewed_by: str | None = None
-    reject_reason: str | None = Field(None, description=f"Requis, un de {REJECT_REASONS}.")
+    reject_reason: str | None = Field(
+        None, description=f"Requis, un de {reasons_for_queue('evidence')}."
+    )
 
 
 @app.post("/api/market/review/{evidence_id}/reject")
@@ -1634,8 +1661,9 @@ def reject_market_review(evidence_id: int, payload: RejectMarketReviewRequest):
     écran porte 123 des 152 items en attente, donc la majorité de ce qu'une analyse des rejets
     aura à lire. Un rejet non motivé y était jusqu'ici accepté en silence -- la file la plus
     volumineuse était la seule à ne rien enseigner."""
-    if payload.reject_reason not in REJECT_REASONS:
-        raise HTTPException(status_code=400, detail=f"reject_reason must be one of {REJECT_REASONS}")
+    allowed = reasons_for_queue("evidence")
+    if payload.reject_reason not in allowed:
+        raise HTTPException(status_code=400, detail=f"reject_reason must be one of {allowed}")
     snapshot = review_journal.snapshot_item("evidence", evidence_id)
     try:
         reject_evidence_review(
