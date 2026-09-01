@@ -641,7 +641,11 @@ function nextBestActions() {
       view: "actors",
     });
   }
-  const pendingVocab = (state.vocabulary || []).filter(v => v.review_status === "pending").length;
+  // Les cinq compteurs viennent de /api/overview.pending (COUNT cote serveur, voir app.py).
+  // Auparavant la Synthese telechargeait les files completes -- ~500 Ko de charge utile pour
+  // en deriver cinq entiers, sur un onglet qui n'affiche aucune de ces listes.
+  const pending = state.overview?.pending || {};
+  const pendingVocab = pending.vocabulary || 0;
   if (pendingVocab > 0) {
     actions.push({
       label: `Valider ${pendingVocab} terme${pendingVocab > 1 ? "s" : ""} en attente`,
@@ -649,7 +653,7 @@ function nextBestActions() {
       view: "vocabulary",
     });
   }
-  const pendingCandidates = (state.actorDiscovery || []).length;
+  const pendingCandidates = pending.actor_candidates || 0;
   if (pendingCandidates > 0) {
     actions.push({
       label: `Trier ${pendingCandidates} acteur${pendingCandidates > 1 ? "s" : ""} candidat${pendingCandidates > 1 ? "s" : ""}`,
@@ -657,7 +661,7 @@ function nextBestActions() {
       view: "actor-discovery",
     });
   }
-  const pendingMarketReview = (state.marketReview || []).length;
+  const pendingMarketReview = pending.market_review || 0;
   if (pendingMarketReview > 0) {
     actions.push({
       label: `Trier ${pendingMarketReview} fait${pendingMarketReview > 1 ? "s" : ""} marché en attente`,
@@ -665,7 +669,7 @@ function nextBestActions() {
       view: "market-review",
     });
   }
-  const pendingReviewQueues = (state.reviewOffers || []).length + (state.reviewEvents || []).length;
+  const pendingReviewQueues = (pending.review_offers || 0) + (pending.review_events || 0);
   if (pendingReviewQueues > 0) {
     actions.push({
       label: `Trier ${pendingReviewQueues} capacité(s)/événement(s) en attente`,
@@ -803,8 +807,7 @@ function renderMonthly() {
   document.querySelectorAll("[data-goto-view]").forEach(el => el.addEventListener("click", () => {
     const view = el.dataset.gotoView;
     document.querySelectorAll(".nav").forEach(n => n.classList.toggle("active", n.dataset.view === view));
-    state.view = view;
-    render();
+    showView(view);
   }));
 }
 
@@ -2406,7 +2409,7 @@ async function run(kind) {
     toast(`Collecte ${kind} lancée.`);
     state.view="collections";
     document.querySelectorAll(".nav").forEach(n => n.classList.toggle("active", n.dataset.view === "collections"));
-    await refresh();
+    await refresh();  // vide le cache et charge les tranches de l'onglet Collectes
     poll(kind);
   } catch(error) { toast(error.message); }
 }
@@ -2429,9 +2432,8 @@ async function poll(kind) {
       // silencieusement plutôt que de laisser son cache devenir périmé jusqu'au prochain clic.
       if (job.status === "completed" && state.trends.keys.length) await setTrendsDimension(state.trends.dimension);
       if (kind === "monthly" && job.status === "completed") {
-        state.view = "monthly";
         document.querySelectorAll(".nav").forEach(n => n.classList.toggle("active", n.dataset.view === "monthly"));
-        render();
+        await showView("monthly");
       }
       toast(job.status === "completed"
         ? collectionSummary(kind, job.result)
@@ -2483,14 +2485,15 @@ function wireActions(){
 document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click",()=>{
   document.querySelectorAll(".nav").forEach(n=>n.classList.remove("active"));
   button.classList.add("active");
-  state.view=button.dataset.view;
+  const view=button.dataset.view;
   // Séries temporelles : chargées à la demande (voir déclaration de state.trends), donc le
   // premier passage sur cette vue déclenche le fetch au lieu d'un simple render() sur un
   // cache encore vide -- les visites suivantes réutilisent ce qui est déjà chargé.
-  if(state.view==="trends" && !state.trends.keys.length && !state.trends.loading){
+  if(view==="trends" && !state.trends.keys.length && !state.trends.loading){
+    state.view=view;
     setTrendsDimension(state.trends.dimension);
   } else {
-    render();
+    showView(view);
   }
 }));
 
@@ -2504,45 +2507,92 @@ async function apiOrNull(path) {
   try { return await api(path); } catch (_) { return null; }
 }
 
-async function refresh(){
-  [
-    state.overview,state.monthly,state.market,state.offers,state.technologySignals,state.documents,
-    state.actors,state.profiles,state.vocabulary,state.marketReview,state.network,state.duplicates,
-    state.pipelineFunnel,state.marketScores,state.actorDiscovery,
-    state.reviewOffers,state.reviewEvents,state.collectionHealth,state.schedulerStatus,
-    state.veilleMetrics,state.digest,state.demandSignals,
-    state.marketSizing,state.referenceMatrix,state.dataQuality,state.goldenFacts,
-  ]=await Promise.all([
-    api("/api/overview"),
-    api("/api/monthly?days=30"),
-    api("/api/market"),
-    api("/api/offers"),
-    api("/api/technology-signals"),
-    api("/api/documents?limit=500"),
-    api("/api/actors"),
-    api("/api/profiles"),
-    api("/api/vocabulary-candidates"),
-    api("/api/market/review"),
-    api("/api/network"),
-    api("/api/actors/duplicates"),
-    api("/api/pipeline-funnel"),
-    api("/api/market-scores"),
-    api("/api/actor-candidates"),
-    api("/api/review?queue=offers").then(r => r.items),
-    api("/api/review?queue=events").then(r => r.items),
-    api("/api/collection-health"),
-    api("/api/scheduler"),
-    apiOrNull("/api/veille-metrics"),
-    api("/api/digest"),
-    api("/api/demand-signals"),
-    api("/api/market-sizing"),
-    api("/api/reference-matrix"),
-    api("/api/data-quality"),
-    api("/api/golden-facts"),
-  ]);
+// Un chargeur par tranche d'état. Auparavant refresh() les appelait TOUS les 26 à chaque
+// chargement de page et après chaque collecte, alors qu'un seul onglet est visible à la fois :
+// 0,89 Mo transférés pour en afficher une fraction. Chaque tranche se charge désormais à la
+// demande, et le résultat est conservé jusqu'à la prochaine collecte.
+const LOADERS = {
+  overview:          () => api("/api/overview"),
+  monthly:           () => api("/api/monthly?days=30"),
+  market:            () => api("/api/market"),
+  offers:            () => api("/api/offers"),
+  technologySignals: () => api("/api/technology-signals"),
+  documents:         () => api("/api/documents?limit=500"),
+  actors:            () => api("/api/actors"),
+  profiles:          () => api("/api/profiles"),
+  vocabulary:        () => api("/api/vocabulary-candidates"),
+  marketReview:      () => api("/api/market/review"),
+  network:           () => api("/api/network"),
+  duplicates:        () => api("/api/actors/duplicates"),
+  pipelineFunnel:    () => api("/api/pipeline-funnel"),
+  marketScores:      () => api("/api/market-scores"),
+  actorDiscovery:    () => api("/api/actor-candidates"),
+  reviewOffers:      () => api("/api/review?queue=offers").then(r => r.items),
+  reviewEvents:      () => api("/api/review?queue=events").then(r => r.items),
+  collectionHealth:  () => api("/api/collection-health"),
+  schedulerStatus:   () => api("/api/scheduler"),
+  veilleMetrics:     () => apiOrNull("/api/veille-metrics"),
+  digest:            () => api("/api/digest"),
+  demandSignals:     () => api("/api/demand-signals"),
+  marketSizing:      () => api("/api/market-sizing"),
+  referenceMatrix:   () => api("/api/reference-matrix"),
+  dataQuality:       () => api("/api/data-quality"),
+  goldenFacts:       () => api("/api/golden-facts"),
+};
+
+// Ce dont chaque onglet a réellement besoin POUR S'AFFICHER (helpers de rendu inclus, chemins
+// d'action exclus : une action recharge sa propre tranche). `overview` est présent partout car
+// il porte les compteurs de files et l'état des collectes utilisés par les en-têtes.
+const VIEW_DEPS = {
+  monthly:           ["overview", "monthly", "market", "actors", "technologySignals", "collectionHealth"],
+  market:            ["overview", "market", "marketScores", "marketSizing", "referenceMatrix", "demandSignals"],
+  offers:            ["overview", "offers"],
+  techintel:         ["overview", "technologySignals"],
+  futuretech:        ["overview", "documents"],
+  // market/offers/documents ne servent pas à la grille elle-même mais à la fiche détail
+  // (showActorDetail -> actorDetailContent), ouverte depuis cette grille : sans eux la fiche
+  // s'afficherait sans capacités, marchés ni publications.
+  actors:            ["overview", "actors", "network", "market", "offers", "documents"],
+  trends:            ["overview"],
+  vocabulary:        ["overview", "vocabulary"],
+  "market-review":   ["overview", "marketReview", "reviewOffers", "reviewEvents"],
+  "actor-discovery": ["overview", "actorDiscovery"],
+  digest:            ["overview", "digest"],
+  "data-quality":    ["overview", "dataQuality", "goldenFacts"],
+  collections:       ["overview", "collectionHealth", "profiles", "duplicates", "pipelineFunnel", "veilleMetrics"],
+  settings:          ["overview", "schedulerStatus"],
+};
+
+const loadedSlices = new Set();
+
+async function ensureLoaded(view) {
+  const missing = (VIEW_DEPS[view] || ["overview"]).filter(slice => !loadedSlices.has(slice));
+  if (!missing.length) return;
+  const values = await Promise.all(missing.map(slice => LOADERS[slice]()));
+  missing.forEach((slice, i) => {
+    state[slice] = values[i];
+    loadedSlices.add(slice);
+  });
+}
+
+async function showView(view) {
+  state.view = view;
+  try {
+    await ensureLoaded(view);
+  } catch (error) {
+    content.innerHTML = `<div class="empty">Impossible de charger cet onglet : ${esc(error.message)}</div>`;
+    return;
+  }
   render();
 }
 
-refresh().catch(error=>{
+// Après une collecte, les données affichées sont périmées : on vide le cache et on recharge
+// l'onglet courant. Les autres onglets se rechargeront à leur prochaine ouverture.
+async function refresh() {
+  loadedSlices.clear();
+  await showView(state.view);
+}
+
+showView(state.view).catch(error=>{
   content.innerHTML=`<div class="empty">Impossible de charger l’application : ${esc(error.message)}</div>`;
 });

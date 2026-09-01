@@ -392,6 +392,31 @@ def overview():
         vocabulary_pending = db.execute(
             "SELECT COUNT(*) FROM vocabulary_candidates WHERE review_status='pending'"
         ).fetchone()[0]
+        # Files d'attente : la Synthèse n'a besoin que de LEUR NOMBRE pour composer "Que faire
+        # maintenant". Elle téléchargeait pour cela /api/actor-candidates, /api/market/review et
+        # les deux files /api/review en entier -- environ 500 Ko de charge utile pour en dériver
+        # cinq entiers. Ces COUNT sont calculés ici, dans une réponse déjà chargée au démarrage.
+        # Chaque COUNT reproduit exactement la clause de l'endpoint correspondant, pas une
+        # approximation : market_review exclut aussi fact_status='validated' (voir
+        # market_review()), et les événements passent par la même jointure sur actors que
+        # review_queue._list_events -- un événement orphelin ne doit pas être compté ici alors
+        # que la file ne l'afficherait jamais.
+        pending_market_review = db.execute(
+            "SELECT COUNT(*) FROM evidence WHERE evidence_kind='market_application'"
+            " AND review_status='review' AND fact_status!='validated'"
+        ).fetchone()[0]
+        pending_review_offers = db.execute(
+            "SELECT COUNT(*) FROM offers WHERE review_status='review'"
+        ).fetchone()[0]
+
+    with connect(ACTORS_DB) as db:
+        pending_candidates = db.execute(
+            "SELECT COUNT(*) FROM actor_candidates WHERE review_status='pending'"
+        ).fetchone()[0]
+        pending_review_events = db.execute(
+            "SELECT COUNT(*) FROM actor_events e JOIN actors a ON a.id=e.actor_id"
+            " WHERE e.review_status='pending'"
+        ).fetchone()[0]
 
     with connect(TECH_DB) as db:
         technology_count = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
@@ -432,6 +457,15 @@ def overview():
                 if isinstance(ai_client, AnthropicClient)
                 else None
             ),
+        },
+        # Compteurs des files d'attente, pour que la Synthèse compose "Que faire maintenant"
+        # sans télécharger les files elles-mêmes (voir les COUNT ci-dessus).
+        "pending": {
+            "vocabulary": int(vocabulary_pending or 0),
+            "actor_candidates": int(pending_candidates or 0),
+            "market_review": int(pending_market_review or 0),
+            "review_offers": int(pending_review_offers or 0),
+            "review_events": int(pending_review_events or 0),
         },
         "jobs": _jobs_snapshot(),
     }
