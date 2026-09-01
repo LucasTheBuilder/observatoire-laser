@@ -924,18 +924,12 @@ def purge_stale_backlog(days: int = BACKLOG_PURGE_DAYS, db_path: Path | None = N
     return purged
 
 
-def init_databases() -> None:
-    """Crée/actualise le schéma des 3 bases (appelée à chaque démarrage, voir app.py: lifespan).
+def _init_actors_db() -> None:
+    """Base 1/3 : acteurs suivis, leurs pages sources, leur profil de crawl.
 
-    Idempotente et additive : toutes les instructions sont `CREATE TABLE IF NOT EXISTS` /
-    `CREATE INDEX IF NOT EXISTS`, et les colonnes ajoutées après coup passent par
-    _add_columns() qui ne fait rien si la colonne existe déjà -- donc relancer cette fonction
-    sur une base qui a déjà des données ne perd jamais rien, elle ne fait que compléter le
-    schéma manquant. La fonction est découpée en 3 blocs `with connect(...)`, un par fichier
-    SQLite (ACTORS_DB, puis MARKET_DB, puis TECH_DB), chacun créant ses tables puis lançant
-    ses migrations de données (normalisation, dédoublonnage, backfill de colonnes).
-    """
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    Extrait de init_databases(), qui atteignait 974 lignes -- soit 42 % de ce module -- pour
+    un contenu deja naturellement decoupe en trois blocs `with connect(...)`, un par fichier
+    SQLite. Le decoupage ne change ni la logique ni l'ordre d'execution : voir init_databases()."""
     # --- Base 1/3 : ACTORS_DB (acteurs suivis, leurs pages sources, leur profil de crawl) ---
     with connect(ACTORS_DB) as db:
         db.executescript(
@@ -1403,6 +1397,12 @@ def init_databases() -> None:
             )
         _reconcile_orphaned_runs(db)
 
+
+def _init_market_db() -> None:
+    """Base 2/3 : faits marche, offres/capacites et leurs preuves sourcees.
+
+    Voir _init_actors_db() pour le motif du decoupage."""
+
     with connect(MARKET_DB) as db:
         db.executescript(
             """
@@ -1825,6 +1825,12 @@ def init_databases() -> None:
         )
         _reconcile_orphaned_runs(db)
 
+
+def _init_tech_db() -> None:
+    """Base 3/3 : documents technologiques (publications, brevets) et signaux d'industrialisation.
+
+    Voir _init_actors_db() pour le motif du decoupage."""
+
     with connect(TECH_DB) as db:
         db.executescript(
             """
@@ -1911,6 +1917,26 @@ def init_databases() -> None:
             """
         )
         _reconcile_orphaned_runs(db)
+
+
+def init_databases() -> None:
+    """Crée/actualise le schéma des 3 bases (appelée à chaque démarrage, voir app.py: lifespan).
+
+    Idempotente et additive : toutes les instructions sont `CREATE TABLE IF NOT EXISTS` /
+    `CREATE INDEX IF NOT EXISTS`, et les colonnes ajoutées après coup passent par
+    _add_columns() qui ne fait rien si la colonne existe déjà -- donc relancer cette fonction
+    sur une base qui a déjà des données ne perd jamais rien, elle ne fait que compléter le
+    schéma manquant.
+
+    Le travail est délégué à une fonction par fichier SQLite (_init_actors_db, _init_market_db,
+    _init_tech_db), dans cet ordre. L'ordre compte : les deux dernières supposent que DATA_DIR
+    existe déjà, et le reste du module lit ACTORS_DB en premier. Chacune crée ses tables puis
+    lance ses migrations de données (normalisation, dédoublonnage, backfill de colonnes).
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _init_actors_db()
+    _init_market_db()
+    _init_tech_db()
 
 
 def _backup_dir() -> Path:
