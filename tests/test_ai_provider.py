@@ -262,6 +262,86 @@ class AiCandidatesOpenVocabularyTests(unittest.TestCase):
         self.assertNotIn("ai_vocabulary_queued", diagnostics)
 
 
+class AiCandidatesLowConfidenceTests(unittest.TestCase):
+    """Audit du 01/09/2026 : `confidence < 0.72` était la première cause de perte du chemin IA
+    (171 faits jetés sur 330 pertes cumulées, contre 21 `ai_fact_validated` au total), et le
+    rejet portait sur un nombre auto-déclaré par le modèle. Comme rien de _ai_candidates n'est
+    jamais auto-publié (fact_status='review'), il ne protégeait rien que la relecture humaine ne
+    couvrait déjà : il ne coûtait que du rappel. Nouveau contrat fixé ici -- une confiance basse
+    est OBSERVÉE (diagnostic + field_confidence, qui sert à prioriser la file), jamais un rejet.
+    """
+
+    def test_low_confidence_known_labels_reach_review_instead_of_being_dropped(self):
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            text="Femtosecond laser surface texturing of medical stents for production customers.",
+            path="main > article",
+        )
+        fake = FakeAiClient([{
+            "block_index": 0, "market": "Médical", "component": "Stents", "operation": "Texturation",
+            "quote": "Femtosecond laser surface texturing of medical stents for production customers.",
+            "confidence": 0.55,
+        }])
+        diagnostics: dict[str, int] = {}
+        candidates = _ai_candidates("Example", "https://example.test/medical", "Applications", [block], fake, diagnostics)
+        self.assertEqual(1, len(candidates))
+        self.assertEqual("market_application", candidates[0]["kind"])
+        # Conservé, mais toujours derrière le garde humain -- jamais auto-publié.
+        self.assertEqual("review", candidates[0]["fact_status"])
+        # La valeur auto-déclarée est gardée telle quelle : review_queue._priority s'en sert
+        # pour pondérer l'incertitude, au lieu qu'elle serve à supprimer en silence.
+        self.assertEqual(0.55, candidates[0]["confidence"])
+        # Observé sans être rejeté : les deux compteurs montent sur le même fait.
+        self.assertEqual(1, diagnostics.get("ai_fact_low_confidence", 0))
+        self.assertEqual(1, diagnostics.get("ai_fact_validated", 0))
+
+    def test_low_confidence_unknown_label_now_reaches_the_vocabulary_branch(self):
+        # Le seuil s'appliquait AVANT la branche vocabulaire : un libellé inconnu proposé avec
+        # une confiance basse disparaissait sans laisser le moindre candidat à relire. C'est la
+        # perte la plus coûteuse des deux, puisque le vocabulaire est la seule boucle
+        # d'apprentissage réellement fermée de l'app (vocabulary_candidates ->
+        # custom_lexicon_entries, rechargé à chaque collecte).
+        block = ContentBlock(
+            heading="Aerospace pressure sensors",
+            h2="Aéronautique",
+            text="Femtosecond laser texturing of advanced pressure transducer housings for aerospace customers.",
+            path="main > article",
+        )
+        fake = FakeAiClient([{
+            "block_index": 0, "market": "Aéronautique", "component": "Boîtiers de capteurs de pression avancés",
+            "operation": "Texturation",
+            "quote": "Femtosecond laser texturing of advanced pressure transducer housings for aerospace customers.",
+            "confidence": 0.55,
+        }])
+        diagnostics: dict[str, int] = {}
+        candidates = _ai_candidates("Example", "https://example.test/aero", "Applications", [block], fake, diagnostics)
+        self.assertEqual(1, len(candidates))
+        self.assertEqual("vocabulary_candidate", candidates[0]["kind"])
+        self.assertEqual(1, diagnostics.get("ai_fact_low_confidence", 0))
+        self.assertEqual(1, diagnostics.get("ai_vocabulary_queued", 0))
+
+    def test_non_verbatim_quote_is_still_a_hard_rejection(self):
+        # Garde-fou de non-régression : retirer le seuil de confiance ne relâche pas la
+        # citation verbatim, qui reste LE critère structurel de rejet (§10.7 : ce sont les
+        # critères structurels qui décident, pas un score continu déguisé).
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            text="Femtosecond laser surface texturing of medical stents for production customers.",
+            path="main > article",
+        )
+        fake = FakeAiClient([{
+            "block_index": 0, "market": "Médical", "component": "Stents", "operation": "Texturation",
+            "quote": "Nous reformulons librement ce que dit la page au lieu de la citer.",
+            "confidence": 0.95,
+        }])
+        diagnostics: dict[str, int] = {}
+        candidates = _ai_candidates("Example", "https://example.test/medical", "Applications", [block], fake, diagnostics)
+        self.assertEqual([], candidates)
+        self.assertEqual(1, diagnostics.get("ai_fact_quote_not_verbatim", 0))
+
+
 class VocabularyCandidateUpsertTests(unittest.TestCase):
     def test_repeated_upsert_dedupes_by_fingerprint_and_bumps_last_seen(self):
         with tempfile.TemporaryDirectory() as tmp:

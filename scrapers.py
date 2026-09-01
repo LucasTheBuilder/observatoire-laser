@@ -1188,6 +1188,12 @@ _NON_PROPOSAL_SENTINELS = {
     "unknown", "<unknown>", "n a", "na", "none", "non identifie", "non applicable", "aucun", "aucune",
 }
 
+# Repère d'observation, PAS un filtre (voir _ai_candidates) : en dessous, le modèle s'est
+# déclaré peu sûr de son propre fait. Conservé à sa valeur historique (l'ancien seuil de rejet)
+# pour que `ai_fact_low_confidence` reste comparable d'une passe à l'autre de part et d'autre du
+# changement du 01/09/2026.
+AI_LOW_CONFIDENCE_MARK = 0.72
+
 
 def _is_real_proposal(value: str) -> bool:
     return bool(value) and _normalize_text(value) not in _NON_PROPOSAL_SENTINELS
@@ -1340,9 +1346,27 @@ def _ai_candidates(
         if not quote or quote not in block.text:
             _inc_diagnostic(diagnostics, "ai_fact_quote_not_verbatim")
             continue
-        if confidence < 0.72:
+        # Audit du 01/09/2026 : ce seuil était de loin la première cause de perte du chemin IA
+        # (171 faits jetés sur 330 pertes cumulées, contre 21 `ai_fact_validated` au total), et
+        # il jetait sur un nombre que le MODÈLE s'attribue lui-même. Il s'appliquait de surcroît
+        # AVANT la branche vocabulaire ci-dessous : un fait à 0.70 ne devenait donc même pas un
+        # candidat vocabulaire, il disparaissait sans trace exploitable.
+        #
+        # Il n'achetait aucune sécurité réelle : rien de cette fonction n'est jamais
+        # auto-publié (fact_status='review' plus bas, cf. docstring), donc la relecture humaine
+        # couvrait déjà exactement ce que ce seuil prétendait couvrir -- il ne coûtait que du
+        # rappel. Même conclusion que le §10.7 de l'audit veille pour les offres : une confiance
+        # numérique n'a pas la résolution nécessaire pour piloter une file de revue ; ce sont
+        # les critères STRUCTURELS qui décident. Ici c'est la citation verbatim (vérifiée juste
+        # au-dessus), qui reste, elle, un rejet ferme.
+        #
+        # La valeur reste enregistrée et ressort telle quelle dans field_confidence : elle sert
+        # désormais à PRIORISER la file (review_queue._priority pondère par l'incertitude), plus
+        # à supprimer en silence. Le compteur garde son nom et son seuil d'origine pour que la
+        # télémétrie reste comparable aux passes antérieures -- il mesure maintenant une
+        # observation ("le modèle s'est déclaré peu sûr"), non plus un rejet.
+        if confidence < AI_LOW_CONFIDENCE_MARK:
             _inc_diagnostic(diagnostics, "ai_fact_low_confidence")
-            continue
 
         fields = {key: _validate_ai_value(fact.get(key), values) for key, values in complementary.items()}
 
