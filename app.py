@@ -618,6 +618,7 @@ def list_actors():
                                p.strategy,p.status AS profile_status,p.confidence,p.generated_by,p.needs_reprofile,p.health_score,
                                p.coverage_ready,p.coverage_discovered,
                                f.founded_year,f.legal_form_code,f.headcount_bracket_code,f.registry_name,f.source_url AS registry_source_url,
+                               f.lei,f.lei_source_url,
                                f.revenue_eur,f.parent_group,
                                c.min_feature_size_um,c.tolerance_um,c.max_part_size_mm,c.throughput_units_per_h,
                                c.wavelengths_nm,c.pulse_duration_fs,c.materials_qualified,c.batch_size_range,

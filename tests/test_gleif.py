@@ -121,13 +121,44 @@ class CollectGleifGroupIdentityTests(unittest.TestCase):
         self.assertEqual(0, result["errors"])
         with dbmod.connect(self.actors_db) as db:
             row = db.execute(
-                """SELECT parent_group,registry_id,registry_active,source_url
+                """SELECT parent_group,lei,lei_active,lei_source_url
                    FROM actor_profile p JOIN actors a ON a.id=p.actor_id WHERE a.name='Meliad'"""
             ).fetchone()
         self.assertEqual("NEWEDGE", row["parent_group"])
-        self.assertEqual(lei, row["registry_id"])
-        self.assertEqual(1, row["registry_active"])
-        self.assertIn(lei, row["source_url"])
+        self.assertEqual(lei, row["lei"])
+        self.assertEqual(1, row["lei_active"])
+        self.assertIn(lei, row["lei_source_url"])
+
+    def test_gleif_never_overwrites_a_national_registry_id(self):
+        # Régression : GLEIF et firmographics écrivaient tous deux registry_id/registry_name/
+        # registry_active, donc le dernier collecteur exécuté effaçait l'identifiant de l'autre.
+        # Constaté en base avant correction (Meliad, acteur français, n'avait plus que son LEI).
+        # Les deux identifiants doivent désormais coexister sur la même ligne.
+        lei = GLEIF_LEI_ALIASES["Meliad"]
+        self._seed_actors(self.actors_db, ["Meliad"])
+        stamp = dbmod.utc_now()
+        with dbmod.connect(self.actors_db) as db:
+            actor_id = db.execute("SELECT id FROM actors WHERE name='Meliad'").fetchone()["id"]
+            db.execute(
+                """INSERT INTO actor_profile(actor_id,founded_year,registry_id,registry_name,
+                       registry_active,source_url,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (actor_id, 2015, "812345678", "France (INSEE/RNE)", 1,
+                 "https://recherche-entreprises.api.gouv.fr/x", stamp, stamp),
+            )
+        FakeClient.canned = {lei: {"legal_name": "MELIAD"}}
+        with patch.object(gleif.httpx, "Client", FakeClient):
+            collect_gleif_group_identity()
+        with dbmod.connect(self.actors_db) as db:
+            row = db.execute(
+                """SELECT registry_id,registry_name,founded_year,lei,lei_active
+                   FROM actor_profile p JOIN actors a ON a.id=p.actor_id WHERE a.name='Meliad'"""
+            ).fetchone()
+        self.assertEqual("812345678", row["registry_id"], "le SIREN a été écrasé par GLEIF")
+        self.assertEqual("France (INSEE/RNE)", row["registry_name"])
+        self.assertEqual(2015, row["founded_year"], "les firmographies nationales ont été perdues")
+        self.assertEqual(lei, row["lei"])
+        self.assertEqual(1, row["lei_active"])
 
     def test_falls_back_to_ultimate_parent_when_no_direct_parent(self):
         lei = GLEIF_LEI_ALIASES["LASEA"]
@@ -152,10 +183,10 @@ class CollectGleifGroupIdentityTests(unittest.TestCase):
         self.assertEqual(0, result["parent_groups_found"])
         with dbmod.connect(self.actors_db) as db:
             row = db.execute(
-                "SELECT parent_group,registry_id FROM actor_profile p JOIN actors a ON a.id=p.actor_id WHERE a.name='3D-Micromac'"
+                "SELECT parent_group,lei FROM actor_profile p JOIN actors a ON a.id=p.actor_id WHERE a.name='3D-Micromac'"
             ).fetchone()
         self.assertIsNone(row["parent_group"])
-        self.assertEqual(lei, row["registry_id"])
+        self.assertEqual(lei, row["lei"])
 
     def test_a_later_run_without_a_relationship_does_not_erase_a_previously_known_parent_group(self):
         lei = GLEIF_LEI_ALIASES["Meliad"]
@@ -196,9 +227,9 @@ class CollectGleifGroupIdentityTests(unittest.TestCase):
             collect_gleif_group_identity()
         with dbmod.connect(self.actors_db) as db:
             row = db.execute(
-                "SELECT registry_active FROM actor_profile p JOIN actors a ON a.id=p.actor_id WHERE a.name='KMLT'"
+                "SELECT lei_active FROM actor_profile p JOIN actors a ON a.id=p.actor_id WHERE a.name='KMLT'"
             ).fetchone()
-        self.assertEqual(0, row["registry_active"])
+        self.assertEqual(0, row["lei_active"])
 
     def test_actor_not_in_live_roster_is_skipped_without_error(self):
         with dbmod.connect(self.actors_db) as db:

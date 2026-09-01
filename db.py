@@ -629,6 +629,31 @@ def _reconcile_technology_signal_maturity(db: sqlite3.Connection) -> None:
             db.execute("UPDATE technology_signals SET bucket=? WHERE id=?", (expected, row["id"]))
 
 
+def _migrate_lei_out_of_registry_columns(db: sqlite3.Connection) -> None:
+    """Déplace les LEI déjà écrits par gleif.py vers les colonnes lei_* dédiées.
+
+    Avant la séparation des colonnes, gleif.py et firmographics.py écrivaient tous deux
+    registry_id/registry_name/registry_active : le dernier collecteur exécuté écrasait
+    l'identifiant de l'autre. Les lignes déjà en base portant un LEI dans registry_id sont
+    donc recopiées ici vers lei/lei_active/lei_source_url/lei_as_of_date, puis leurs colonnes
+    registry_* sont libérées pour le registre national.
+
+    Idempotent à double titre : la garde ``lei IS NULL`` empêche d'écraser un LEI déjà migré,
+    et registry_name est mis à NULL par la migration elle-même, donc la clause LIKE ne peut
+    plus matcher au démarrage suivant.
+    """
+    db.execute(
+        """UPDATE actor_profile
+              SET lei=registry_id,
+                  lei_active=registry_active,
+                  lei_source_url=source_url,
+                  lei_as_of_date=as_of_date,
+                  registry_id=NULL, registry_name=NULL, registry_active=NULL,
+                  source_url=NULL, as_of_date=NULL
+            WHERE lei IS NULL AND registry_id IS NOT NULL AND registry_name LIKE 'GLEIF%'"""
+    )
+
+
 def _widen_actor_candidate_sources_type(db: sqlite3.Connection) -> None:
     """actor_candidate_sources.source_type gagne 'patent' (connecteur EPO OPS, Lot 3 §3.4) --
     SQLite ne sait pas ALTER un CHECK existant : seule option, reconstruire la table. Idempotent
@@ -1217,6 +1242,19 @@ def init_databases() -> None:
             "rss_feed_url": "TEXT",
             "rss_feed_checked_at": "TEXT",
         })
+        # Un acteur peut légitimement porter DEUX identifiants de registre à la fois : un
+        # identifiant national (SIREN via firmographics.py) et un LEI international (gleif.py).
+        # Tant qu'ils partageaient le trio registry_id/registry_name/registry_active, le dernier
+        # collecteur exécuté écrasait silencieusement l'identifiant de l'autre -- constaté en
+        # base (Meliad, acteur français, ne portait plus qu'un LEI). Le LEI a donc désormais ses
+        # propres colonnes, et registry_* redevient réservé au registre national.
+        _add_columns(db, "actor_profile", {
+            "lei": "TEXT",
+            "lei_active": "INTEGER",
+            "lei_source_url": "TEXT",
+            "lei_as_of_date": "TEXT",
+        })
+        _migrate_lei_out_of_registry_columns(db)
         _add_columns(db, "actor_sources", {
             "page_type": "TEXT",
             "source_score": "INTEGER NOT NULL DEFAULT 0",

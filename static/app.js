@@ -1106,6 +1106,9 @@ function firmographicsRows(a) {
   if (a.founded_year) rows.push(["Création", String(a.founded_year)]);
   if (a.legal_form_code) rows.push(["Forme juridique (code INSEE)", a.legal_form_code]);
   if (a.headcount_bracket_code) rows.push(["Effectif (tranche INSEE)", a.headcount_bracket_code]);
+  // Le LEI vit dans ses propres colonnes depuis la séparation registre national / GLEIF : un
+  // acteur peut porter les deux identifiants à la fois, ils ne s'écrasent plus (voir gleif.py).
+  if (a.lei) rows.push(["LEI (GLEIF)", a.lei]);
   return rows;
 }
 

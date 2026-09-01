@@ -36,7 +36,9 @@ from scrapers import HEADERS
 
 GLEIF_API = "https://api.gleif.org/api/v1"
 GLEIF_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
-GLEIF_REGISTRY_LABEL = "GLEIF (api.gleif.org, LEI)"
+# NB : la valeur "GLEIF (api.gleif.org, LEI)" était écrite dans actor_profile.registry_name
+# jusqu'à la séparation des colonnes lei_*. Elle ne sert plus qu'à identifier les lignes
+# héritées, dans db._migrate_lei_out_of_registry_columns -- plus aucune écriture ici.
 
 # Un LEI par acteur, vérifié à la main le 30/08/2026 contre https://api.gleif.org/api/v1/
 # lei-records (adresse/pays/statut croisés avec le site officiel de l'acteur) -- voir le
@@ -78,25 +80,32 @@ def _upsert_actor_profile(
     db, actor_id: int, *, lei: str, active: bool, parent_group: str | None, source_url: str,
 ) -> int:
     """Une ligne par acteur (clé primaire = actor_id), même contrat que firmographics.
-    _upsert_actor_profile. parent_group utilise COALESCE plutôt qu'un remplacement inconditionnel
-    : contrairement à registry_id/registry_name/registry_active (toujours réécrits par le
-    dernier passage GLEIF), une absence de relation ne doit jamais effacer une valeur déjà
-    connue -- voir le docstring du module."""
+    _upsert_actor_profile -- mais sur des colonnes DISJOINTES.
+
+    Le LEI a ses propres colonnes lei/lei_active/lei_source_url/lei_as_of_date : un acteur peut
+    porter à la fois un identifiant national (SIREN, écrit par firmographics.py dans registry_*)
+    et un LEI international, et les deux collecteurs se sont longtemps écrasés l'un l'autre en
+    partageant registry_id/registry_name/registry_active (voir
+    db._migrate_lei_out_of_registry_columns). Ce upsert ne touche donc plus jamais registry_*.
+
+    parent_group utilise COALESCE plutôt qu'un remplacement inconditionnel : contrairement au
+    LEI lui-même (toujours réécrit par le dernier passage GLEIF), une absence de relation ne
+    doit jamais effacer une valeur déjà connue -- voir le docstring du module."""
     stamp = utc_now()
     existing = db.execute("SELECT actor_id FROM actor_profile WHERE actor_id=?", (actor_id,)).fetchone()
     if existing:
         db.execute(
-            """UPDATE actor_profile SET registry_id=?,registry_name=?,registry_active=?,
-                      parent_group=COALESCE(?,parent_group),source_url=?,as_of_date=?,updated_at=?
+            """UPDATE actor_profile SET lei=?,lei_active=?,lei_source_url=?,lei_as_of_date=?,
+                      parent_group=COALESCE(?,parent_group),updated_at=?
                WHERE actor_id=?""",
-            (lei, GLEIF_REGISTRY_LABEL, int(active), parent_group, source_url, stamp[:10], stamp, actor_id),
+            (lei, int(active), source_url, stamp[:10], parent_group, stamp, actor_id),
         )
         return 0
     db.execute(
         """INSERT INTO actor_profile(
-               actor_id,registry_id,registry_name,registry_active,parent_group,source_url,as_of_date,created_at,updated_at
-           ) VALUES(?,?,?,?,?,?,?,?,?)""",
-        (actor_id, lei, GLEIF_REGISTRY_LABEL, int(active), parent_group, source_url, stamp[:10], stamp, stamp),
+               actor_id,lei,lei_active,lei_source_url,lei_as_of_date,parent_group,created_at,updated_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (actor_id, lei, int(active), source_url, stamp[:10], parent_group, stamp, stamp),
     )
     return 1
 
