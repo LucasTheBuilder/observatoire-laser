@@ -1854,6 +1854,34 @@ function reviewQueueSection(symbol, title, description, items) {
   </section>`;
 }
 
+// La page de revue empile TOUTES les files : au 01/09/2026, 123 faits marché puis 29 capacités
+// puis 174 événements, soit une page de 363 000 pixels où « Capacités à valider » commence à
+// 172 000 px. Les sections existaient et l'API les servait — elles étaient simplement hors de
+// portée à la molette, donc invisibles en pratique.
+//
+// La barre est construite APRÈS le rendu, en lisant les sections réellement présentes, plutôt
+// qu'à partir d'une liste codée en dur : toute section ajoutée à cette page y apparaît sans
+// qu'il faille penser à la déclarer ici.
+function buildReviewJumpBar() {
+  const sections = [...content.querySelectorAll("section")].filter(s => s.querySelector(".section-title h2"));
+  if (!sections.length) return;
+  const links = sections.map((section, i) => {
+    const id = section.id || `review-section-${i}`;
+    section.id = id;
+    const title = section.querySelector(".section-title h2").textContent.trim();
+    const count = section.querySelector(".section-title b")?.textContent.trim() || "";
+    return `<a href="#${id}" class="jump-link">${esc(title)}${count ? ` <b>${esc(count)}</b>` : ""}</a>`;
+  }).join("");
+  const bar = document.createElement("nav");
+  bar.className = "review-jump";
+  bar.innerHTML = `<a href="#" class="jump-link" data-jump-top="1">Faits marché <b>${(state.marketReview || []).length}</b></a>${links}`;
+  content.insertBefore(bar, content.firstChild);
+  bar.querySelector("[data-jump-top]").addEventListener("click", event => {
+    event.preventDefault();
+    window.scrollTo({top: 0, behavior: "auto"});
+  });
+}
+
 function renderMarketReview() {
   const items = state.marketReview || [];
   const visible = items.filter(marketReviewMatchesFilters);
@@ -1873,6 +1901,7 @@ function renderMarketReview() {
   + reviewQueueSection("◈", "Capacités à valider", "Offres/capacités extraites mais pas encore confirmées comme fait retenu.", state.reviewOffers || [])
   + reviewQueueSection("⚑", "Événements à valider", "Événements datés (M&A, financement, mentions presse) détectés mais pas encore vérifiés — jamais visibles ailleurs dans l'app tant qu'ils restent ici.", state.reviewEvents || [])
   + auditSampleSection();
+  buildReviewJumpBar();
   // Chargement paresseux, même principe que state.trends : le premier passage sur la page
   // déclenche le tirage, les suivants réutilisent l'échantillon déjà en mémoire (sans quoi il
   // changerait à chaque re-render, donc à chaque décision).

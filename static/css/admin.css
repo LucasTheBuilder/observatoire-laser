@@ -87,3 +87,16 @@
   .ollama{display:inline-flex;margin-top:14px}
   .profile-grid{grid-template-columns:1fr}
 }
+
+/* Barre de saut de la page de revue. Sticky : sans ça, revenir aux capacités depuis le bas des
+   174 événements demande de remonter ~200 000 px. */
+/* flex-direction:row EXPLICITE : layout.css porte un selecteur nu `nav{flex-direction:column}`
+   pour la barre laterale, qui s'applique a TOUT <nav>. Sans cette surcharge les puces
+   s'empilaient sur 4 lignes alors qu'elles tiennent largement (596 px de puces dans 889 px).
+   Le `margin` en raccourci neutralise de meme le margin-top:26px herite du meme selecteur. */
+.review-jump{position:sticky;top:0;z-index:20;display:flex;flex-direction:row;flex-wrap:wrap;gap:8px;
+  align-items:center;padding:10px 0;margin:0 0 14px;background:var(--paper);border-bottom:1px solid var(--line)}
+.review-jump .jump-link{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid var(--line);
+  border-radius:999px;font-size:.82rem;color:var(--ink);text-decoration:none;background:var(--paper)}
+.review-jump .jump-link:hover{border-color:var(--teal);color:var(--teal)}
+.review-jump .jump-link b{font-variant-numeric:tabular-nums;color:var(--muted)}
