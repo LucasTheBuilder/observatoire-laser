@@ -1,5 +1,6 @@
 import { api, apiOrNull } from "./js/api.js";
 import { downloadCSV } from "./js/export.js";
+import { activeFacetCount, explore, facetGroupHtml, toggleFacet } from "./js/explorer.js";
 import { dateLabel, debounce, esc, header, toast } from "./js/ui.js";
 
 const state = {
@@ -35,7 +36,12 @@ const state = {
   marketScores: [],
   query: "",
   offerQuery: "",
-  offerDrill: {family: null, level2: null, level3: null},
+  // Offres & capacités : même modèle que la page Technologie laser (voir explorer.js).
+  // Les sept groupes de facettes se croisent entre eux et s'unissent en interne.
+  offerType: "Tous",
+  offerFacets: {family: [], actor: [], operation: [], material: [], process: [], stage: [], evidence: []},
+  offerExpanded: [],
+  offerLimit: 12,
   marketDrill: null,
   actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
   marketReviewFilters: {origin: "", factStatus: "", actor: ""},
@@ -59,6 +65,8 @@ const state = {
   // et les groupes se croisent entre eux (ET). C'est ce que la maquette décrit pour la
   // production, là où le prototype se contentait d'un état actif décoratif.
   techFacets: {axis: [], maturity: [], actor: []},
+  // Groupes de facettes dépliés (voir explorer.js) -- purement d'affichage.
+  techExpanded: [],
   techLimit: 10,
 };
 
@@ -145,8 +153,8 @@ function marketFamilyCards(rows) {
   }).join("")}</div>`;
 }
 
-// Single-level equivalent of offerBreadcrumb: only ever "Tous les marchés" or "Tous les
-// marchés › {market}", but reuses the same visual pattern for consistency across the two pages.
+// Fil d'Ariane à un seul niveau : jamais plus que "Tous les marchés" ou "Tous les
+// marchés › {market}", mais reprend le même motif visuel que le reste des vues à paliers.
 function marketBreadcrumb(selected) {
   if (!selected) return "";
   return `<nav class="drill-breadcrumb" tabindex="-1">
@@ -205,132 +213,14 @@ function groupByFamilies(rows, familiesOf) {
   });
 }
 
-// --- Offers drill-down: family -> operation/property -> material, source list at the leaf ----
-// A material has exactly one parent group here (unlike top-level families, which can overlap):
-// grouping by material is meant to narrow down a search, not to re-surface the same duplicate-
-// membership behavior already handled at the family level.
-const MATERIAL_GROUP = {
-  "Métal": "Métaux", "Nitinol": "Métaux", "Magnésium": "Métaux",
-  "Verre": "Matériau transparent", "Saphir": "Matériau transparent",
-  "Polymère": "Polymère", "Silicium": "Silicium", "Céramique": "Céramique", "Composite": "Composite",
-};
-// Only groups with more than one raw material inside them get a further level-3 split; a
-// single-material group (Polymère, Silicium, Céramique, Composite) goes straight to sources.
-const MATERIAL_GROUP_HAS_SUBLEVEL = new Set(["Métaux", "Matériau transparent"]);
-
-// Some rows carry the raw English operation name instead of the canonical French label (older
-// technology/product rows) -- normalized here so "Dicing" and "Microdécoupe" don't split into
-// two separate buckets for what is the same operation.
+// Certaines lignes portent le nom d'operation brut en anglais plutot que le libelle
+// canonique francais (anciennes lignes technology/product) -- normalise ici pour que
+// "Dicing" et "Microdecoupe" ne se separent pas en deux facettes pour la meme operation.
 const OPERATION_ALIAS = {"Dicing": "Microdécoupe"};
 
 function normalizedOperation(row) {
   const op = (row.operation || "").trim();
   return OPERATION_ALIAS[op] || op || null;
-}
-
-// Fonctionnalisation is grouped by the surface property actually achieved, not by the generic
-// operation label -- most source pages only say "texturation"/"fonctionnalisation de surface"
-// without naming the specific property, so most rows land in the catch-all today; the buckets
-// stay meaningful as sources get more precise.
-const FONCTIONNALISATION_SUBFAMILIES = [
-  {label: "Hydrophobie", test: t => /hydrophob|hydrophile|oléophobe|olephobe|wetting|mouillabilit/i.test(t)},
-  {label: "Anti-givre", test: t => /anti-?givre|anti-?bu[ée]e|anti-?frost|icing/i.test(t)},
-  {label: "Frottement", test: t => /frottement|friction|tribolog/i.test(t)},
-];
-
-function fonctionnalisationSubfamily(row) {
-  const text = [row.operation, row.capability].filter(Boolean).join(" ");
-  const hit = FONCTIONNALISATION_SUBFAMILIES.find(f => f.test(text));
-  return hit ? hit.label : "Autre fonctionnalisation";
-}
-
-// Structuration interne (3 items total) and Autres (heterogeneous by nature) don't have a
-// meaningful second level -- clicking them goes straight to the source list.
-const FAMILIES_WITHOUT_LEVEL2 = new Set(["Structuration interne", "Autres"]);
-
-function groupSimple(rows, keyOf) {
-  const map = new Map();
-  for (const row of rows) {
-    const key = keyOf(row);
-    if (!map.has(key)) map.set(key, []);
-    map.get(key).push(row);
-  }
-  return [...map.entries()].sort((a, b) => b[1].length - a[1].length);
-}
-
-function familyLevel2Groups(family, rows) {
-  if (family === "Usinage") return groupSimple(rows, row => normalizedOperation(row) || "Autres opérations d’usinage");
-  if (family === "Fonctionnalisation") return groupSimple(rows, fonctionnalisationSubfamily);
-  if (family === "Matériau") return groupSimple(rows, row => MATERIAL_GROUP[row.material] || "Autres matériaux");
-  return null;
-}
-
-function rowsForDrill(filtered, drill) {
-  let rows = (groupByFamilies(filtered, capabilityFamilies).find(([label]) => label === drill.family) || [null, []])[1];
-  if (!drill.level2) return rows;
-  const level2Groups = familyLevel2Groups(drill.family, rows) || [];
-  rows = (level2Groups.find(([label]) => label === drill.level2) || [null, []])[1];
-  if (!drill.level3) return rows;
-  const level3Groups = groupSimple(rows, row => row.material || "Non précisé");
-  return (level3Groups.find(([label]) => label === drill.level3) || [null, []])[1];
-}
-
-function offerBreadcrumb(drill) {
-  const segments = [{label: "Toutes les familles", drill: {family: null, level2: null, level3: null}}];
-  if (drill.family) segments.push({label: drill.family, drill: {family: drill.family, level2: null, level3: null}});
-  if (drill.level2) segments.push({label: drill.level2, drill: {family: drill.family, level2: drill.level2, level3: null}});
-  if (drill.level3) segments.push({label: drill.level3, drill: {family: drill.family, level2: drill.level2, level3: drill.level3}});
-  return `<nav class="drill-breadcrumb" tabindex="-1">${segments.map((seg, i) => {
-    if (i === segments.length - 1) return `<span class="drill-crumb current">${esc(seg.label)}</span>`;
-    return `<button class="drill-crumb" data-drill='${esc(JSON.stringify(seg.drill))}'>${esc(seg.label)}</button><span class="drill-sep">›</span>`;
-  }).join("")}</nav>`;
-}
-
-function offerCategoryGrid(groups) {
-  return `<div class="fam-grid">${groups.map(([label, rows]) => `
-    <button class="fam-card fam-card-link" data-drill='${esc(JSON.stringify({family: label, level2: null, level3: null}))}'>
-      <header><h3>${esc(label)}</h3><b>${rows.length}</b></header>
-      <p class="fam-card-hint">${rows.length ? "Explorer →" : "Aucune capacité pour le moment"}</p>
-    </button>`).join("")}</div>`;
-}
-
-// Same visual card as offerCategoryGrid, but the click target carries the full resulting drill
-// state (family already fixed) instead of assuming it's always a fresh top-level family.
-function offerSubCategoryGrid(drill, groups) {
-  return `<div class="fam-grid">${groups.map(([label, rows]) => `
-    <button class="fam-card fam-card-link" data-drill='${esc(JSON.stringify({...drill, level2: drill.level2 || label, level3: drill.level2 ? label : null}))}'>
-      <header><h3>${esc(label)}</h3><b>${rows.length}</b></header>
-      <p class="fam-card-hint">${rows.length ? "Explorer →" : "Aucune capacité pour le moment"}</p>
-    </button>`).join("")}</div>`;
-}
-
-function offerEmptyMessage(hasQuery) {
-  return `<div class="empty">${hasQuery
-    ? "Aucun résultat pour cette recherche dans cette catégorie."
-    : "Aucune capacité dans cette catégorie pour le moment."}</div>`;
-}
-
-function renderOfferDrillContent(filtered, hasQuery) {
-  const drill = state.offerDrill;
-  if (!drill.family) {
-    const families = groupByFamilies(filtered, capabilityFamilies);
-    return offerBreadcrumb(drill) + (families.length ? offerCategoryGrid(families) : offerEmptyMessage(hasQuery));
-  }
-  const familyRows = rowsForDrill(filtered, {family: drill.family, level2: null, level3: null});
-  if (!drill.level2 && !FAMILIES_WITHOUT_LEVEL2.has(drill.family)) {
-    const level2Groups = familyLevel2Groups(drill.family, familyRows) || [];
-    return offerBreadcrumb(drill) + (level2Groups.length ? offerSubCategoryGrid(drill, level2Groups) : offerEmptyMessage(hasQuery));
-  }
-  if (drill.level2 && !drill.level3 && MATERIAL_GROUP_HAS_SUBLEVEL.has(drill.level2)) {
-    const level2Rows = rowsForDrill(filtered, {family: drill.family, level2: drill.level2, level3: null});
-    const level3Groups = groupSimple(level2Rows, row => row.material || "Non précisé");
-    return offerBreadcrumb(drill) + (level3Groups.length ? offerSubCategoryGrid(drill, level3Groups) : offerEmptyMessage(hasQuery));
-  }
-  const rows = rowsForDrill(filtered, drill);
-  const hideMaterialSuffix = drill.family === "Matériau";
-  return offerBreadcrumb(drill) + (rows.length
-    ? `<ul class="fam-list">${rows.map(row => offerFamilyItem(row, {hideMaterialSuffix})).join("")}</ul>`
-    : offerEmptyMessage(hasQuery));
 }
 
 // Competitive class is an analyst-assigned field (see db.update_actor_classification),
@@ -817,57 +707,238 @@ function marketSignalGrid(rows) {
   return familyCardGrid(groups, marketSignalItem);
 }
 
+// --- Offres & capacités : l'explorateur du savoir-faire des acteurs suivis -----------------
+//
+// Même anatomie que "Technologie laser" (voir explorer.js et static/css/explorer.css) :
+// compteurs, recherche, facettes cumulatives, tableau, panneau de preuves.
+//
+// Remplace l'ancienne exploration par paliers (famille -> opération/propriété -> matériau ->
+// sources). Ce parcours n'exposait que trois des sept dimensions portées par une capacité et
+// imposait un chemin : « les capacités sur le verre chez Fraunhofer » obligeait à entrer par
+// Matériau, ce qui perdait l'acteur en route. Les facettes se croisent, elles.
+//
+// La classification par famille (capabilityFamilies) est conservée telle quelle, en facette :
+// elle encode un vrai savoir métier, et son classement multiple -- une capacité peut relever de
+// plusieurs familles -- correspond exactement au contrat `valuesOf` d'explore().
+
+const OF_TYPE_TABS = ["Tous", "Capacités", "Services", "Technologies", "Produits"];
+const OF_TAB_TYPE = {Capacités: "capability", Services: "service", Technologies: "technology", Produits: "product"};
+const OF_KIND_CLASS = {capability: "capacite", service: "service", technology: "technologie", product: "produit"};
+// Mots-clés pris dans le vocabulaire réellement présent en base, pour qu'un clic ramène
+// toujours des lignes.
+const OF_SUGGESTIONS = ["verre", "texturation", "microperçage"];
+const OF_PAGE_SIZE = 12;
+
+const OF_EVIDENCE_LABELS = {proof: "Démontrée", claim: "Déclarative", third_party: "Tierce partie"};
+
+function ofOperation(row) { return normalizedOperation(row) || "Opération non précisée"; }
+function ofMaterial(row) { return row.material || "Matériau non précisé"; }
+function ofProcess(row) { return row.laser_process || "Procédé non précisé"; }
+function ofStage(row) { return row.industrial_stage || "Maturité non renseignée"; }
+function ofEvidence(row) { return OF_EVIDENCE_LABELS[row.evidence_type] || "Non qualifiée"; }
+
+// `performance` n'est DÉLIBÉRÉMENT pas une facette : sur 363 capacités, la colonne porte
+// 42 valeurs distinctes dont 34 sont des spécifications en texte libre écrites une seule fois
+// (« Jusqu'à 300 trous/seconde sur titane 0,3 mm d'épaisseur… »). Une facette suppose un
+// vocabulaire fermé ; ici on aurait 34 cases à une ligne. Le contenu reste précieux, il est
+// donc affiché dans la ligne et dans le panneau de preuves, mais il ne sert pas à filtrer.
+const OF_FACET_GROUPS = [
+  {key: "family", label: "FAMILLE", valuesOf: capabilityFamilies},
+  {key: "actor", label: "ACTEUR", valuesOf: row => [row.actor_name]},
+  {key: "operation", label: "OPÉRATION", valuesOf: row => [ofOperation(row)]},
+  {key: "material", label: "MATÉRIAU", valuesOf: row => [ofMaterial(row)]},
+  {key: "process", label: "PROCÉDÉ LASER", valuesOf: row => [ofProcess(row)]},
+  {key: "stage", label: "MATURITÉ", valuesOf: row => [ofStage(row)]},
+  {key: "evidence", label: "NATURE DE LA PREUVE", valuesOf: row => [ofEvidence(row)]},
+];
+
+function ofHaystack(row) {
+  return [row.actor_name, row.capability, row.operation, row.laser_process, row.material,
+          row.performance, row.industrial_stage, row.page_type, offerTypeLabel(row.offer_type)]
+    .filter(Boolean).join(" ");
+}
+
+function ofSourcesLabel(row) {
+  const proofs = Number(row.proofs || 0);
+  return Number(row.languages || 0) > 1 ? `${proofs} src · ${row.languages} lang.` : `${proofs} src`;
+}
+
+function ofOfferRow(row) {
+  // L'opération, le matériau et le procédé ne sont affichés que s'ils sont renseignés : les
+  // libellés de repli servent aux facettes (pour rester atteignable), pas à meubler la ligne
+  // avec trois « non précisé » qui noieraient l'information réelle.
+  const meta = [row.operation && normalizedOperation(row), row.material, row.laser_process]
+    .filter(Boolean).map(value => `<span>${esc(value)}</span>`).join('<span class="ex-sep">·</span>');
+  return `<button type="button" class="ex-row" data-of-open="${Number(row.id)}">
+    <span class="ex-kind ${esc(OF_KIND_CLASS[row.offer_type] || "autre")}">${esc(offerTypeLabel(row.offer_type))}</span>
+    <span class="ex-doc">
+      <span class="ex-doc-title">${esc(row.capability)}</span>
+      <span class="ex-doc-meta">
+        <span class="ex-actor">${esc(row.actor_name)}</span>
+        ${meta ? `<span class="ex-sep">·</span>${meta}` : ""}
+        <span class="ex-evidence ev-${esc(row.evidence_type || "unknown")}">${esc(ofEvidence(row))}</span>
+      </span>
+      ${row.performance ? `<span class="ex-spec">${esc(row.performance)}</span>` : ""}
+    </span>
+    <span class="ex-date">${esc(ofSourcesLabel(row))}</span>
+  </button>`;
+}
+
+// Un seul endroit qui décrit la forme des facettes vides : la réinitialisation et l'état
+// initial ne peuvent pas diverger (un groupe oublié ferait planter toggleFacet).
+function emptyOfferFacets() {
+  return Object.fromEntries(OF_FACET_GROUPS.map(group => [group.key, []]));
+}
+
 function renderOffers() {
-  // Preserve focus/caret only if the search box itself had it -- a drill-down click also calls
-  // this function, and unconditionally refocusing the search input on every render would yank
-  // keyboard focus away from the category the user just clicked into.
-  const hadSearchFocus = document.activeElement && document.activeElement.id === "offer-search";
+  const hadSearchFocus = document.activeElement && document.activeElement.id === "ex-search";
   const caret = hadSearchFocus ? document.activeElement.selectionStart : null;
 
-  const q = state.offerQuery.trim().toLowerCase();
-  const filtered = state.offers.filter(row => {
-    const haystack = [row.actor_name, row.offer_type, row.capability, row.operation, row.laser_process, row.material, row.performance, row.industrial_stage, row.page_type].join(" ").toLowerCase();
-    return haystack.includes(q);
+  const offers = state.offers || [];
+  const {filtered, options} = explore(offers, {
+    query: state.offerQuery,
+    haystackOf: ofHaystack,
+    groups: OF_FACET_GROUPS,
+    active: state.offerFacets,
+    prefilter: state.offerType === "Tous" ? null : row => row.offer_type === OF_TAB_TYPE[state.offerType],
   });
-  const actors = new Set(filtered.map(row => row.actor_name)).size;
-  content.innerHTML = header(
-    "Veille concurrentielle",
-    "Offres & capacités",
-    "Prestations, procédés et savoir-faire détectés chez les acteurs suivis. Cliquez une famille pour explorer ses sous-catégories (opération ou propriété, puis matériau si besoin) jusqu’à la liste des sources. Une capacité qui relève de plusieurs familles à la fois (ex. découpe + matériau) apparaît dans chacune d’elles. Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.",
-    `<div class="header-actions"><button class="export-btn" data-export="offers">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser les preuves</button></div>`
-  ) +
-  `<div class="actor-toolbar offer-toolbar"><input id="offer-search" value="${esc(state.offerQuery)}" placeholder="Rechercher un acteur, un procédé, une opération, un matériau…"><span>${filtered.length} capacités · ${actors} acteurs</span></div>
-   <section><div class="section-title"><div><span>01</span><div><h2>Cartographie des offres détectées</h2><p>Famille → opération/propriété → matériau si besoin → sources.</p></div></div><b>${filtered.length} capacités</b></div>
-   <div id="offer-drill-root">${renderOfferDrillContent(filtered, q.length > 0)}</div></section>`;
+  const shown = filtered.slice(0, state.offerLimit);
 
-  const input = document.querySelector("#offer-search");
+  const typeCount = type => offers.filter(row => row.offer_type === type).length;
+  const actors = new Set(offers.map(row => row.actor_name)).size;
+  const demonstrated = offers.filter(row => row.evidence_type === "proof").length;
+  const claimed = offers.filter(row => row.evidence_type === "claim").length;
+  const inProduction = offers.filter(row => row.industrial_stage === "Production").length;
+  const upstream = offers.filter(row => ["R&D", "Prototype", "Pré-industrialisation"].includes(row.industrial_stage)).length;
+  const materials = new Set(offers.filter(row => row.material).map(row => row.material)).size;
+  const withoutMaterial = offers.filter(row => !row.material).length;
+
+  const facetsActive = activeFacetCount(state.offerFacets);
+  const countLabel = state.offerQuery.trim()
+    ? `${filtered.length} résultat(s) pour « ${esc(state.offerQuery.trim())} »`
+    : `${filtered.length} capacité(s)`;
+  const filteredActors = new Set(filtered.map(row => row.actor_name)).size;
+
+  content.innerHTML = `<div class="ex-page"><div class="ex-inner">
+    <div class="ex-head">
+      <div>
+        <p class="ex-eyebrow">VEILLE CONCURRENTIELLE</p>
+        <h1>Offres &amp; capacités</h1>
+        <p class="ex-lede">Prestations, procédés et savoir-faire détectés chez les acteurs suivis. Les facettes croisent famille, opération, matériau, procédé et maturité. Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.</p>
+      </div>
+      <div class="ex-head-actions">
+        <button type="button" class="ex-btn" data-of-export>↓ Exporter CSV</button>
+        <button type="button" class="ex-btn ex-primary" data-run="market">↻ Actualiser les preuves</button>
+      </div>
+    </div>
+
+    <div class="ex-kpis">
+      <div class="ex-kpi"><div class="ex-kpi-label">CAPACITÉS</div><div class="ex-kpi-value">${offers.length}</div><div class="ex-kpi-note">chez ${actors} acteur${actors > 1 ? "s" : ""}</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">DÉMONTRÉES</div><div class="ex-kpi-value">${demonstrated}</div><div class="ex-kpi-note">${claimed} déclaratives</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">EN PRODUCTION</div><div class="ex-kpi-value">${inProduction}</div><div class="ex-kpi-note">${upstream} en amont</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">MATÉRIAUX</div><div class="ex-kpi-value">${materials}</div><div class="ex-kpi-note">${withoutMaterial} sans matériau précisé</div></div>
+    </div>
+
+    <div class="ex-search">
+      <span class="ex-search-icon" aria-hidden="true">⌕</span>
+      <input id="ex-search" type="search" value="${esc(state.offerQuery)}" placeholder="Rechercher un acteur, un procédé, une opération, un matériau…" aria-label="Rechercher dans les offres et capacités">
+      ${state.offerQuery ? `<button type="button" class="ex-clear" data-of-clear>Effacer ✕</button>` : ""}
+      <div class="ex-suggestions">${OF_SUGGESTIONS.map(s => `<button type="button" class="ex-suggestion" data-of-suggest="${esc(s)}">${esc(s)}</button>`).join("")}</div>
+    </div>
+
+    <div class="ex-body">
+      <div class="ex-facets">
+        <div class="ex-facet-group">
+          <div class="ex-facet-title">TYPE D’OFFRE</div>
+          ${Object.entries(OF_TAB_TYPE).map(([label, type]) => {
+            const count = typeCount(type);
+            const on = state.offerType === label;
+            return `<button type="button" class="ex-facet${on ? " is-active" : ""}${count ? "" : " is-empty"}" data-of-tab="${esc(label)}" aria-pressed="${on}"${count || on ? "" : " disabled"}><span>${esc(label)}</span><span>${count}</span></button>`;
+          }).join("")}
+        </div>
+        ${OF_FACET_GROUPS.map(g => facetGroupHtml(g.label, g.key, options[g.key], state.offerFacets[g.key], {expanded: state.offerExpanded.includes(g.key)})).join("")}
+        ${facetsActive ? `<button type="button" class="ex-facet-reset" data-of-reset-facets>Réinitialiser les facettes (${facetsActive})</button>` : ""}
+      </div>
+
+      <div class="ex-results">
+        <div class="ex-tabs">
+          ${OF_TYPE_TABS.map(tab => `<button type="button" class="ex-tab${tab === state.offerType ? " is-active" : ""}" data-of-tab="${esc(tab)}">${esc(tab)}</button>`).join("")}
+          <span class="ex-tab-spacer"></span>
+          <span class="ex-count">${countLabel}${filtered.length ? ` · ${filteredActors} acteur${filteredActors > 1 ? "s" : ""}` : ""}</span>
+        </div>
+
+        <div class="ex-table">
+          <div class="ex-row ex-thead"><div>TYPE</div><div>CAPACITÉ · ACTEUR · PROCÉDÉ</div><div>SOURCES</div></div>
+          ${shown.length ? shown.map(ofOfferRow).join("") : `<div class="ex-empty"><strong>Aucune capacité ne correspond à cette recherche.</strong><p>Essayez un mot-clé plus court, ou <button type="button" data-of-reset-all>réinitialisez la recherche</button>.</p></div>`}
+        </div>
+        <div class="ex-foot">Affichage de ${shown.length} capacité(s) sur ${filtered.length}${filtered.length === offers.length ? "" : ` (corpus complet : ${offers.length})`}. ${shown.length < filtered.length ? `<button type="button" class="ex-more" data-of-more>Charger la suite →</button>` : ""}</div>
+      </div>
+    </div>
+  </div></div>`;
+
+  const input = document.querySelector("#ex-search");
   if (input) {
-    if (hadSearchFocus) {
-      input.focus({preventScroll: true});
-      input.setSelectionRange(caret, caret);
-    }
-    input.addEventListener("input", debounce(e => {
-      state.offerQuery = e.target.value;
-      // A fresh search should search everything, not stay pinned inside whatever category was
-      // open -- otherwise a query that doesn't match the current branch silently looks like
-      // "no results" for the whole app instead of "try a different category".
-      state.offerDrill = {family: null, level2: null, level3: null};
+    if (hadSearchFocus) { input.focus({preventScroll: true}); input.setSelectionRange(caret, caret); }
+    input.addEventListener("input", debounce(event => {
+      state.offerQuery = event.target.value;
+      state.offerLimit = OF_PAGE_SIZE;
       renderOffers();
     }));
   }
-  wireActions();
-  document.querySelectorAll("#offer-drill-root [data-drill]").forEach(el => el.addEventListener("click", () => {
-    state.offerDrill = JSON.parse(el.dataset.drill);
-    renderOffers();
-    const root = document.querySelector("#offer-drill-root .drill-breadcrumb");
-    if (root) root.focus({preventScroll: false});
+
+  const rerender = mutate => () => { mutate(); state.offerLimit = OF_PAGE_SIZE; renderOffers(); };
+  document.querySelectorAll("[data-of-tab]").forEach(el => el.addEventListener("click", rerender(() => {
+    // Recliquer l'onglet actif le désélectionne, sinon la facette TYPE D'OFFRE n'aurait aucun
+    // moyen de revenir à "Tous".
+    state.offerType = state.offerType === el.dataset.ofTab ? "Tous" : el.dataset.ofTab;
+  })));
+  document.querySelectorAll("[data-of-suggest]").forEach(el => el.addEventListener("click",
+    rerender(() => { state.offerQuery = el.dataset.ofSuggest; })));
+  document.querySelector("[data-of-clear]")?.addEventListener("click", rerender(() => { state.offerQuery = ""; }));
+  document.querySelector("[data-of-reset-facets]")?.addEventListener("click",
+    rerender(() => { state.offerFacets = emptyOfferFacets(); }));
+  document.querySelector("[data-of-reset-all]")?.addEventListener("click", rerender(() => {
+    state.offerQuery = ""; state.offerType = "Tous"; state.offerFacets = emptyOfferFacets();
   }));
-  const exportBtn = document.querySelector('[data-export="offers"]');
-  if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("offres-capacites.csv", filtered, [
-    {key: "actor_name", label: "Acteur"}, {key: "offer_type", label: "Type"},
-    {key: "capability", label: "Capacité"}, {key: "operation", label: "Opération"},
-    {key: "laser_process", label: "Procédé"}, {key: "material", label: "Matériau"},
-  ]));
+  document.querySelectorAll("[data-ex-facet]").forEach(el => el.addEventListener("click",
+    rerender(() => { state.offerFacets = toggleFacet(state.offerFacets, el.dataset.exFacet, el.dataset.exValue); })));
+  document.querySelectorAll("[data-ex-expand]").forEach(el => el.addEventListener("click", () => {
+    const key = el.dataset.exExpand;
+    state.offerExpanded = state.offerExpanded.includes(key)
+      ? state.offerExpanded.filter(k => k !== key) : [...state.offerExpanded, key];
+    renderOffers();
+  }));
+  document.querySelector("[data-of-more]")?.addEventListener("click", () => {
+    state.offerLimit += OF_PAGE_SIZE;
+    renderOffers();
+  });
+  document.querySelectorAll("[data-of-open]").forEach(el => el.addEventListener("click",
+    () => showOfferProofs(Number(el.dataset.ofOpen))));
+  document.querySelector("[data-of-export]")?.addEventListener("click", () => downloadCSV(
+    "offres-capacites.csv",
+    filtered.map(row => ({
+      actor_name: row.actor_name,
+      offer_type: offerTypeLabel(row.offer_type),
+      capability: row.capability,
+      families: capabilityFamilies(row).join(" · "),
+      operation: row.operation ? normalizedOperation(row) : "",
+      laser_process: row.laser_process || "",
+      material: row.material || "",
+      performance: row.performance || "",
+      industrial_stage: row.industrial_stage || "",
+      evidence: ofEvidence(row),
+      proofs: Number(row.proofs || 0),
+    })),
+    [
+      {key: "actor_name", label: "Acteur"}, {key: "offer_type", label: "Type"},
+      {key: "capability", label: "Capacité"}, {key: "families", label: "Famille"},
+      {key: "operation", label: "Opération"}, {key: "laser_process", label: "Procédé"},
+      {key: "material", label: "Matériau"}, {key: "performance", label: "Performance annoncée"},
+      {key: "industrial_stage", label: "Maturité"}, {key: "evidence", label: "Nature de la preuve"},
+      {key: "proofs", label: "Sources"},
+    ],
+  ));
+  wireActions();
 }
 
 // --- Technologie laser : le corpus technique unifié ---------------------------------------
@@ -923,76 +994,49 @@ function tcHaystack(row) {
     .filter(Boolean).join(" ").toLowerCase();
 }
 
-// `skip` laisse un groupe de facettes hors du filtre pour pouvoir compter ses propres options
-// sur le résultat des AUTRES groupes. Sans ça, un compteur annoncerait des lignes que le clic
-// ne ramènerait jamais -- l'écueil classique des facettes cumulatives.
-function tcMatches(row, {query, type, facets, skip}) {
-  if (type !== "Tous" && row.kind !== TC_TAB_KIND[type]) return false;
-  if (query && !tcHaystack(row).includes(query)) return false;
-  if (skip !== "axis" && facets.axis.length && !facets.axis.some(v => tcRowAxes(row).includes(v))) return false;
-  if (skip !== "maturity" && facets.maturity.length && !facets.maturity.includes(tcRowMaturity(row))) return false;
-  if (skip !== "actor" && facets.actor.length && !facets.actor.some(v => tcRowActors(row).includes(v))) return false;
-  return true;
-}
-
-function tcFacetGroup(title, group, options, active) {
-  if (!options.length) return "";
-  return `<div class="tc-facet-group">
-    <div class="tc-facet-title">${esc(title)}</div>
-    ${options.map(([value, count]) => {
-      const on = active.includes(value);
-      return `<button type="button" class="tc-facet${on ? " is-active" : ""}${count ? "" : " is-empty"}" data-tc-facet="${esc(group)}" data-tc-value="${esc(value)}" aria-pressed="${on}"${count || on ? "" : " disabled"}><span>${esc(value)}</span><span>${count}</span></button>`;
-    }).join("")}
-  </div>`;
-}
+// Les trois groupes de facettes de la page, au format attendu par explore(). Chaque valuesOf
+// renvoie un libellé de repli plutôt qu'un tableau vide : une ligne sans axe doit rester
+// atteignable ("Non qualifié"), sinon elle disparaît sans explication dès qu'on touche au
+// groupe -- et sur ce corpus, la majorité des publications sont dans ce cas.
+const TC_FACET_GROUPS = [
+  {key: "axis", label: "AXE TECHNOLOGIQUE", valuesOf: tcRowAxes},
+  {key: "maturity", label: "MATURITÉ", valuesOf: row => [tcRowMaturity(row)]},
+  {key: "actor", label: "ACTEUR", valuesOf: tcRowActors},
+];
 
 function tcCorpusRow(row) {
   const axes = row.axes.length
-    ? `<span class="tc-axis">${row.axes.map(esc).join(" · ")}</span>`
-    : `<span class="tc-axis tc-none">Axe non qualifié</span>`;
-  return `<button type="button" class="tc-row" data-tc-open="${esc(row.uid)}">
-    <span class="tc-kind ${esc(row.kind)}">${esc(TC_KIND_LABELS[row.kind] || row.kind)}</span>
-    <span class="tc-doc">
-      <span class="tc-doc-title">${esc(row.title)}</span>
-      <span class="tc-doc-meta">${axes}<span class="tc-sep">·</span><span class="tc-actor">${esc(tcActorLabel(row))}</span><span class="tc-sep">·</span><span class="tc-ref">${esc(row.reference)}</span></span>
+    ? `<span class="ex-axis">${row.axes.map(esc).join(" · ")}</span>`
+    : `<span class="ex-axis ex-none">Axe non qualifié</span>`;
+  return `<button type="button" class="ex-row" data-ex-open="${esc(row.uid)}">
+    <span class="ex-kind ${esc(row.kind)}">${esc(TC_KIND_LABELS[row.kind] || row.kind)}</span>
+    <span class="ex-doc">
+      <span class="ex-doc-title">${esc(row.title)}</span>
+      <span class="ex-doc-meta">${axes}<span class="ex-sep">·</span><span class="ex-actor">${esc(tcActorLabel(row))}</span><span class="ex-sep">·</span><span class="ex-ref">${esc(row.reference)}</span></span>
     </span>
-    <span class="tc-date">${esc(tcDateLabel(row))}</span>
+    <span class="ex-date">${esc(tcDateLabel(row))}</span>
   </button>`;
 }
 
 function renderTechCorpus() {
   // Le rendu réécrit toute la page : si la frappe vient de la barre de recherche, il faut lui
   // rendre le focus et la position du curseur -- même précaution que renderOffers().
-  const hadSearchFocus = document.activeElement && document.activeElement.id === "tc-search";
+  const hadSearchFocus = document.activeElement && document.activeElement.id === "ex-search";
   const caret = hadSearchFocus ? document.activeElement.selectionStart : null;
 
   const corpus = state.techCorpus || [];
   const query = state.techQuery.trim().toLowerCase();
-  const criteria = {query, type: state.techType, facets: state.techFacets};
 
-  const filtered = corpus.filter(row => tcMatches(row, criteria));
+  const {filtered, options} = explore(corpus, {
+    query: state.techQuery,
+    haystackOf: tcHaystack,
+    groups: TC_FACET_GROUPS,
+    active: state.techFacets,
+    // L'onglet de type restreint le corpus en amont : il n'est pas une facette parmi
+    // d'autres, donc il s'applique aussi aux compteurs des autres groupes.
+    prefilter: state.techType === "Tous" ? null : row => row.kind === TC_TAB_KIND[state.techType],
+  });
   const shown = filtered.slice(0, state.techLimit);
-
-  const countBy = (skip, valuesOf) => {
-    const counts = new Map();
-    for (const row of corpus) {
-      if (!tcMatches(row, {...criteria, skip})) continue;
-      for (const value of valuesOf(row)) counts.set(value, (counts.get(value) || 0) + 1);
-    }
-    return counts;
-  };
-  // Une option reste affichée à 0 tant qu'elle existe dans le corpus complet : une facette qui
-  // disparaît quand on clique ailleurs empêche de comprendre le filtre qu'on vient de poser.
-  const optionsFor = (valuesOf, counts) => {
-    const all = new Set();
-    for (const row of corpus) for (const value of valuesOf(row)) all.add(value);
-    return [...all].map(value => [value, counts.get(value) || 0])
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "fr"));
-  };
-
-  const axisOptions = optionsFor(tcRowAxes, countBy("axis", tcRowAxes));
-  const maturityOptions = optionsFor(row => [tcRowMaturity(row)], countBy("maturity", row => [tcRowMaturity(row)]));
-  const actorOptions = optionsFor(tcRowActors, countBy("actor", tcRowActors));
 
   const kindCount = kind => corpus.filter(row => row.kind === kind).length;
   const publications = kindCount("pub");
@@ -1003,70 +1047,68 @@ function renderTechCorpus() {
   const industrialised = new Set(corpus.filter(row => row.maturity === "Industrialisation").flatMap(row => row.axes)).size;
   const datedProjects = corpus.filter(row => row.kind === "projet" && row.maturity && row.maturity !== "Maturité industrielle non déterminée").length;
 
-  const facetsActive = state.techFacets.axis.length + state.techFacets.maturity.length + state.techFacets.actor.length;
+  const facetsActive = activeFacetCount(state.techFacets);
   const countLabel = query
     ? `${filtered.length} résultat(s) pour « ${esc(state.techQuery.trim())} »`
     : `${filtered.length} document(s)`;
 
-  content.innerHTML = `<div class="tc-page"><div class="tc-inner">
-    <div class="tc-head">
+  content.innerHTML = `<div class="ex-page"><div class="ex-inner">
+    <div class="ex-head">
       <div>
-        <p class="tc-eyebrow">INTELLIGENCE</p>
+        <p class="ex-eyebrow">INTELLIGENCE</p>
         <h1>Technologie laser</h1>
-        <p class="tc-lede">Le corpus technique complet : publications, brevets et projets européens. Les facettes croisent axe technologique, maturité et acteur.</p>
+        <p class="ex-lede">Le corpus technique complet : publications, brevets et projets européens. Les facettes croisent axe technologique, maturité et acteur.</p>
       </div>
-      <div class="tc-head-actions">
-        <button type="button" class="tc-btn" data-tc-export>↓ Exporter CSV</button>
-        <button type="button" class="tc-btn tc-primary" data-run="tech_corpus">↻ Actualiser la veille</button>
+      <div class="ex-head-actions">
+        <button type="button" class="ex-btn" data-ex-export>↓ Exporter CSV</button>
+        <button type="button" class="ex-btn ex-primary" data-run="tech_corpus">↻ Actualiser la veille</button>
       </div>
     </div>
 
-    <div class="tc-kpis">
-      <div class="tc-kpi"><div class="tc-kpi-label">AXES SUIVIS</div><div class="tc-kpi-value">${distinctAxes}</div><div class="tc-kpi-note">${industrialised} industrialisé${industrialised > 1 ? "s" : ""}</div></div>
-      <div class="tc-kpi"><div class="tc-kpi-label">PROJETS EUROPÉENS</div><div class="tc-kpi-value">${projects}</div><div class="tc-kpi-note">${datedProjects} à maturité qualifiée</div></div>
-      <div class="tc-kpi"><div class="tc-kpi-label">BREVETS</div><div class="tc-kpi-value">${patents}</div><div class="tc-kpi-note">${patents ? "collectés" : "aucune collecte aboutie"}</div></div>
-      <div class="tc-kpi"><div class="tc-kpi-label">PUBLICATIONS</div><div class="tc-kpi-value">${publications}</div><div class="tc-kpi-note">${unqualified} sans axe qualifié</div></div>
+    <div class="ex-kpis">
+      <div class="ex-kpi"><div class="ex-kpi-label">AXES SUIVIS</div><div class="ex-kpi-value">${distinctAxes}</div><div class="ex-kpi-note">${industrialised} industrialisé${industrialised > 1 ? "s" : ""}</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">PROJETS EUROPÉENS</div><div class="ex-kpi-value">${projects}</div><div class="ex-kpi-note">${datedProjects} à maturité qualifiée</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">BREVETS</div><div class="ex-kpi-value">${patents}</div><div class="ex-kpi-note">${patents ? "collectés" : "aucune collecte aboutie"}</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">PUBLICATIONS</div><div class="ex-kpi-value">${publications}</div><div class="ex-kpi-note">${unqualified} sans axe qualifié</div></div>
     </div>
 
-    <div class="tc-search">
-      <span class="tc-search-icon" aria-hidden="true">⌕</span>
-      <input id="tc-search" type="search" value="${esc(state.techQuery)}" placeholder="Rechercher un titre, un mot-clé, un DOI, un acteur, un projet…" aria-label="Rechercher dans le corpus technique">
-      ${state.techQuery ? `<button type="button" class="tc-clear" data-tc-clear>Effacer ✕</button>` : ""}
-      <div class="tc-suggestions">${TC_SUGGESTIONS.map(s => `<button type="button" class="tc-suggestion" data-tc-suggest="${esc(s)}">${esc(s)}</button>`).join("")}</div>
+    <div class="ex-search">
+      <span class="ex-search-icon" aria-hidden="true">⌕</span>
+      <input id="ex-search" type="search" value="${esc(state.techQuery)}" placeholder="Rechercher un titre, un mot-clé, un DOI, un acteur, un projet…" aria-label="Rechercher dans le corpus technique">
+      ${state.techQuery ? `<button type="button" class="ex-clear" data-ex-clear>Effacer ✕</button>` : ""}
+      <div class="ex-suggestions">${TC_SUGGESTIONS.map(s => `<button type="button" class="ex-suggestion" data-ex-suggest="${esc(s)}">${esc(s)}</button>`).join("")}</div>
     </div>
 
-    <div class="tc-body">
-      <div class="tc-facets">
-        <div class="tc-facet-group">
-          <div class="tc-facet-title">TYPE DE DOCUMENT</div>
+    <div class="ex-body">
+      <div class="ex-facets">
+        <div class="ex-facet-group">
+          <div class="ex-facet-title">TYPE DE DOCUMENT</div>
           ${[["Publications", publications], ["Brevets", patents], ["Projets européens", projects]].map(([label, count]) => {
             const on = state.techType === label;
-            return `<button type="button" class="tc-facet${on ? " is-active" : ""}${count ? "" : " is-empty"}" data-tc-tab="${esc(label)}" aria-pressed="${on}"${count || on ? "" : " disabled"}><span>${esc(label)}</span><span>${count}</span></button>`;
+            return `<button type="button" class="ex-facet${on ? " is-active" : ""}${count ? "" : " is-empty"}" data-ex-tab="${esc(label)}" aria-pressed="${on}"${count || on ? "" : " disabled"}><span>${esc(label)}</span><span>${count}</span></button>`;
           }).join("")}
         </div>
-        ${tcFacetGroup("AXE TECHNOLOGIQUE", "axis", axisOptions, state.techFacets.axis)}
-        ${tcFacetGroup("MATURITÉ", "maturity", maturityOptions, state.techFacets.maturity)}
-        ${tcFacetGroup("ACTEUR", "actor", actorOptions, state.techFacets.actor)}
-        ${facetsActive ? `<button type="button" class="tc-facet-reset" data-tc-reset-facets>Réinitialiser les facettes (${facetsActive})</button>` : ""}
+        ${TC_FACET_GROUPS.map(g => facetGroupHtml(g.label, g.key, options[g.key], state.techFacets[g.key], {expanded: state.techExpanded.includes(g.key)})).join("")}
+        ${facetsActive ? `<button type="button" class="ex-facet-reset" data-ex-reset-facets>Réinitialiser les facettes (${facetsActive})</button>` : ""}
       </div>
 
-      <div class="tc-results">
-        <div class="tc-tabs">
-          ${TC_TYPE_TABS.map(tab => `<button type="button" class="tc-tab${tab === state.techType ? " is-active" : ""}" data-tc-tab="${esc(tab)}">${esc(tab)}</button>`).join("")}
-          <span class="tc-tab-spacer"></span>
-          <span class="tc-count">${countLabel}</span>
+      <div class="ex-results">
+        <div class="ex-tabs">
+          ${TC_TYPE_TABS.map(tab => `<button type="button" class="ex-tab${tab === state.techType ? " is-active" : ""}" data-ex-tab="${esc(tab)}">${esc(tab)}</button>`).join("")}
+          <span class="ex-tab-spacer"></span>
+          <span class="ex-count">${countLabel}</span>
         </div>
 
-        <div class="tc-table">
-          <div class="tc-row tc-thead"><div>TYPE</div><div>DOCUMENT · AXE · ACTEUR</div><div>DATE</div></div>
-          ${shown.length ? shown.map(tcCorpusRow).join("") : `<div class="tc-empty"><strong>Aucun document ne correspond à cette recherche.</strong><p>Essayez un mot-clé plus court, ou <button type="button" data-tc-reset-all>réinitialisez la recherche</button>.</p></div>`}
+        <div class="ex-table">
+          <div class="ex-row ex-thead"><div>TYPE</div><div>DOCUMENT · AXE · ACTEUR</div><div>DATE</div></div>
+          ${shown.length ? shown.map(tcCorpusRow).join("") : `<div class="ex-empty"><strong>Aucun document ne correspond à cette recherche.</strong><p>Essayez un mot-clé plus court, ou <button type="button" data-ex-reset-all>réinitialisez la recherche</button>.</p></div>`}
         </div>
-        <div class="tc-foot">Affichage de ${shown.length} document(s) sur ${filtered.length}${filtered.length === corpus.length ? "" : ` (corpus complet : ${corpus.length})`}. ${shown.length < filtered.length ? `<button type="button" class="tc-more" data-tc-more>Charger la suite →</button>` : ""}</div>
+        <div class="ex-foot">Affichage de ${shown.length} document(s) sur ${filtered.length}${filtered.length === corpus.length ? "" : ` (corpus complet : ${corpus.length})`}. ${shown.length < filtered.length ? `<button type="button" class="ex-more" data-ex-more>Charger la suite →</button>` : ""}</div>
       </div>
     </div>
   </div></div>`;
 
-  const input = document.querySelector("#tc-search");
+  const input = document.querySelector("#ex-search");
   if (input) {
     if (hadSearchFocus) { input.focus({preventScroll: true}); input.setSelectionRange(caret, caret); }
     input.addEventListener("input", debounce(event => {
@@ -1077,31 +1119,34 @@ function renderTechCorpus() {
   }
 
   const rerender = mutate => () => { mutate(); state.techLimit = TC_PAGE_SIZE; renderTechCorpus(); };
-  document.querySelectorAll("[data-tc-tab]").forEach(el => el.addEventListener("click", rerender(() => {
+  document.querySelectorAll("[data-ex-tab]").forEach(el => el.addEventListener("click", rerender(() => {
     // Recliquer l'onglet actif le désélectionne : sinon la seule façon de revenir à "Tous"
     // depuis la facette TYPE serait de remonter jusqu'aux onglets.
-    state.techType = state.techType === el.dataset.tcTab ? "Tous" : el.dataset.tcTab;
+    state.techType = state.techType === el.dataset.exTab ? "Tous" : el.dataset.exTab;
   })));
-  document.querySelectorAll("[data-tc-suggest]").forEach(el => el.addEventListener("click",
-    rerender(() => { state.techQuery = el.dataset.tcSuggest; })));
-  document.querySelector("[data-tc-clear]")?.addEventListener("click", rerender(() => { state.techQuery = ""; }));
-  document.querySelector("[data-tc-reset-facets]")?.addEventListener("click",
+  document.querySelectorAll("[data-ex-suggest]").forEach(el => el.addEventListener("click",
+    rerender(() => { state.techQuery = el.dataset.exSuggest; })));
+  document.querySelector("[data-ex-clear]")?.addEventListener("click", rerender(() => { state.techQuery = ""; }));
+  document.querySelector("[data-ex-reset-facets]")?.addEventListener("click",
     rerender(() => { state.techFacets = {axis: [], maturity: [], actor: []}; }));
-  document.querySelector("[data-tc-reset-all]")?.addEventListener("click", rerender(() => {
+  document.querySelector("[data-ex-reset-all]")?.addEventListener("click", rerender(() => {
     state.techQuery = ""; state.techType = "Tous"; state.techFacets = {axis: [], maturity: [], actor: []};
   }));
-  document.querySelectorAll("[data-tc-facet]").forEach(el => el.addEventListener("click", rerender(() => {
-    const group = el.dataset.tcFacet, value = el.dataset.tcValue;
-    const current = state.techFacets[group];
-    state.techFacets[group] = current.includes(value) ? current.filter(v => v !== value) : [...current, value];
-  })));
-  document.querySelector("[data-tc-more]")?.addEventListener("click", () => {
+  document.querySelectorAll("[data-ex-facet]").forEach(el => el.addEventListener("click",
+    rerender(() => { state.techFacets = toggleFacet(state.techFacets, el.dataset.exFacet, el.dataset.exValue); })));
+  document.querySelectorAll("[data-ex-expand]").forEach(el => el.addEventListener("click", () => {
+    const key = el.dataset.exExpand;
+    state.techExpanded = state.techExpanded.includes(key)
+      ? state.techExpanded.filter(k => k !== key) : [...state.techExpanded, key];
+    renderTechCorpus();
+  }));
+  document.querySelector("[data-ex-more]")?.addEventListener("click", () => {
     state.techLimit += TC_PAGE_SIZE;
     renderTechCorpus();
   });
-  document.querySelectorAll("[data-tc-open]").forEach(el => el.addEventListener("click",
-    () => showTechCorpusProofs(el.dataset.tcOpen)));
-  document.querySelector("[data-tc-export]")?.addEventListener("click", () => downloadCSV(
+  document.querySelectorAll("[data-ex-open]").forEach(el => el.addEventListener("click",
+    () => showTechCorpusProofs(el.dataset.exOpen)));
+  document.querySelector("[data-ex-export]")?.addEventListener("click", () => downloadCSV(
     "technologie-laser.csv",
     filtered.map(row => ({
       type: TC_KIND_LABELS[row.kind] || row.kind,
@@ -1132,7 +1177,7 @@ async function showTechCorpusProofs(uid) {
   if (!row) return;
 
   const panel = document.querySelector("#proof-content");
-  panel.innerHTML = `<p class="tc-proof-meta"><span class="spinner"></span>Chargement des sources…</p>`;
+  panel.innerHTML = `<p class="ex-proof-meta"><span class="spinner"></span>Chargement des sources…</p>`;
   dialog.classList.remove("wide");
   dialog.showModal();
 
@@ -1153,18 +1198,18 @@ async function showTechCorpusProofs(uid) {
   // qualification qui n'a pas encore été faite. Le dire explicitement vaut mieux qu'un panneau
   // vide, qui ressemble à un bug.
   const proofBlock = failure
-    ? `<div class="tc-proof-note">Impossible de charger les sources : ${esc(failure)}</div>`
+    ? `<div class="ex-proof-note">Impossible de charger les sources : ${esc(failure)}</div>`
     : proofs.length
-      ? `<div class="tc-proof-section">CITATIONS SOURCÉES (${proofs.length})</div>${proofs.map(proof => `<article class="tc-proof-item"><div><span class="tc-proof-axis">${esc(proof.axis)}</span>${proof.language ? `<span class="tc-proof-lang">${esc(String(proof.language).toUpperCase())}</span>` : ""}</div><blockquote>${esc(proof.quote)}</blockquote><a href="${esc(proof.source_url)}" target="_blank" rel="noopener">${esc(proof.source_title || "Ouvrir la source")} ↗</a></article>`).join("")}`
-      : `<div class="tc-proof-note">Aucune citation verbatim rattachée à ce document : son axe technologique n’a pas encore été qualifié dans la file de validation. La source d’origine reste consultable ci-dessus.</div>`;
+      ? `<div class="ex-proof-section">CITATIONS SOURCÉES (${proofs.length})</div>${proofs.map(proof => `<article class="ex-proof-item"><div><span class="ex-proof-axis">${esc(proof.axis)}</span>${proof.language ? `<span class="ex-proof-lang">${esc(String(proof.language).toUpperCase())}</span>` : ""}</div><blockquote>${esc(proof.quote)}</blockquote><a href="${esc(proof.source_url)}" target="_blank" rel="noopener">${esc(proof.source_title || "Ouvrir la source")} ↗</a></article>`).join("")}`
+      : `<div class="ex-proof-note">Aucune citation verbatim rattachée à ce document : son axe technologique n’a pas encore été qualifié dans la file de validation. La source d’origine reste consultable ci-dessus.</div>`;
 
-  panel.innerHTML = `<div class="tc-proof-head">
-      <span class="tc-kind ${esc(row.kind)}">${esc(TC_KIND_LABELS[row.kind] || row.kind)}</span>
+  panel.innerHTML = `<div class="ex-proof-head">
+      <span class="ex-kind ${esc(row.kind)}">${esc(TC_KIND_LABELS[row.kind] || row.kind)}</span>
       <h2>${esc(row.title)}</h2>
-      <p class="tc-proof-meta">${meta}</p>
-      <p class="tc-proof-meta">${esc(row.reference)} · ${esc(tcDateLabel(row))}</p>
-      ${row.source_url ? `<p><a class="tc-proof-link" href="${esc(row.source_url)}" target="_blank" rel="noopener">Ouvrir le document ↗</a></p>` : ""}
-      ${row.abstract ? `<p class="tc-proof-abstract">${esc(row.abstract)}</p>` : ""}
+      <p class="ex-proof-meta">${meta}</p>
+      <p class="ex-proof-meta">${esc(row.reference)} · ${esc(tcDateLabel(row))}</p>
+      ${row.source_url ? `<p><a class="ex-proof-link" href="${esc(row.source_url)}" target="_blank" rel="noopener">Ouvrir le document ↗</a></p>` : ""}
+      ${row.abstract ? `<p class="ex-proof-abstract">${esc(row.abstract)}</p>` : ""}
     </div>
     ${proofBlock}`;
 }
@@ -2770,11 +2815,14 @@ function renderTrends() {
   });
 }
 
+// Les vues bâties sur explorer.js / explorer.css (voir le commentaire dans render()).
+const EXPLORER_VIEWS = new Set(["techcorpus", "offers"]);
+
 function render(){
-  // La page "Technologie laser" apporte son propre fond et sa propre gouttière (maquette :
+  // Les pages "explorateur" apportent leur propre fond et leur propre gouttière (maquette :
   // carte centrée sur fond gris). <main> porte le padding généreux des autres vues, il faut
-  // donc le neutraliser tant que cette vue est montée -- et le rendre à toutes les autres.
-  content.classList.toggle("tc-host", state.view === "techcorpus");
+  // donc le neutraliser tant que l'une d'elles est montée -- et le rendre à toutes les autres.
+  content.classList.toggle("ex-host", EXPLORER_VIEWS.has(state.view));
   if(state.view==="monthly") renderMonthly();
   if(state.view==="market") renderMarket();
   if(state.view==="offers") renderOffers();
@@ -2864,18 +2912,57 @@ async function showProofs(row) {
   dialog.showModal();
 }
 
+// Panneau de preuves d'une capacité. Habillé comme celui de la page Technologie laser (classes
+// .ex-proof-*, voir explorer.css) : c'est la même surface, ouverte depuis les deux pages
+// refondues. Appelé aussi depuis la Synthèse (data-offer-proof), d'où un en-tête reconstruit
+// depuis la première preuve plutôt que depuis state.offers -- la Synthèse n'a pas cette tranche
+// chargée.
 async function showOfferProofs(offerId) {
-  const proofs = await api(`/api/offers/${offerId}/proofs`);
-  if (!proofs.length) {
-    document.querySelector("#proof-content").innerHTML = `<div class="empty">Aucune source disponible.</div>`;
-    dialog.classList.remove("wide");
-    dialog.showModal();
-    return;
-  }
-  const first = proofs[0];
-  document.querySelector("#proof-content").innerHTML=`<p class="eyebrow">${esc(first.actor_name)}</p><h2>${esc(first.capability)}</h2><p class="dialog-operation">${esc(offerTypeLabel(first.offer_type))}</p>${proofs.map(p=>`<article class="proof"><div><strong>${esc(p.operation || p.laser_process || p.capability)}</strong><span>${esc(p.industrial_stage || '')}</span>${evidenceTypeBadge(p.evidence_type)}${verbatimBadge(p.is_verbatim)}</div>${p.language?`<small class="source-language">${esc(String(p.language).toUpperCase())}</small>`:''}${p.block_heading?`<small class="block-label">Bloc : ${esc(p.block_heading)}</small>`:''}${[p.laser_process,p.material,p.performance].filter(Boolean).length?`<small class="block-label">${[p.laser_process,p.material,p.performance].filter(Boolean).map(esc).join(' · ')}</small>`:''}${p.relation_strength?`<small class="block-label">Relation : ${esc(p.relation_strength==='direct'?'directe':'contextuelle')}${p.source_role?` · source : ${esc(p.source_role)}`:''}</small>`:''}<blockquote>${esc(p.quote)}</blockquote><a href="${esc(p.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a></article>`).join("")}`;
+  const panel = document.querySelector("#proof-content");
+  panel.innerHTML = `<p class="ex-proof-meta"><span class="spinner"></span>Chargement des sources…</p>`;
   dialog.classList.remove("wide");
   dialog.showModal();
+
+  let proofs = [];
+  let failure = "";
+  try { proofs = await api(`/api/offers/${offerId}/proofs`); }
+  catch (error) { failure = error.message; }
+
+  if (!failure && !proofs.length) {
+    panel.innerHTML = `<div class="ex-proof-note">Aucune source rattachée à cette capacité.</div>`;
+    return;
+  }
+  if (failure) {
+    panel.innerHTML = `<div class="ex-proof-note">Impossible de charger les sources : ${esc(failure)}</div>`;
+    return;
+  }
+
+  const first = proofs[0];
+  const meta = [
+    first.operation ? `<b>${esc(normalizedOperation(first))}</b>` : "",
+    first.laser_process ? esc(first.laser_process) : "",
+    first.material ? esc(first.material) : "",
+    first.industrial_stage ? esc(first.industrial_stage) : "",
+  ].filter(Boolean).join(" · ");
+
+  panel.innerHTML = `<div class="ex-proof-head">
+      <span class="ex-kind ${esc(OF_KIND_CLASS[first.offer_type] || "autre")}">${esc(offerTypeLabel(first.offer_type))}</span>
+      <h2>${esc(first.capability)}</h2>
+      <p class="ex-proof-meta"><span class="ex-actor">${esc(first.actor_name)}</span></p>
+      ${meta ? `<p class="ex-proof-meta">${meta}</p>` : ""}
+      ${first.performance ? `<p class="ex-proof-abstract">${esc(first.performance)}</p>` : ""}
+    </div>
+    <div class="ex-proof-section">SOURCES (${proofs.length})</div>
+    ${proofs.map(proof => `<article class="ex-proof-item">
+      <div>
+        <span class="ex-proof-axis">${esc(proof.operation ? normalizedOperation(proof) : (proof.laser_process || proof.capability))}</span>
+        <span class="ex-proof-lang">${evidenceTypeBadge(proof.evidence_type)}${verbatimBadge(proof.is_verbatim)}${proof.language ? ` ${esc(String(proof.language).toUpperCase())}` : ""}</span>
+      </div>
+      ${proof.block_heading ? `<p class="ex-proof-context">Bloc : ${esc(proof.block_heading)}</p>` : ""}
+      <blockquote>${esc(proof.quote)}</blockquote>
+      <a href="${esc(proof.source_url)}" target="_blank" rel="noopener">${esc(proof.source_title || "Ouvrir la source")} ↗</a>
+      ${proof.source_date ? `<span class="ex-proof-date">${esc(dateLabel(proof.source_date))}</span>` : ""}
+    </article>`).join("")}`;
 }
 
 function collectionSummary(kind, result) {
