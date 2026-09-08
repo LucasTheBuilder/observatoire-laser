@@ -45,31 +45,14 @@
 .subtheme-chip{padding:5px 10px;border-radius:20px;background:#eef2f1;color:#41515d;font-size:11px;font-weight:700}
 .subtheme-chip b{color:var(--coral);font-weight:800;margin-left:4px}
 
-/* Technologies futures : documents collectés récemment (publications, brevets, projets...) */
-.doc-table{overflow:hidden;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 10px 32px #18313d0a}
-.doc-head,.doc-row{display:grid;grid-template-columns:120px 2.2fr 1fr 130px;align-items:center;gap:24px}
-.doc-head{padding:12px 20px;background:#eef2f1;color:#77848e;text-transform:uppercase;letter-spacing:.08em;font-size:10px;font-weight:850}
-.doc-row{padding:14px 20px;border-top:1px solid #edf0f1;font-size:13px}
-.doc-main a{color:var(--ink);text-decoration:none}
-.doc-main a:hover{color:var(--teal)}
-.doc-abstract{margin:4px 0 0;color:var(--muted);font-size:12px;line-height:1.5}
-.doc-type-badge{justify-self:start;padding:4px 8px;border-radius:10px;font-size:10px;font-weight:850;letter-spacing:.03em}
-.doc-type-badge.publication{background:#e9f5f3;color:var(--teal)}
-.doc-type-badge.patent{background:#fff3d6;color:#a8790b}
-.doc-type-badge.project{background:#f0ecfa;color:#6b4fb3}
-.doc-type-badge.other{background:#eef2f1;color:#5c7986}
-
 @media(max-width:1100px){
   .evidence-head,.evidence-row{grid-template-columns:1fr 1.4fr 1.4fr 60px}
   .evidence-table.no-market-col .evidence-head,.evidence-table.no-market-col .evidence-row{grid-template-columns:1.6fr 1.6fr 60px}
-  .doc-head,.doc-row{grid-template-columns:100px 1.8fr 1fr 110px;gap:16px}
 }
 @media(max-width:760px){
   .evidence-head{display:none}
   .evidence-row{position:relative;grid-template-columns:1fr;gap:9px;padding:18px}
   .proof-pill{position:absolute;right:18px;top:15px}
-  .doc-head{display:none}
-  .doc-row{grid-template-columns:1fr;gap:8px;padding:16px}
 }
 @media(max-width:520px){
   .signal-item{align-items:flex-start}

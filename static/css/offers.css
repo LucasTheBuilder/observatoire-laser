@@ -27,7 +27,3 @@
 .drill-crumb.current{color:var(--ink);font-weight:750;cursor:default}
 .drill-crumb.current:hover{background:none;text-decoration:none}
 .drill-sep{color:var(--muted);font-size:12px}
-
-.fam-card-link{cursor:pointer;text-align:left;font:inherit;transition:box-shadow .15s,border-color .15s}
-.fam-card-link:hover{border-color:var(--teal);box-shadow:0 10px 26px #0e8f8718}
-.fam-card-hint{margin:0;font-size:11.5px;color:var(--teal);font-weight:700}

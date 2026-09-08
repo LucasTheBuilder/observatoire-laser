@@ -232,10 +232,6 @@ const COMPETITIVE_CLASS_LABELS = {
 };
 const COMPETITIVE_CLASS_SHORT = {C1: "Direct", C2: "Partiel", T1: "Centre techno"};
 
-function competitiveClassLabel(actor) {
-  return COMPETITIVE_CLASS_LABELS[actor.competitive_class] || "Non classé";
-}
-
 function groupActorsByCategory(actors) {
   const order = ["C1", "C2", "T1", "Non classé"];
   const map = new Map();
