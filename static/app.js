@@ -49,6 +49,17 @@ const state = {
   // initial disproportionné. keys/points restent en cache tant que la dimension/clé ne change
   // pas, et sont resynchronisés après toute collecte terminée (voir poll()).
   trends: {dimension: "signal", key: "__global__", keys: [], points: [], loading: false},
+  // Corpus technique unifié (page "Technologie laser") : publications + brevets + projets EU
+  // en une seule liste, servie par /api/tech-corpus. Le filtrage est entièrement client --
+  // le corpus se compte en dizaines de lignes, pas en milliers.
+  techCorpus: [],
+  techQuery: "",
+  techType: "Tous",
+  // Facettes cumulatives : plusieurs valeurs cochées dans un même groupe s'unissent (OU),
+  // et les groupes se croisent entre eux (ET). C'est ce que la maquette décrit pour la
+  // production, là où le prototype se contentait d'un état actif décoratif.
+  techFacets: {axis: [], maturity: [], actor: []},
+  techLimit: 10,
 };
 
 const content = document.querySelector("#content");
@@ -859,73 +870,303 @@ function renderOffers() {
   ]));
 }
 
-// --- Intelligence techno: science -> industry readiness signals ---------------------------
+// --- Technologie laser : le corpus technique unifié ---------------------------------------
+//
+// Fusionne les deux anciennes pages "Intelligence techno" (axes + maturité, sourcés) et
+// "Technologies futures" (documents collectés) en un seul corpus filtrable, servi par
+// /api/tech-corpus. Voir static/css/techcorpus.css pour le parti pris visuel, qui suit la
+// maquette et s'écarte volontairement du reste de l'app.
 
-function technologySignalTable(rows) {
-  if (!rows.length) return `<div class="empty">Aucun signal documenté pour le moment.</div>`;
-  return `<div class="evidence-table no-market-col">
-    <div class="evidence-head"><span>Axe technologique</span><span>Projet / acteurs</span><span>Preuves</span></div>
-    ${rows.map(row => `<div class="evidence-row">
-      <div><strong>${esc(row.axis)}</strong><br><span class="operation">${esc(row.maturity_stage)}</span></div>
-      <div>${esc(row.project_name || "—")}${row.actor_names.length ? `<br><span class="operation">${row.actor_names.map(esc).join(", ")}</span>` : ""}</div>
-      <button class="proof-pill ${Number(row.languages||0)>1?'multi-source':''}" data-tech-signal-proof="${Number(row.id)}" title="Voir les sources">${esc(proofMeta(row))}</button>
-    </div>`).join("")}
-  </div>`;
-}
-
-function renderTechIntel() {
-  const signals = state.technologySignals || [];
-  const existing = signals.filter(s => s.bucket === "existing");
-  const radar = signals.filter(s => s.bucket === "radar");
-  content.innerHTML = header(
-    "Intelligence",
-    "Intelligence techno",
-    "Signaux de passage science → industrie par axe technologique (haute puissance, parallélisation, beam shaping, TGV, LIPSS/DLIP…). Recherchés et sourcés manuellement, comme les fiches acteurs — jamais déduits automatiquement.",
-  ) +
-  `<section><div class="section-title"><div><span>01</span><div><h2>Déjà industrialisé</h2><p>Axe en production ou en industrialisation avancée, avec preuve documentée.</p></div></div><b>${existing.length} signaux</b></div>${technologySignalTable(existing)}</section>
-   <section><div class="section-title"><div><span>02</span><div><h2>En cours d’industrialisation</h2><p>Prototype, pré-industrialisation ou R&D avec une trajectoire vers la production.</p></div></div><b>${radar.length} signaux</b></div>${technologySignalTable(radar)}</section>`;
-  wireActions();
-}
-
-// --- Technologies futures: recently collected documents (publications, patents, projects) --
-
+// Toujours utilisé par la fiche acteur et la page séries temporelles.
 const DOC_TYPE_LABELS = {publication: "Publication", patent: "Brevet", project: "Projet", other: "Autre"};
 
-function docDateLabel(value) {
-  if (!value) return "Date inconnue";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Date inconnue";
-  return new Intl.DateTimeFormat("fr-FR", {dateStyle: "medium"}).format(date);
+const TC_KIND_LABELS = {pub: "Publication", brevet: "Brevet", projet: "Projet EU", autre: "Autre"};
+const TC_TYPE_TABS = ["Tous", "Publications", "Brevets", "Projets européens"];
+const TC_TAB_KIND = {Publications: "pub", Brevets: "brevet", "Projets européens": "projet"};
+// Mots-clés proposés sous la barre de recherche. Pris dans le vocabulaire réellement présent
+// en base (axes du lexique fermé) plutôt que des exemples décoratifs : une suggestion qui ne
+// ramène rien apprend à l'utilisateur que la recherche ne marche pas.
+const TC_SUGGESTIONS = ["monitoring", "DLIP", "batteries"];
+const TC_PAGE_SIZE = 10;
+const TC_NO_AXIS = "Non qualifié";
+const TC_NO_ACTOR = "Non attribué";
+const TC_NO_MATURITY = "Non qualifiée";
+
+function tcRowAxes(row) { return row.axes.length ? row.axes : [TC_NO_AXIS]; }
+function tcRowActors(row) { return row.actors.length ? row.actors : [TC_NO_ACTOR]; }
+function tcRowMaturity(row) { return row.maturity || TC_NO_MATURITY; }
+
+function tcDateLabel(row) {
+  // OpenAlex renvoie parfois une date partielle ("2027-4") et elle est stockée telle quelle :
+  // elle n'est pas parsable de façon fiable d'un navigateur à l'autre, on la rend brute plutôt
+  // que d'inventer un jour. Un projet européen n'a aucune date de projet en base (voir le
+  // commentaire de /api/tech-corpus) -- on affiche sa date d'observation, explicitement
+  // préfixée, jamais une période supposée.
+  const raw = row.published_at;
+  if (!raw) {
+    if (!row.observed_at) return "—";
+    const seen = new Date(row.observed_at);
+    return Number.isNaN(seen.getTime()) ? "—" : `Vu ${new Intl.DateTimeFormat("fr-FR", {month: "short", year: "numeric"}).format(seen)}`;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? raw : new Intl.DateTimeFormat("fr-FR", {dateStyle: "medium"}).format(date);
 }
 
-function documentRow(d) {
-  const typeLabel = DOC_TYPE_LABELS[d.document_type] || d.document_type;
-  const abstract = d.abstract ? `${d.abstract.slice(0, 220)}${d.abstract.length > 220 ? "…" : ""}` : "";
-  return `<div class="doc-row">
-    <span class="doc-type-badge ${esc(d.document_type)}">${esc(typeLabel)}</span>
-    <div class="doc-main">
-      <a href="${esc(d.source_url)}" target="_blank" rel="noopener"><strong>${esc(d.title)}</strong></a>
-      ${abstract ? `<p class="doc-abstract">${esc(abstract)}</p>` : ""}
-      ${d.doi ? `<span class="operation">DOI : ${esc(d.doi)}</span>` : ""}
-    </div>
-    <span>${esc(d.actor_name || "Non attribué")}</span>
-    <span>${esc(docDateLabel(d.published_at || d.created_at))}</span>
+function tcActorLabel(row) {
+  if (!row.actors.length) return TC_NO_ACTOR;
+  return row.actors.length > 2 ? `${row.actors[0]} +${row.actors.length - 1}` : row.actors.join(", ");
+}
+
+function tcHaystack(row) {
+  return [row.title, row.reference, ...row.axes, ...row.actors, row.maturity, TC_KIND_LABELS[row.kind]]
+    .filter(Boolean).join(" ").toLowerCase();
+}
+
+// `skip` laisse un groupe de facettes hors du filtre pour pouvoir compter ses propres options
+// sur le résultat des AUTRES groupes. Sans ça, un compteur annoncerait des lignes que le clic
+// ne ramènerait jamais -- l'écueil classique des facettes cumulatives.
+function tcMatches(row, {query, type, facets, skip}) {
+  if (type !== "Tous" && row.kind !== TC_TAB_KIND[type]) return false;
+  if (query && !tcHaystack(row).includes(query)) return false;
+  if (skip !== "axis" && facets.axis.length && !facets.axis.some(v => tcRowAxes(row).includes(v))) return false;
+  if (skip !== "maturity" && facets.maturity.length && !facets.maturity.includes(tcRowMaturity(row))) return false;
+  if (skip !== "actor" && facets.actor.length && !facets.actor.some(v => tcRowActors(row).includes(v))) return false;
+  return true;
+}
+
+function tcFacetGroup(title, group, options, active) {
+  if (!options.length) return "";
+  return `<div class="tc-facet-group">
+    <div class="tc-facet-title">${esc(title)}</div>
+    ${options.map(([value, count]) => {
+      const on = active.includes(value);
+      return `<button type="button" class="tc-facet${on ? " is-active" : ""}${count ? "" : " is-empty"}" data-tc-facet="${esc(group)}" data-tc-value="${esc(value)}" aria-pressed="${on}"${count || on ? "" : " disabled"}><span>${esc(value)}</span><span>${count}</span></button>`;
+    }).join("")}
   </div>`;
 }
 
-function renderFutureTech() {
-  const docs = state.documents || [];
-  content.innerHTML = header(
-    "Intelligence",
-    "Technologies futures",
-    "Publications, brevets, projets et autres documents collectés récemment.",
-  ) + (docs.length
-    ? `<div class="doc-table">
-        <div class="doc-head"><span>Type</span><span>Document</span><span>Acteur</span><span>Date</span></div>
-        ${docs.map(documentRow).join("")}
-      </div>`
-    : `<div class="empty">Aucun document collecté pour le moment.</div>`);
+function tcCorpusRow(row) {
+  const axes = row.axes.length
+    ? `<span class="tc-axis">${row.axes.map(esc).join(" · ")}</span>`
+    : `<span class="tc-axis tc-none">Axe non qualifié</span>`;
+  return `<button type="button" class="tc-row" data-tc-open="${esc(row.uid)}">
+    <span class="tc-kind ${esc(row.kind)}">${esc(TC_KIND_LABELS[row.kind] || row.kind)}</span>
+    <span class="tc-doc">
+      <span class="tc-doc-title">${esc(row.title)}</span>
+      <span class="tc-doc-meta">${axes}<span class="tc-sep">·</span><span class="tc-actor">${esc(tcActorLabel(row))}</span><span class="tc-sep">·</span><span class="tc-ref">${esc(row.reference)}</span></span>
+    </span>
+    <span class="tc-date">${esc(tcDateLabel(row))}</span>
+  </button>`;
+}
+
+function renderTechCorpus() {
+  // Le rendu réécrit toute la page : si la frappe vient de la barre de recherche, il faut lui
+  // rendre le focus et la position du curseur -- même précaution que renderOffers().
+  const hadSearchFocus = document.activeElement && document.activeElement.id === "tc-search";
+  const caret = hadSearchFocus ? document.activeElement.selectionStart : null;
+
+  const corpus = state.techCorpus || [];
+  const query = state.techQuery.trim().toLowerCase();
+  const criteria = {query, type: state.techType, facets: state.techFacets};
+
+  const filtered = corpus.filter(row => tcMatches(row, criteria));
+  const shown = filtered.slice(0, state.techLimit);
+
+  const countBy = (skip, valuesOf) => {
+    const counts = new Map();
+    for (const row of corpus) {
+      if (!tcMatches(row, {...criteria, skip})) continue;
+      for (const value of valuesOf(row)) counts.set(value, (counts.get(value) || 0) + 1);
+    }
+    return counts;
+  };
+  // Une option reste affichée à 0 tant qu'elle existe dans le corpus complet : une facette qui
+  // disparaît quand on clique ailleurs empêche de comprendre le filtre qu'on vient de poser.
+  const optionsFor = (valuesOf, counts) => {
+    const all = new Set();
+    for (const row of corpus) for (const value of valuesOf(row)) all.add(value);
+    return [...all].map(value => [value, counts.get(value) || 0])
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "fr"));
+  };
+
+  const axisOptions = optionsFor(tcRowAxes, countBy("axis", tcRowAxes));
+  const maturityOptions = optionsFor(row => [tcRowMaturity(row)], countBy("maturity", row => [tcRowMaturity(row)]));
+  const actorOptions = optionsFor(tcRowActors, countBy("actor", tcRowActors));
+
+  const kindCount = kind => corpus.filter(row => row.kind === kind).length;
+  const publications = kindCount("pub");
+  const patents = kindCount("brevet");
+  const projects = kindCount("projet");
+  const unqualified = corpus.filter(row => !row.axes.length).length;
+  const distinctAxes = new Set(corpus.flatMap(row => row.axes)).size;
+  const industrialised = new Set(corpus.filter(row => row.maturity === "Industrialisation").flatMap(row => row.axes)).size;
+  const datedProjects = corpus.filter(row => row.kind === "projet" && row.maturity && row.maturity !== "Maturité industrielle non déterminée").length;
+
+  const facetsActive = state.techFacets.axis.length + state.techFacets.maturity.length + state.techFacets.actor.length;
+  const countLabel = query
+    ? `${filtered.length} résultat(s) pour « ${esc(state.techQuery.trim())} »`
+    : `${filtered.length} document(s)`;
+
+  content.innerHTML = `<div class="tc-page"><div class="tc-inner">
+    <div class="tc-head">
+      <div>
+        <p class="tc-eyebrow">INTELLIGENCE</p>
+        <h1>Technologie laser</h1>
+        <p class="tc-lede">Le corpus technique complet : publications, brevets et projets européens. Les facettes croisent axe technologique, maturité et acteur.</p>
+      </div>
+      <div class="tc-head-actions">
+        <button type="button" class="tc-btn" data-tc-export>↓ Exporter CSV</button>
+        <button type="button" class="tc-btn tc-primary" data-run="tech_corpus">↻ Actualiser la veille</button>
+      </div>
+    </div>
+
+    <div class="tc-kpis">
+      <div class="tc-kpi"><div class="tc-kpi-label">AXES SUIVIS</div><div class="tc-kpi-value">${distinctAxes}</div><div class="tc-kpi-note">${industrialised} industrialisé${industrialised > 1 ? "s" : ""}</div></div>
+      <div class="tc-kpi"><div class="tc-kpi-label">PROJETS EUROPÉENS</div><div class="tc-kpi-value">${projects}</div><div class="tc-kpi-note">${datedProjects} à maturité qualifiée</div></div>
+      <div class="tc-kpi"><div class="tc-kpi-label">BREVETS</div><div class="tc-kpi-value">${patents}</div><div class="tc-kpi-note">${patents ? "collectés" : "aucune collecte aboutie"}</div></div>
+      <div class="tc-kpi"><div class="tc-kpi-label">PUBLICATIONS</div><div class="tc-kpi-value">${publications}</div><div class="tc-kpi-note">${unqualified} sans axe qualifié</div></div>
+    </div>
+
+    <div class="tc-search">
+      <span class="tc-search-icon" aria-hidden="true">⌕</span>
+      <input id="tc-search" type="search" value="${esc(state.techQuery)}" placeholder="Rechercher un titre, un mot-clé, un DOI, un acteur, un projet…" aria-label="Rechercher dans le corpus technique">
+      ${state.techQuery ? `<button type="button" class="tc-clear" data-tc-clear>Effacer ✕</button>` : ""}
+      <div class="tc-suggestions">${TC_SUGGESTIONS.map(s => `<button type="button" class="tc-suggestion" data-tc-suggest="${esc(s)}">${esc(s)}</button>`).join("")}</div>
+    </div>
+
+    <div class="tc-body">
+      <div class="tc-facets">
+        <div class="tc-facet-group">
+          <div class="tc-facet-title">TYPE DE DOCUMENT</div>
+          ${[["Publications", publications], ["Brevets", patents], ["Projets européens", projects]].map(([label, count]) => {
+            const on = state.techType === label;
+            return `<button type="button" class="tc-facet${on ? " is-active" : ""}${count ? "" : " is-empty"}" data-tc-tab="${esc(label)}" aria-pressed="${on}"${count || on ? "" : " disabled"}><span>${esc(label)}</span><span>${count}</span></button>`;
+          }).join("")}
+        </div>
+        ${tcFacetGroup("AXE TECHNOLOGIQUE", "axis", axisOptions, state.techFacets.axis)}
+        ${tcFacetGroup("MATURITÉ", "maturity", maturityOptions, state.techFacets.maturity)}
+        ${tcFacetGroup("ACTEUR", "actor", actorOptions, state.techFacets.actor)}
+        ${facetsActive ? `<button type="button" class="tc-facet-reset" data-tc-reset-facets>Réinitialiser les facettes (${facetsActive})</button>` : ""}
+      </div>
+
+      <div class="tc-results">
+        <div class="tc-tabs">
+          ${TC_TYPE_TABS.map(tab => `<button type="button" class="tc-tab${tab === state.techType ? " is-active" : ""}" data-tc-tab="${esc(tab)}">${esc(tab)}</button>`).join("")}
+          <span class="tc-tab-spacer"></span>
+          <span class="tc-count">${countLabel}</span>
+        </div>
+
+        <div class="tc-table">
+          <div class="tc-row tc-thead"><div>TYPE</div><div>DOCUMENT · AXE · ACTEUR</div><div>DATE</div></div>
+          ${shown.length ? shown.map(tcCorpusRow).join("") : `<div class="tc-empty"><strong>Aucun document ne correspond à cette recherche.</strong><p>Essayez un mot-clé plus court, ou <button type="button" data-tc-reset-all>réinitialisez la recherche</button>.</p></div>`}
+        </div>
+        <div class="tc-foot">Affichage de ${shown.length} document(s) sur ${filtered.length}${filtered.length === corpus.length ? "" : ` (corpus complet : ${corpus.length})`}. ${shown.length < filtered.length ? `<button type="button" class="tc-more" data-tc-more>Charger la suite →</button>` : ""}</div>
+      </div>
+    </div>
+  </div></div>`;
+
+  const input = document.querySelector("#tc-search");
+  if (input) {
+    if (hadSearchFocus) { input.focus({preventScroll: true}); input.setSelectionRange(caret, caret); }
+    input.addEventListener("input", debounce(event => {
+      state.techQuery = event.target.value;
+      state.techLimit = TC_PAGE_SIZE;   // une nouvelle requête repart de la première page
+      renderTechCorpus();
+    }));
+  }
+
+  const rerender = mutate => () => { mutate(); state.techLimit = TC_PAGE_SIZE; renderTechCorpus(); };
+  document.querySelectorAll("[data-tc-tab]").forEach(el => el.addEventListener("click", rerender(() => {
+    // Recliquer l'onglet actif le désélectionne : sinon la seule façon de revenir à "Tous"
+    // depuis la facette TYPE serait de remonter jusqu'aux onglets.
+    state.techType = state.techType === el.dataset.tcTab ? "Tous" : el.dataset.tcTab;
+  })));
+  document.querySelectorAll("[data-tc-suggest]").forEach(el => el.addEventListener("click",
+    rerender(() => { state.techQuery = el.dataset.tcSuggest; })));
+  document.querySelector("[data-tc-clear]")?.addEventListener("click", rerender(() => { state.techQuery = ""; }));
+  document.querySelector("[data-tc-reset-facets]")?.addEventListener("click",
+    rerender(() => { state.techFacets = {axis: [], maturity: [], actor: []}; }));
+  document.querySelector("[data-tc-reset-all]")?.addEventListener("click", rerender(() => {
+    state.techQuery = ""; state.techType = "Tous"; state.techFacets = {axis: [], maturity: [], actor: []};
+  }));
+  document.querySelectorAll("[data-tc-facet]").forEach(el => el.addEventListener("click", rerender(() => {
+    const group = el.dataset.tcFacet, value = el.dataset.tcValue;
+    const current = state.techFacets[group];
+    state.techFacets[group] = current.includes(value) ? current.filter(v => v !== value) : [...current, value];
+  })));
+  document.querySelector("[data-tc-more]")?.addEventListener("click", () => {
+    state.techLimit += TC_PAGE_SIZE;
+    renderTechCorpus();
+  });
+  document.querySelectorAll("[data-tc-open]").forEach(el => el.addEventListener("click",
+    () => showTechCorpusProofs(el.dataset.tcOpen)));
+  document.querySelector("[data-tc-export]")?.addEventListener("click", () => downloadCSV(
+    "technologie-laser.csv",
+    filtered.map(row => ({
+      type: TC_KIND_LABELS[row.kind] || row.kind,
+      title: row.title,
+      axes: row.axes.join(" · "),
+      maturity: row.maturity || "",
+      actors: row.actors.join(" · "),
+      reference: row.reference,
+      date: row.published_at || row.observed_at || "",
+      source_url: row.source_url,
+    })),
+    [
+      {key: "type", label: "Type"}, {key: "title", label: "Document"},
+      {key: "axes", label: "Axe technologique"}, {key: "maturity", label: "Maturité"},
+      {key: "actors", label: "Acteur"}, {key: "reference", label: "Référence"},
+      {key: "date", label: "Date"}, {key: "source_url", label: "Source"},
+    ],
+  ));
   wireActions();
+}
+
+// Panneau de preuves. La maquette laissait le clic sur une ligne "à décider" : on y branche le
+// <dialog> déjà utilisé partout ailleurs, ce qui préserve l'accès aux citations verbatim -- la
+// seule chose que l'ancienne page "Intelligence techno" savait montrer et qu'une simple liste
+// de documents perdrait.
+async function showTechCorpusProofs(uid) {
+  const row = (state.techCorpus || []).find(item => item.uid === uid);
+  if (!row) return;
+
+  const panel = document.querySelector("#proof-content");
+  panel.innerHTML = `<p class="tc-proof-meta"><span class="spinner"></span>Chargement des sources…</p>`;
+  dialog.classList.remove("wide");
+  dialog.showModal();
+
+  let proofs = [];
+  let failure = "";
+  if (row.signal_ids.length) {
+    try { proofs = await api(`/api/tech-corpus/proofs?signal_ids=${row.signal_ids.join(",")}`); }
+    catch (error) { failure = error.message; }
+  }
+
+  const meta = [
+    row.axes.length ? `<b>${row.axes.map(esc).join(" · ")}</b>` : "<b>Axe non qualifié</b>",
+    row.maturity ? esc(row.maturity) : "",
+    row.actors.length ? esc(row.actors.join(", ")) : TC_NO_ACTOR,
+  ].filter(Boolean).join(" · ");
+
+  // Un document sans signal accepté n'a pas de citation : ce n'est pas une panne, c'est une
+  // qualification qui n'a pas encore été faite. Le dire explicitement vaut mieux qu'un panneau
+  // vide, qui ressemble à un bug.
+  const proofBlock = failure
+    ? `<div class="tc-proof-note">Impossible de charger les sources : ${esc(failure)}</div>`
+    : proofs.length
+      ? `<div class="tc-proof-section">CITATIONS SOURCÉES (${proofs.length})</div>${proofs.map(proof => `<article class="tc-proof-item"><div><span class="tc-proof-axis">${esc(proof.axis)}</span>${proof.language ? `<span class="tc-proof-lang">${esc(String(proof.language).toUpperCase())}</span>` : ""}</div><blockquote>${esc(proof.quote)}</blockquote><a href="${esc(proof.source_url)}" target="_blank" rel="noopener">${esc(proof.source_title || "Ouvrir la source")} ↗</a></article>`).join("")}`
+      : `<div class="tc-proof-note">Aucune citation verbatim rattachée à ce document : son axe technologique n’a pas encore été qualifié dans la file de validation. La source d’origine reste consultable ci-dessus.</div>`;
+
+  panel.innerHTML = `<div class="tc-proof-head">
+      <span class="tc-kind ${esc(row.kind)}">${esc(TC_KIND_LABELS[row.kind] || row.kind)}</span>
+      <h2>${esc(row.title)}</h2>
+      <p class="tc-proof-meta">${meta}</p>
+      <p class="tc-proof-meta">${esc(row.reference)} · ${esc(tcDateLabel(row))}</p>
+      ${row.source_url ? `<p><a class="tc-proof-link" href="${esc(row.source_url)}" target="_blank" rel="noopener">Ouvrir le document ↗</a></p>` : ""}
+      ${row.abstract ? `<p class="tc-proof-abstract">${esc(row.abstract)}</p>` : ""}
+    </div>
+    ${proofBlock}`;
 }
 
 async function showTechnologySignalProofs(signalId) {
@@ -2530,11 +2771,14 @@ function renderTrends() {
 }
 
 function render(){
+  // La page "Technologie laser" apporte son propre fond et sa propre gouttière (maquette :
+  // carte centrée sur fond gris). <main> porte le padding généreux des autres vues, il faut
+  // donc le neutraliser tant que cette vue est montée -- et le rendre à toutes les autres.
+  content.classList.toggle("tc-host", state.view === "techcorpus");
   if(state.view==="monthly") renderMonthly();
   if(state.view==="market") renderMarket();
   if(state.view==="offers") renderOffers();
-  if(state.view==="techintel") renderTechIntel();
-  if(state.view==="futuretech") renderFutureTech();
+  if(state.view==="techcorpus") renderTechCorpus();
   if(state.view==="actors") renderActors();
   if(state.view==="trends") renderTrends();
   if(state.view==="vocabulary") renderVocabulary();
@@ -2780,6 +3024,7 @@ const LOADERS = {
   offers:            () => api("/api/offers"),
   technologySignals: () => api("/api/technology-signals"),
   documents:         () => api("/api/documents?limit=500"),
+  techCorpus:        () => api("/api/tech-corpus"),
   actors:            () => api("/api/actors"),
   profiles:          () => api("/api/profiles"),
   vocabulary:        () => api("/api/vocabulary-candidates"),
@@ -2810,8 +3055,7 @@ const VIEW_DEPS = {
   monthly:           ["overview", "monthly", "market", "actors", "technologySignals", "collectionHealth"],
   market:            ["overview", "market", "marketScores", "marketSizing", "referenceMatrix", "demandSignals"],
   offers:            ["overview", "offers"],
-  techintel:         ["overview", "technologySignals"],
-  futuretech:        ["overview", "documents"],
+  techcorpus:        ["overview", "techCorpus"],
   // market/offers/documents ne servent pas à la grille elle-même mais à la fiche détail
   // (showActorDetail -> actorDetailContent), ouverte depuis cette grille : sans eux la fiche
   // s'afficherait sans capacités, marchés ni publications.

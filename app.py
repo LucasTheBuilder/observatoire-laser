@@ -40,6 +40,7 @@ load_dotenv()
 
 import json
 import os
+import re
 import threading
 import webbrowser
 from collections import Counter, defaultdict
@@ -49,6 +50,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -224,8 +226,35 @@ jobs: dict[str, dict[str, Any]] = {
     "demand_signals": {"status": "idle", "result": None, "error": None},
     "wayback_retrodating": {"status": "idle", "result": None, "error": None},
     "capabilities": {"status": "idle", "result": None, "error": None},
+    "tech_corpus": {"status": "idle", "result": None, "error": None},
     "monthly": {"status": "idle", "result": None, "error": None},
 }
+
+
+def _collect_tech_corpus() -> dict:
+    """Rafraîchit les trois sources du corpus technique, et seulement elles.
+
+    C'est ce que déclenche "Actualiser la veille" sur la page Technologie laser. Cette page
+    montre publications + brevets + projets européens ; or aucune collecte existante ne couvre
+    les trois : `technology` et `openalex` ne ramènent que des publications, `patents` que des
+    brevets, `cordis` que des projets. Y brancher `technology` seul aurait laissé croire que
+    les brevets et les projets venaient d'être réactualisés alors qu'ils n'auraient pas bougé.
+
+    Chaque collecteur est isolé : une source indisponible (identifiants EPO absents, CORDIS
+    injoignable) ne doit pas priver l'utilisateur des deux autres.
+    """
+    report: dict[str, Any] = {}
+    for name, collector in (
+        ("technology", scrape_technology),
+        ("openalex", collect_openalex_publications),
+        ("patents", collect_patents),
+        ("cordis", collect_cordis),
+    ):
+        try:
+            report[name] = collector()
+        except Exception as error:  # noqa: BLE001 -- le rapport porte l'échec, le job continue
+            report[name] = {"error": str(error)}
+    return report
 
 
 def _collect_monthly() -> dict:
@@ -268,6 +297,7 @@ collectors: dict[str, Callable[[], dict]] = {
     "demand_signals": collect_demand_signals,
     "wayback_retrodating": retrodate_evidence_sources,
     "capabilities": collect_capability_specs,
+    "tech_corpus": _collect_tech_corpus,
     "monthly": _collect_monthly,
 }
 
@@ -1790,6 +1820,179 @@ def documents(document_type: Literal["publication", "patent", "project", "other"
     )
 
 
+# --- Corpus technique unifié -------------------------------------------------------------
+#
+# La page "Technologie laser" fusionne ce qui vivait dans deux onglets séparés (Intelligence
+# techno et Technologies futures). Les deux corpus n'ont PAS le même schéma en base :
+#
+#   - publications et brevets  -> table `documents`         (openalex.py, patent.py)
+#   - projets européens        -> table `technology_signals` (cordis.py)
+#
+# `technology_signals` porte une ligne par couple (axe technologique, projet) : un même projet
+# y apparaît autant de fois qu'il touche d'axes. Ce endpoint regroupe donc les signaux par
+# projet (identité = l'URL CORDIS, seule clé toujours renseignée -- `project_name` est NULL sur
+# les signaux qui ne viennent pas d'un projet, voir plus bas).
+#
+# Un signal dont `project_name` est vide n'est PAS un projet : c'est l'axe technologique validé
+# d'une publication déjà présente dans `documents` (même source_url). C'est la seule source
+# d'axe pour une publication -- la table `documents` n'a pas de colonne `axis`. On rattache donc
+# ces signaux au document correspondant plutôt que de les lister comme des entrées à part, ce
+# qui les ferait apparaître deux fois dans le corpus.
+#
+# Aucun axe n'est deviné ici : un document sans signal accepté sort avec `axes: []`. Faire
+# tourner le lexique à la volée sur le titre donnerait une inférence non relue présentée comme
+# un fait -- exactement ce que la file de validation existe pour éviter.
+_PROJECT_GA_RE = re.compile(r"/project/id/(\d+)")
+# OpenAlex renvoie parfois une date de publication partielle (`2027-4`, sans le jour) et elle
+# est stockée telle quelle. Un tri lexicographique brut classerait alors "2027-4" APRÈS
+# "2027-12-01" -- ce complément met les composantes à deux chiffres avant de comparer.
+_PARTIAL_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$")
+
+
+def _corpus_actor_names(raw: str | None) -> list[str]:
+    try:
+        return [str(name) for name in json.loads(raw)] if raw else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _corpus_sort_key(value: str | None) -> str:
+    match = _PARTIAL_DATE_RE.match((value or "").strip())
+    if not match:
+        return (value or "")[:10]
+    year, month, day = match.groups()
+    return f"{year}-{int(month):02d}-{int(day or 0):02d}"
+
+
+@app.get("/api/tech-corpus")
+def tech_corpus() -> list[dict[str, Any]]:
+    """Le corpus technique complet en un seul modèle : publications, brevets et projets
+    européens, avec axe technologique et maturité quand ils ont été validés.
+
+    Le front (page "Technologie laser") filtre et facette côté client sur ce résultat ; il n'y
+    a pas de pagination serveur, le corpus se compte en dizaines de lignes.
+    """
+    signals = rows(
+        TECH_DB,
+        """SELECT id,axis,maturity_stage,bucket,project_name,actor_names,source_url,created_at
+           FROM technology_signals
+           WHERE review_status='accepted'
+           ORDER BY created_at DESC,id""",
+    )
+
+    # Signaux rattachés à un document (pas de project_name) : indexés par URL source pour
+    # donner leur axe/maturité au document correspondant.
+    axis_by_url: dict[str, dict[str, Any]] = {}
+    project_groups: dict[str, dict[str, Any]] = {}
+    for signal in signals:
+        url = signal["source_url"] or ""
+        if not (signal["project_name"] or "").strip():
+            entry = axis_by_url.setdefault(url, {"axes": [], "maturity": None, "signal_ids": []})
+            if signal["axis"] not in entry["axes"]:
+                entry["axes"].append(signal["axis"])
+            entry["maturity"] = entry["maturity"] or signal["maturity_stage"]
+            entry["signal_ids"].append(int(signal["id"]))
+            continue
+        group = project_groups.setdefault(url, {
+            "title": signal["project_name"],
+            "axes": [], "actors": [], "maturity": None, "bucket": signal["bucket"],
+            "signal_ids": [], "observed_at": signal["created_at"],
+        })
+        if signal["axis"] not in group["axes"]:
+            group["axes"].append(signal["axis"])
+        for actor in _corpus_actor_names(signal["actor_names"]):
+            if actor not in group["actors"]:
+                group["actors"].append(actor)
+        group["maturity"] = group["maturity"] or signal["maturity_stage"]
+        group["signal_ids"].append(int(signal["id"]))
+
+    corpus: list[dict[str, Any]] = []
+    for document in rows(
+        TECH_DB,
+        """SELECT id,actor_name,document_type,title,source_url,published_at,doi,patent_number,
+                  abstract,created_at
+           FROM documents""",
+    ):
+        qualified = axis_by_url.get(document["source_url"] or "", {})
+        is_patent = document["document_type"] == "patent"
+        if is_patent:
+            reference = f"Brevet {document['patent_number']}" if document["patent_number"] else "Brevet"
+        elif document["doi"]:
+            reference = f"DOI : {document['doi']}"
+        else:
+            reference = document["source_url"] or ""
+        corpus.append({
+            "uid": f"doc:{document['id']}",
+            "kind": "brevet" if is_patent else ("pub" if document["document_type"] == "publication" else "autre"),
+            "title": document["title"],
+            "reference": reference,
+            "axes": qualified.get("axes", []),
+            "actors": [document["actor_name"]] if document["actor_name"] else [],
+            "maturity": qualified.get("maturity"),
+            "published_at": document["published_at"],
+            "observed_at": document["created_at"],
+            "source_url": document["source_url"],
+            "signal_ids": qualified.get("signal_ids", []),
+            "abstract": document["abstract"],
+        })
+
+    for url, group in project_groups.items():
+        # Tous les projets ne sont pas sourcés sur CORDIS : Femtocell, par exemple, est
+        # documenté sur le site d'ALPHANOV. Afficher "CORDIS" par défaut attribuerait la
+        # source au mauvais éditeur -- on retombe sur le domaine réellement cité.
+        ga = _PROJECT_GA_RE.search(url)
+        host = urlparse(url).netloc.removeprefix("www.")
+        corpus.append({
+            "uid": f"proj:{group['signal_ids'][0]}",
+            "kind": "projet",
+            "title": group["title"],
+            "reference": f"CORDIS · GA {ga.group(1)}" if ga else (f"Projet européen · {host}" if host else "Projet européen"),
+            "axes": group["axes"],
+            "actors": group["actors"],
+            "maturity": group["maturity"],
+            # CORDIS expose bien une période de projet, mais cordis.py ne la garde que dans
+            # actor_events (actors.db), rattachée à un acteur suivi -- pas au signal. Un projet
+            # dont aucun participant n'est suivi n'a donc aucune date de projet en base. On
+            # affiche la date d'observation plutôt qu'une période inventée.
+            "published_at": None,
+            "observed_at": group["observed_at"],
+            "source_url": url,
+            "signal_ids": group["signal_ids"],
+            "abstract": None,
+        })
+
+    corpus.sort(key=lambda row: _corpus_sort_key(row["published_at"] or row["observed_at"]), reverse=True)
+    return corpus
+
+
+@app.get("/api/tech-corpus/proofs")
+def tech_corpus_proofs(signal_ids: str = Query(..., description="Ids de signaux séparés par des virgules")) -> list[dict[str, Any]]:
+    """Les citations verbatim rattachées à une entrée du corpus, en un seul appel.
+
+    Une entrée "projet européen" regroupe plusieurs signaux (un par axe technologique traité
+    par ce projet) : le panneau de preuves les affiche ensemble, il lui faut donc les sources
+    de tous ces signaux d'un coup plutôt qu'un aller-retour par signal.
+    """
+    try:
+        wanted = [int(part) for part in signal_ids.split(",") if part.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="signal_ids doit être une liste d'entiers.") from None
+    if not wanted:
+        return []
+    if len(wanted) > 50:
+        raise HTTPException(status_code=400, detail="Trop de signaux demandés en une fois.")
+    placeholders = ",".join("?" * len(wanted))
+    return rows(
+        TECH_DB,
+        f"""SELECT t.id AS signal_id,t.axis,t.maturity_stage,
+                   ts.source_url,ts.source_title,ts.quote,ts.language
+            FROM technology_signals t JOIN technology_signal_sources ts ON ts.signal_id=t.id
+            WHERE t.id IN ({placeholders}) AND t.review_status='accepted'
+            ORDER BY t.axis,ts.created_at DESC""",
+        tuple(wanted),
+    )
+
+
 # Cette fonction tourne dans le thread de fond de `executor` (pas dans le thread FastAPI qui
 # répond aux requêtes) : c'est elle qui appelle réellement scrape_actors/scrape_market/
 # scrape_technology, potentiellement pendant plusieurs minutes, sans bloquer l'API.
@@ -1827,7 +2030,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "tech_corpus", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -1842,7 +2045,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "tech_corpus", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 
