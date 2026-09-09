@@ -64,9 +64,10 @@ const state = {
   // Facettes cumulatives : plusieurs valeurs cochées dans un même groupe s'unissent (OU),
   // et les groupes se croisent entre eux (ET). C'est ce que la maquette décrit pour la
   // production, là où le prototype se contentait d'un état actif décoratif.
-  techFacets: {axis: [], operation: [], material: [], market: [], architecture: [], performance: [], maturity: [], actor: []},
+  techFacets: {axis: [], operation: [], material: [], market: [], architecture: [], performance: [], actor: []},
   // Groupes de facettes dépliés (voir explorer.js) -- purement d'affichage.
   techExpanded: [],
+  techMoreFilters: false,
   techLimit: 10,
 };
 
@@ -957,11 +958,10 @@ const TC_SUGGESTIONS = ["monitoring", "DLIP", "batteries"];
 const TC_PAGE_SIZE = 10;
 const TC_NO_AXIS = "Non qualifié";
 const TC_NO_ACTOR = "Non attribué";
-const TC_NO_MATURITY = "Non qualifiée";
 
 function tcRowAxes(row) { return row.axes.length ? row.axes : [TC_NO_AXIS]; }
 function tcRowActors(row) { return row.actors.length ? row.actors : [TC_NO_ACTOR]; }
-function tcRowMaturity(row) { return row.maturity || TC_NO_MATURITY; }
+
 
 function tcDateLabel(row) {
   // OpenAlex renvoie parfois une date partielle ("2027-4") et elle est stockée telle quelle :
@@ -990,7 +990,7 @@ function tcHaystack(row) {
   // ramener les documents que ces vocabulaires classent, pas seulement ceux dont le titre
   // contient le mot en français.
   const families = Object.values(row.families || {}).flat();
-  return [row.title, row.reference, ...row.axes, ...families, ...row.actors, row.maturity, TC_KIND_LABELS[row.kind]]
+  return [row.title, row.reference, ...row.axes, ...families, ...row.actors, TC_KIND_LABELS[row.kind]]
     .filter(Boolean).join(" ").toLowerCase();
 }
 
@@ -1021,7 +1021,6 @@ function tcRowFamily(row, dimension) {
 const TC_FACET_GROUPS = [
   {key: "axis", label: "AXE TECHNOLOGIQUE", valuesOf: tcRowAxes},
   ...TC_FAMILY_GROUPS.map(({key, label}) => ({key, label, valuesOf: row => tcRowFamily(row, key)})),
-  {key: "maturity", label: "MATURITÉ", valuesOf: row => [tcRowMaturity(row)]},
   {key: "actor", label: "ACTEUR", valuesOf: tcRowActors},
 ];
 
@@ -1030,6 +1029,31 @@ const TC_FACET_GROUPS = [
 // faire réapparaître une sélection effacée.
 function tcEmptyFacets() {
   return Object.fromEntries(TC_FACET_GROUPS.map(group => [group.key, []]));
+}
+
+// Une facette gagne sa place dans la colonne quand elle CLASSE assez de corpus pour partitionner
+// quelque chose. En dessous, elle occupe de la hauteur pour presque rien : mesuré le 10/09/2026,
+// Marché couvrait 11 documents sur 98, Bénéfice visé 7 et Architecture 3 -- trois groupes pour
+// 21 documents, quand Opération et Matériau en classaient 43 et 44.
+//
+// Le seuil est appliqué aux DONNÉES plutôt qu'à une liste écrite en dur : le corpus a triplé en
+// une collecte, et toute liste figée aujourd'hui serait fausse dans un mois. Une dimension qui
+// se remplit remonte d'elle-même. Type, axe et acteur restent toujours visibles : ce sont les
+// trois entrées par lesquelles on aborde le corpus, indépendamment de leur taux de remplissage.
+const TC_PRIMARY_COVERAGE = 0.2;
+const TC_ALWAYS_PRIMARY = ["axis", "actor"];
+
+function tcSplitFacetGroups(corpus) {
+  const primary = [];
+  const secondary = [];
+  for (const group of TC_FACET_GROUPS) {
+    const covered = corpus.filter(row => group.valuesOf(row).length).length;
+    const isPrimary = TC_ALWAYS_PRIMARY.includes(group.key)
+      || !corpus.length
+      || covered / corpus.length >= TC_PRIMARY_COVERAGE;
+    (isPrimary ? primary : secondary).push(group);
+  }
+  return {primary, secondary};
 }
 
 function tcCorpusRow(row) {
@@ -1084,8 +1108,22 @@ function renderTechCorpus() {
   // qualifié désignerait au relecteur un travail qui n'est pas à faire.
   const unclassified = corpus.filter(row => !Object.values(row.families || {}).flat().length).length;
   const distinctAxes = new Set(corpus.flatMap(row => row.axes)).size;
-  const industrialised = new Set(corpus.filter(row => row.maturity === "Industrialisation").flatMap(row => row.axes)).size;
-  const datedProjects = corpus.filter(row => row.kind === "projet" && row.maturity && row.maturity !== "Maturité industrielle non déterminée").length;
+  // Les deux notes de KPI reposaient sur la maturité, retirée de cette page le 10/09/2026 :
+  // 91 lignes sur 98 tombaient dans "non déterminée" ou "non qualifiée", parce que
+  // MATURITY_RULES cherche "ligne pilote" ou "production en série" -- des mots qu'un titre de
+  // publication n'emploie jamais. Remplacées par deux mesures que le corpus porte vraiment.
+  // (La maturité du MARCHÉ, elle, reste : autre mécanisme, alimenté par market.db.)
+  const solidAxes = new Set(
+    [...new Set(corpus.flatMap(row => row.axes))].filter(
+      axis => corpus.filter(row => row.axes.includes(axis)).length >= 2),
+  ).size;
+  const projectsWithActor = corpus.filter(row => row.kind === "projet" && row.actors.length).length;
+
+  const {primary: primaryGroups, secondary: secondaryGroups} = tcSplitFacetGroups(corpus);
+  const secondaryActive = secondaryGroups.reduce((total, g) => total + (state.techFacets[g.key] || []).length, 0);
+  // Un filtre posé dans le bloc replié doit rester visible, sinon on ne peut plus le retirer :
+  // le bloc s'ouvre de lui-même dès qu'une de ses facettes est active.
+  const showSecondary = state.techMoreFilters || secondaryActive > 0;
 
   const facetsActive = activeFacetCount(state.techFacets);
   const countLabel = query
@@ -1097,7 +1135,7 @@ function renderTechCorpus() {
       <div>
         <p class="ex-eyebrow">INTELLIGENCE</p>
         <h1>Technologie laser</h1>
-        <p class="ex-lede">Le corpus technique complet : publications, brevets et projets européens. Les facettes croisent axe technologique, opération, matériau, marché, maturité et acteur.</p>
+        <p class="ex-lede">Le corpus technique complet : publications, brevets et projets européens. Les facettes croisent axe technologique, opération, matériau et acteur ; marché, bénéfice et architecture s’ajoutent d’un clic.</p>
       </div>
       <div class="ex-head-actions">
         <button type="button" class="ex-btn" data-ex-export>↓ Exporter CSV</button>
@@ -1106,8 +1144,8 @@ function renderTechCorpus() {
     </div>
 
     <div class="ex-kpis">
-      <div class="ex-kpi"><div class="ex-kpi-label">AXES SUIVIS</div><div class="ex-kpi-value">${distinctAxes}</div><div class="ex-kpi-note">${industrialised} industrialisé${industrialised > 1 ? "s" : ""}</div></div>
-      <div class="ex-kpi"><div class="ex-kpi-label">PROJETS EUROPÉENS</div><div class="ex-kpi-value">${projects}</div><div class="ex-kpi-note">${datedProjects} à maturité qualifiée</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">AXES SUIVIS</div><div class="ex-kpi-value">${distinctAxes}</div><div class="ex-kpi-note">${solidAxes} sur 2 documents ou plus</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">PROJETS EUROPÉENS</div><div class="ex-kpi-value">${projects}</div><div class="ex-kpi-note">${projectsWithActor} avec un acteur suivi</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">BREVETS</div><div class="ex-kpi-value">${patents}</div><div class="ex-kpi-note">${patents ? "collectés" : "aucune collecte aboutie"}</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">PUBLICATIONS</div><div class="ex-kpi-value">${publications}</div><div class="ex-kpi-note">${unclassified} sans aucune famille</div></div>
     </div>
@@ -1128,7 +1166,13 @@ function renderTechCorpus() {
             return `<button type="button" class="ex-facet${on ? " is-active" : ""}${count ? "" : " is-empty"}" data-ex-tab="${esc(label)}" aria-pressed="${on}"${count || on ? "" : " disabled"}><span>${esc(label)}</span><span>${count}</span></button>`;
           }).join("")}
         </div>
-        ${TC_FACET_GROUPS.map(g => facetGroupHtml(g.label, g.key, options[g.key], state.techFacets[g.key], {expanded: state.techExpanded.includes(g.key)})).join("")}
+        ${primaryGroups.map(g => facetGroupHtml(g.label, g.key, options[g.key], state.techFacets[g.key], {expanded: state.techExpanded.includes(g.key)})).join("")}
+        ${secondaryGroups.length ? `
+          <button type="button" class="ex-facet-toggle ex-more-filters" data-ex-more-filters aria-expanded="${showSecondary}">
+            ${showSecondary ? "− Moins de filtres" : `+ ${secondaryGroups.length} autre${secondaryGroups.length > 1 ? "s" : ""} filtre${secondaryGroups.length > 1 ? "s" : ""}${secondaryActive ? ` (${secondaryActive} actif${secondaryActive > 1 ? "s" : ""})` : ""}`}
+          </button>
+          ${showSecondary ? secondaryGroups.map(g => facetGroupHtml(g.label, g.key, options[g.key], state.techFacets[g.key], {expanded: state.techExpanded.includes(g.key)})).join("") : ""}
+        ` : ""}
         ${facetsActive ? `<button type="button" class="ex-facet-reset" data-ex-reset-facets>Réinitialiser les facettes (${facetsActive})</button>` : ""}
       </div>
 
@@ -1180,6 +1224,10 @@ function renderTechCorpus() {
       ? state.techExpanded.filter(k => k !== key) : [...state.techExpanded, key];
     renderTechCorpus();
   }));
+  document.querySelector("[data-ex-more-filters]")?.addEventListener("click", () => {
+    state.techMoreFilters = !state.techMoreFilters;
+    renderTechCorpus();
+  });
   document.querySelector("[data-ex-more]")?.addEventListener("click", () => {
     state.techLimit += TC_PAGE_SIZE;
     renderTechCorpus();
@@ -1195,7 +1243,7 @@ function renderTechCorpus() {
       // Une colonne par dimension plutôt qu'une colonne "familles" fourre-tout : l'export sert
       // à croiser dans un tableur, ce qu'un mélange de vocabulaires interdirait.
       ...Object.fromEntries(TC_FAMILY_GROUPS.map(({key}) => [key, tcRowFamily(row, key).join(" · ")])),
-      maturity: row.maturity || "",
+
       actors: row.actors.join(" · "),
       reference: row.reference,
       date: row.published_at || row.observed_at || "",
@@ -1205,7 +1253,6 @@ function renderTechCorpus() {
       {key: "type", label: "Type"}, {key: "title", label: "Document"},
       {key: "axes", label: "Axe technologique"},
       ...TC_FAMILY_GROUPS.map(({key, label}) => ({key, label: label.charAt(0) + label.slice(1).toLowerCase()})),
-      {key: "maturity", label: "Maturité"},
       {key: "actors", label: "Acteur"}, {key: "reference", label: "Référence"},
       {key: "date", label: "Date"}, {key: "source_url", label: "Source"},
     ],
@@ -1235,7 +1282,7 @@ async function showTechCorpusProofs(uid) {
 
   const meta = [
     row.axes.length ? `<b>${row.axes.map(esc).join(" · ")}</b>` : "<b>Axe non qualifié</b>",
-    row.maturity ? esc(row.maturity) : "",
+
     row.actors.length ? esc(row.actors.join(", ")) : TC_NO_ACTOR,
   ].filter(Boolean).join(" · ");
 

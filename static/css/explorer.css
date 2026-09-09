@@ -232,6 +232,9 @@ main.ex-host {
   cursor: pointer;
 }
 .ex-facet-toggle:hover { color: var(--ex-accent-dark); }
+/* Le même bouton, mais il ouvre un BLOC de groupes et non les options d'un groupe : il se
+   détache donc de la facette précédente au lieu de la prolonger. */
+.ex-more-filters { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--ex-line); width: 100%; text-align: left; }
 
 .ex-facet-reset {
   padding: 0;
