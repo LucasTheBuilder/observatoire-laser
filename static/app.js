@@ -1196,8 +1196,22 @@ async function showTechCorpusProofs(uid) {
   const proofBlock = failure
     ? `<div class="ex-proof-note">Impossible de charger les sources : ${esc(failure)}</div>`
     : proofs.length
-      ? `<div class="ex-proof-section">CITATIONS SOURCÉES (${proofs.length})</div>${proofs.map(proof => `<article class="ex-proof-item"><div><span class="ex-proof-axis">${esc(proof.axis)}</span>${proof.language ? `<span class="ex-proof-lang">${esc(String(proof.language).toUpperCase())}</span>` : ""}</div><blockquote>${esc(proof.quote)}</blockquote><a href="${esc(proof.source_url)}" target="_blank" rel="noopener">${esc(proof.source_title || "Ouvrir la source")} ↗</a></article>`).join("")}`
-      : `<div class="ex-proof-note">Aucune citation verbatim rattachée à ce document : son axe technologique n’a pas encore été qualifié dans la file de validation. La source d’origine reste consultable ci-dessus.</div>`;
+      ? `<div class="ex-proof-section">CITATIONS SOURCÉES (${proofs.length})</div>${proofs.map(proof => {
+          // Une source sans abstract (tout le corpus documentaire aujourd'hui) fait porter
+          // l'axe par le seul titre : citation et titre de source sont alors le même texte.
+          // L'afficher deux fois de plus que le titre du document donnerait l'illusion d'un
+          // extrait de contenu -- on dit d'où vient la phrase, et on ne la répète pas.
+          const fromTitle = proof.quote && proof.quote === proof.source_title;
+          const tag = fromTitle ? "TITRE DU DOCUMENT" : (proof.language ? String(proof.language).toUpperCase() : "");
+          return `<article class="ex-proof-item"><div><span class="ex-proof-axis">${esc(proof.axis)}</span>${tag ? `<span class="ex-proof-lang">${esc(tag)}</span>` : ""}</div><blockquote>${esc(proof.quote)}</blockquote><a href="${esc(proof.source_url)}" target="_blank" rel="noopener">${esc(fromTitle ? "Ouvrir la source" : (proof.source_title || "Ouvrir la source"))} ↗</a></article>`;
+        }).join("")}`
+      : row.axes.length
+        // Un axe affiché SANS citation ne veut pas dire "pas encore qualifié" -- c'est le
+        // contraire : l'axe est qualifié, mais sa ligne de preuve manque en base. Confondre
+        // les deux cas faisait afficher "pas encore qualifié" sur les seuls documents qui
+        // l'étaient (audit du 08/09/2026).
+        ? `<div class="ex-proof-note">Cet axe (${row.axes.map(esc).join(" · ")}) est qualifié, mais aucune citation ne lui est rattachée en base : il a été détecté par une collecte antérieure au rattachement des preuves. La prochaine collecte l’écrira. La source d’origine reste consultable ci-dessus.</div>`
+        : `<div class="ex-proof-note">Aucune citation verbatim rattachée à ce document : son axe technologique n’a pas encore été qualifié dans la file de validation. La source d’origine reste consultable ci-dessus.</div>`;
 
   panel.innerHTML = `<div class="ex-proof-head">
       <span class="ex-kind ${esc(row.kind)}">${esc(TC_KIND_LABELS[row.kind] || row.kind)}</span>

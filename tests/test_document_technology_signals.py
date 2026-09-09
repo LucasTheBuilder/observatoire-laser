@@ -149,5 +149,102 @@ class UpsertDocumentTechnologySignalTests(unittest.TestCase):
             self.assertEqual({"SLE", "LIPSS"}, axes)
 
 
+class DocumentTechnologySignalSourcesTests(unittest.TestCase):
+    """Audit du 08/09/2026 : ces signaux n'écrivaient aucune ligne technology_signal_sources.
+    Comme /api/tech-corpus/proofs joint les deux tables, les seules publications ayant un axe
+    qualifié étaient exactement celles dont le panneau de preuves affichait "axe pas encore
+    qualifié"."""
+
+    def test_a_source_row_is_written_with_the_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = _setup(tmp)
+            with dbmod.connect(tech_db) as db:
+                upsert_document_technology_signal(
+                    db, "Selective laser etching (SLE) of fused silica microchannels", "",
+                    "https://doi.org/10.1/example", "ALPHANOV",
+                )
+            source = dbmod.rows(tech_db, "SELECT signal_id,source_url,source_title,quote FROM technology_signal_sources")
+            self.assertEqual(1, len(source))
+            self.assertEqual("https://doi.org/10.1/example", source[0]["source_url"])
+            signal_id = dbmod.scalar(tech_db, "SELECT id FROM technology_signals")
+            self.assertEqual(signal_id, source[0]["signal_id"])
+
+    def test_quote_is_the_matched_text_not_an_invention(self):
+        # Sans abstract -- le cas de toute la base aujourd'hui -- le passage matché EST le
+        # titre. La ligne doit le dire tel quel plutôt que de maquiller un titre en verbatim.
+        title = "Selective laser etching (SLE) of fused silica microchannels"
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = _setup(tmp)
+            with dbmod.connect(tech_db) as db:
+                upsert_document_technology_signal(db, title, "", "https://doi.org/10.1/example")
+            quote = dbmod.scalar(tech_db, "SELECT quote FROM technology_signal_sources")
+            self.assertEqual(title, quote)
+
+    def test_abstract_sentence_is_preferred_over_the_title_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = _setup(tmp)
+            with dbmod.connect(tech_db) as db:
+                upsert_document_technology_signal(
+                    db, "A study of glass machining",
+                    "Nothing relevant here. We rely on selective laser etching of fused silica throughout.",
+                    "https://doi.org/10.1/example",
+                )
+            quote = dbmod.scalar(tech_db, "SELECT quote FROM technology_signal_sources")
+            self.assertIn("selective laser etching", quote)
+
+    def test_replaying_the_same_document_does_not_duplicate_the_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = _setup(tmp)
+            with dbmod.connect(tech_db) as db:
+                upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/example")
+                upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/example")
+            self.assertEqual(1, dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signal_sources"))
+
+    def test_source_is_backfilled_on_a_signal_that_predates_this_fix(self):
+        # Le rattrapage des signaux déjà en base : le signal existe, sa preuve non. Rejouer la
+        # collecte doit écrire la ligne manquante, pas passer son tour parce que le signal
+        # n'est plus "nouveau".
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = _setup(tmp)
+            with dbmod.connect(tech_db) as db:
+                dbmod.upsert_technology_signal(
+                    db,
+                    fact_key=dbmod.technology_signal_key("SLE", "https://doi.org/10.1/example"),
+                    axis="SLE", maturity_stage="Prototype", bucket="radar", actor_names=[],
+                    source_url="https://doi.org/10.1/example", quote="SLE etching of glass",
+                    field_confidence=0.7, source_title="SLE etching of glass",
+                )
+            self.assertEqual(0, dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signal_sources"))
+
+            with dbmod.connect(tech_db) as db:
+                added = upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/example")
+
+            self.assertEqual(0, added)  # aucun signal neuf
+            self.assertEqual(1, dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signal_sources"))
+
+
+class CrossrefDateTests(unittest.TestCase):
+    """Crossref renvoie `[[2027, 4]]` pour un article rattaché à un numéro à paraître. Le
+    "-".join d'origine produisait "2027-4" : mal trié lexicographiquement et affiché brut."""
+
+    def test_full_date_is_zero_padded(self):
+        from scrapers import _crossref_date
+        self.assertEqual("2026-05-29", _crossref_date({"date-parts": [[2026, 5, 29]]}))
+
+    def test_partial_date_keeps_its_precision_without_inventing_a_day(self):
+        from scrapers import _crossref_date
+        self.assertEqual("2027-04", _crossref_date({"date-parts": [[2027, 4]]}))
+
+    def test_partial_date_sorts_after_an_earlier_full_date(self):
+        from scrapers import _crossref_date
+        self.assertGreater(_crossref_date({"date-parts": [[2027, 4]]}), _crossref_date({"date-parts": [[2026, 12, 1]]}))
+
+    def test_year_only_and_missing_dates(self):
+        from scrapers import _crossref_date
+        self.assertEqual("2026", _crossref_date({"date-parts": [[2026]]}))
+        self.assertIsNone(_crossref_date(None))
+        self.assertIsNone(_crossref_date({"date-parts": [[]]}))
+
+
 if __name__ == "__main__":
     unittest.main()

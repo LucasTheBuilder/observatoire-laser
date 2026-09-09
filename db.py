@@ -629,6 +629,28 @@ def _reconcile_technology_signal_maturity(db: sqlite3.Connection) -> None:
             db.execute("UPDATE technology_signals SET bucket=? WHERE id=?", (expected, row["id"]))
 
 
+_PARTIAL_DOCUMENT_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$")
+
+
+def _normalize_partial_document_dates(db: sqlite3.Connection) -> None:
+    """Zero-padde les `published_at` partiels écrits avant scrapers._crossref_date.
+
+    Crossref renvoie `[[2027, 4]]` pour un article rattaché à un numéro à paraître, et
+    l'ancien "-".join stockait "2027-4" : lexicographiquement APRÈS "2027-12-01", donc mal
+    trié, et affiché brut dans l'UI. On complète les composantes à deux chiffres sans jamais
+    inventer le jour manquant -- la précision réelle de la date est conservée. Idempotent : ne
+    réécrit que les lignes dont le format diffère.
+    """
+    for row in db.execute("SELECT id,published_at FROM documents WHERE published_at IS NOT NULL").fetchall():
+        match = _PARTIAL_DOCUMENT_DATE_RE.match((row["published_at"] or "").strip())
+        if not match:
+            continue
+        year, *rest = match.groups()
+        normalized = "-".join([year, *(f"{int(part):02d}" for part in rest if part)])
+        if normalized != row["published_at"]:
+            db.execute("UPDATE documents SET published_at=? WHERE id=?", (normalized, row["id"]))
+
+
 def _migrate_lei_out_of_registry_columns(db: sqlite3.Connection) -> None:
     """Déplace les LEI déjà écrits par gleif.py vers les colonnes lei_* dédiées.
 
@@ -1953,6 +1975,7 @@ def _init_tech_db() -> None:
             "is_backfill": "INTEGER",
         })
         db.execute("UPDATE documents SET last_seen_at=COALESCE(last_seen_at,created_at)")
+        _normalize_partial_document_dates(db)
         _backfill_date_confidence_documents(db)
         db.executescript(
             """

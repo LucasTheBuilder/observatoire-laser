@@ -5,6 +5,11 @@ openalex._work_is_on_topic(), donc un projet/une publication est retiré ici si 
 il/elle aurait été rejeté(e) par une collecte lancée aujourd'hui -- jamais une règle réinventée
 pour l'occasion.
 
+Trois familles de lignes, dans cet ordre : actors.db (actor_events/actor_relations),
+`documents`, puis `technology_signals`. Cette dernière manquait jusqu'à l'audit du 08/09/2026,
+ce qui laissait des projets sans aucun rapport avec le laser s'afficher sur la page
+Technologie laser alors que le filtre qui les aurait rejetés existait déjà.
+
 Script de maintenance ponctuel (même famille que reset_market_db.py), pas un collecteur : à
 relancer manuellement si le lexique LASER_RULES/PROCESS_TECHNOLOGIES évolue et que d'anciennes
 lignes doivent être réauditées.
@@ -74,6 +79,67 @@ def prune_cordis(*, cache_path: Path = CORDIS_CACHE_PATH) -> dict:
     }
 
 
+def prune_technology_signals(*, cache_path: Path = CORDIS_CACHE_PATH) -> dict:
+    """Retire les technology_signals qu'une collecte lancée aujourd'hui n'aurait pas créés.
+
+    Cette table manquait au nettoyage (audit du 08/09/2026) : prune_cordis() ne touche que
+    actors.db, prune_openalex_documents() que `documents`. Les signaux techniques issus de
+    projets hors sujet survivaient donc aux deux passes, et restaient affichés comme "projets
+    européens" sur la page Technologie laser -- quatre en production (RE4DY, iDriving, EEETHOS,
+    INTELLASE), dont trois sans une seule occurrence du mot "laser" dans leur objectif CORDIS.
+
+    Deux familles de signaux, deux critères, aucun réinventé pour l'occasion :
+
+    - signal de projet CORDIS -> _project_is_on_topic(), le même que prune_cordis() ;
+    - signal rattaché à un document (project_name NULL) -> le document doit toujours exister
+      dans `documents`. Un signal dont le document vient d'être retiré comme hors sujet est
+      orphelin par construction, sans avoir besoin de rejuger son texte.
+
+    Un projet absent du cache local n'est JAMAIS supprimé sur absence de preuve (même règle que
+    prune_cordis) : c'est ce qui protège les signaux dont la source n'est pas CORDIS du tout,
+    comme Femtocell, documenté sur le site d'ALPHANOV.
+
+    Les lignes technology_signal_sources partent avec leur signal (ON DELETE CASCADE, et
+    db.connect() active PRAGMA foreign_keys).
+    """
+    with connect(TECH_DB) as db:
+        signals = db.execute("SELECT id,source_url,project_name FROM technology_signals").fetchall()
+        known_documents = {row["source_url"] for row in db.execute("SELECT source_url FROM documents")}
+
+    project_signals = {row["id"]: pid for row in signals if (pid := _cordis_project_id(row["source_url"]))}
+    orphan_ids = [
+        row["id"] for row in signals
+        if not (row["project_name"] or "").strip() and row["source_url"] not in known_documents
+    ]
+
+    off_topic_ids: list[int] = []
+    projects: dict[str, dict[str, str]] = {}
+    if project_signals:
+        if not cache_path.exists():
+            raise SystemExit(
+                f"Cache CORDIS introuvable ({cache_path}) : impossible de relire titre/objectif des "
+                "projets déjà en base. Relancer cordis.collect_cordis() une fois pour le reconstituer."
+            )
+        projects = _project_details(cache_path, set(project_signals.values()))
+        off_topic_ids = [
+            signal_id for signal_id, project_id in project_signals.items()
+            if (project := projects.get(project_id)) is not None and not _project_is_on_topic(project)
+        ]
+
+    removed = sorted({*off_topic_ids, *orphan_ids})
+    with connect(TECH_DB) as db:
+        for signal_id in removed:
+            db.execute("DELETE FROM technology_signals WHERE id=?", (signal_id,))
+
+    return {
+        "signals_checked": len(signals),
+        "projects_reread": len(projects),
+        "signals_off_topic": len(off_topic_ids),
+        "signals_orphaned": len(orphan_ids),
+        "signals_removed": len(removed),
+    }
+
+
 def prune_openalex_documents() -> dict:
     """Retire les publications attribuées à un acteur (actor_name non NULL -- la marque des
     lignes issues d'openalex.py, voir openalex._upsert_document) dont le titre ne passe plus
@@ -111,4 +177,15 @@ if __name__ == "__main__":
     print(
         f"OpenAlex : {openalex_report['documents_checked']} publications réexaminées, "
         f"{openalex_report['documents_removed']} hors sujet supprimées."
+    )
+
+    # Après prune_openalex_documents(), jamais avant : la détection des signaux orphelins lit
+    # `documents`, et doit donc la voir déjà nettoyée.
+    signals_report = prune_technology_signals()
+    print(
+        f"Signaux techno : {signals_report['signals_checked']} réexaminés "
+        f"({signals_report['projects_reread']} projets relus dans le cache), "
+        f"{signals_report['signals_off_topic']} hors sujet et "
+        f"{signals_report['signals_orphaned']} orphelins -> "
+        f"{signals_report['signals_removed']} supprimés."
     )

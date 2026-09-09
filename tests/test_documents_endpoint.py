@@ -109,5 +109,72 @@ class DocumentsEndpointTests(unittest.TestCase):
             self.assertEqual(1, len(result))
 
 
+class PartialDocumentDateNormalizationTests(unittest.TestCase):
+    """db._normalize_partial_document_dates : rattrape les "2027-4" écrits avant
+    scrapers._crossref_date (audit du 08/09/2026). Un mois non zero-paddé se trie APRÈS une
+    date complète du même millésime, ce qui remontait ces documents en tête de corpus."""
+
+    def _init(self, tmp: str) -> Path:
+        tech_db = Path(tmp) / "technology.db"
+        with (
+            patch.object(dbmod, "ACTORS_DB", Path(tmp) / "actors.db"),
+            patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+            patch.object(dbmod, "TECH_DB", tech_db),
+        ):
+            dbmod.init_databases()
+        return tech_db
+
+    def _insert(self, tech_db: Path, published_at: str | None, fingerprint: str) -> None:
+        stamp = dbmod.utc_now()
+        with dbmod.connect(tech_db) as db:
+            db.execute(
+                """INSERT INTO documents(actor_name,document_type,title,source_url,published_at,fingerprint,created_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (None, "publication", "Paper", f"https://example.test/{fingerprint}", published_at, fingerprint, stamp),
+            )
+
+    def _dates(self, tech_db: Path) -> list[str | None]:
+        return [row["published_at"] for row in dbmod.rows(tech_db, "SELECT published_at FROM documents ORDER BY id")]
+
+    def test_partial_month_is_zero_padded_without_inventing_a_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = self._init(tmp)
+            self._insert(tech_db, "2027-4", "fp-partial")
+            with dbmod.connect(tech_db) as db:
+                dbmod._normalize_partial_document_dates(db)
+            self.assertEqual(["2027-04"], self._dates(tech_db))
+
+    def test_full_and_missing_dates_are_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = self._init(tmp)
+            self._insert(tech_db, "2026-05-29", "fp-full")
+            self._insert(tech_db, None, "fp-none")
+            with dbmod.connect(tech_db) as db:
+                dbmod._normalize_partial_document_dates(db)
+            self.assertEqual(["2026-05-29", None], self._dates(tech_db))
+
+    def test_normalized_date_sorts_after_an_earlier_full_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = self._init(tmp)
+            self._insert(tech_db, "2027-4", "fp-partial")
+            self._insert(tech_db, "2026-12-01", "fp-full")
+            with dbmod.connect(tech_db) as db:
+                dbmod._normalize_partial_document_dates(db)
+            ordered = dbmod.rows(tech_db, "SELECT published_at FROM documents ORDER BY published_at DESC")
+            self.assertEqual("2027-04", ordered[0]["published_at"])
+
+    def test_init_databases_normalizes_existing_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = self._init(tmp)
+            self._insert(tech_db, "2027-3", "fp-partial")
+            with (
+                patch.object(dbmod, "ACTORS_DB", Path(tmp) / "actors.db"),
+                patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+                patch.object(dbmod, "TECH_DB", tech_db),
+            ):
+                dbmod.init_databases()
+            self.assertEqual(["2027-03"], self._dates(tech_db))
+
+
 if __name__ == "__main__":
     unittest.main()

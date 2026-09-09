@@ -64,7 +64,7 @@ from db import (
     upsert_technology_signal,
     utc_now,
 )
-from http_client import HEADERS, TIMEOUTS
+from http_client import CRAWLER_CONTACT, HEADERS, TIMEOUTS
 from hybrid import (
     AnthropicClient,
     ContentBlock,
@@ -2862,7 +2862,18 @@ def upsert_document_technology_signal(
     Même garde-fou anti-faux-positif que is_on_topic() : un axe générique
     (_GENERIC_PROCESS_AXES) ne compte que si un vrai terme laser est aussi présent dans le
     texte, jamais seul. Renvoie le nombre de nouveaux signaux créés (0 si déjà connus ou aucun
-    axe détecté)."""
+    axe détecté).
+
+    Écrit AUSSI la ligne technology_signal_sources correspondante, comme cordis.py le fait
+    pour les projets. Sans elle, /api/tech-corpus/proofs -- qui joint les deux tables -- ne
+    renvoyait rien pour ces signaux : les seules publications ayant un axe qualifié étaient
+    précisément celles dont le panneau de preuves affichait "axe pas encore qualifié", ce qui
+    est faux. L'écriture est faite que le signal soit neuf ou déjà connu : c'est ce qui
+    rattrape, à la collecte suivante, les signaux créés avant ce correctif.
+
+    La citation est le passage effectivement matché par le lexique. Quand la source n'expose
+    pas d'abstract (cas de toute la base aujourd'hui), ce passage EST le titre : la ligne dit
+    alors, exactement et sans le maquiller, que l'axe repose sur le seul titre."""
     text = f"{title} {abstract or ''}"
     labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
     if not _laser_match(text):
@@ -2881,7 +2892,7 @@ def upsert_document_technology_signal(
         # pourrait coïncider.
         fact_key = technology_signal_key(axis, source_url)
         quote = _quote(text, PROCESS_TECHNOLOGIES.get(axis, {}).get("any_of", ()))
-        created, _ = upsert_technology_signal(
+        created, signal_id = upsert_technology_signal(
             db,
             fact_key=fact_key,
             axis=axis,
@@ -2893,8 +2904,32 @@ def upsert_document_technology_signal(
             field_confidence=0.7,
             source_title=title,
         )
+        # Même empreinte que cordis._upsert_technology_signal : (fait, source, citation), donc
+        # rejouer la collecte sur un document inchangé n'ajoute jamais de doublon.
+        upsert_fact_source(
+            db, "technology_signal_sources", signal_id,
+            source_url=source_url, source_title=title, quote=quote,
+            field_confidence=0.7,
+            fingerprint=hashlib.sha256(f"{fact_key}|{source_url}|{quote}".encode()).hexdigest(),
+        )
         added += created
     return added
+
+
+def _crossref_date(published: dict | None) -> str | None:
+    """Formate un `date-parts` Crossref en date ISO, en gardant sa précision réelle.
+
+    Crossref renvoie `[[2027, 4]]` quand il ne connaît que l'année et le mois (article publié
+    en ligne, rattaché à un numéro à paraître). Un simple "-".join produisait "2027-4" : non
+    zero-paddé, donc mal trié lexicographiquement ("2027-4" après "2027-12-01") et affiché tel
+    quel dans l'UI. On complète les composantes à deux chiffres SANS jamais inventer le jour
+    manquant -- une date partielle reste partielle, c'est le front qui décide comment la dire.
+    """
+    parts = ((published or {}).get("date-parts") or [[]])[0]
+    if not parts:
+        return None
+    year, *rest = parts
+    return "-".join([str(year), *(f"{int(part):02d}" for part in rest)])
 
 
 def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
@@ -2919,19 +2954,37 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
     pooled: dict[str, dict] = {}
     messages: list[str] = []
 
+    # Cadence Crossref : 1 req/s en anonyme, 3 req/s avec un mailto (en-tête
+    # x-rate-limit-limit). Les six requêtes partaient jusqu'ici sans aucun délai, ce qui
+    # dépassait la limite anonyme et faisait revenir un corps non-JSON sur une partie d'entre
+    # elles. La marge de 10 % absorbe l'imprécision de time.sleep.
+    query_interval = 1.1 / (3 if CRAWLER_CONTACT else 1)
+
     try:
         with httpx.Client(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as client:
-            for query in TECHNOLOGY_QUERIES:
+            for index, query in enumerate(TECHNOLOGY_QUERIES):
+                if index:
+                    time.sleep(query_interval)
                 try:
+                    # Pas de `sort=published` ici (audit du 08/09/2026). `query.bibliographic`
+                    # est une recherche floue -- 21 926 résultats pour "ultrafast laser
+                    # processing manufacturing" -- et trier par date jette le classement de
+                    # pertinence : on parcourt alors la queue du bruit, pas la tête du sujet.
+                    # Mesuré sur 120 items, mêmes requêtes, même fenêtre : 12 passaient
+                    # _laser_match en tri par date (10 %) contre 76 en tri par pertinence
+                    # (63 %). Le filtre `from-pub-date` continue de borner la fenêtre
+                    # temporelle, qui est la seule chose que le tri par date apportait.
                     response = client.get(
                         "https://api.crossref.org/works",
                         params={
                             "query.bibliographic": query,
                             "rows": per_query,
                             "filter": f"from-pub-date:{from_date}",
-                            "sort": "published",
-                            "order": "desc",
                             "select": "DOI,title,URL,published,abstract",
+                            # Crossref accorde 3 req/s à un appelant identifié contre 1 req/s
+                            # à l'anonyme (en-tête x-rate-limit-limit). Sans ce mailto, 2 à 4
+                            # des 6 requêtes revenaient avec un corps non-JSON.
+                            **({"mailto": CRAWLER_CONTACT} if CRAWLER_CONTACT else {}),
                         },
                     )
                     response.raise_for_status()
@@ -2956,10 +3009,7 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
                             "title": title,
                             "url": url,
                             "doi": doi,
-                            "published": "-".join(
-                                str(part)
-                                for part in (((item.get("published") or {}).get("date-parts") or [[]])[0])
-                            ) or None,
+                            "published": _crossref_date(item.get("published")),
                             "abstract": abstract,
                         })
                 except Exception as exc:
