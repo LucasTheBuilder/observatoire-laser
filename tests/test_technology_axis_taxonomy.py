@@ -231,6 +231,50 @@ class CorpusDrivenAxesTests(unittest.TestCase):
             with self.subTest(text=text[:50]):
                 self.assertTrue(is_on_topic(text))
 
+    def test_surface_functionalisation_needs_an_ultrafast_term_in_the_rule_itself(self):
+        """L'axe "Fonctionnalisation de surface" (09/09/2026) est gardé par `requires_any`, pas
+        par _GENERIC_PROCESS_AXES : son vocabulaire (superhydrophobe, mouillabilité,
+        biointerface) est du matériau générique, présent dans 38 projets Horizon Europe sans
+        rapport avec le laser. Couplé à un terme ultra-rapide, il n'en laisse entrer aucun.
+        """
+        from lexicon import _GENERIC_PROCESS_AXES
+        axis = "Fonctionnalisation de surface"
+        self.assertIn(axis, PROCESS_TECHNOLOGIES)
+        # La garde vit dans la règle : l'ajouter aussi aux génériques dupliquerait sans resserrer.
+        self.assertNotIn(axis, _GENERIC_PROCESS_AXES)
+
+        sans_laser = (
+            "Engineered porous electrodes with tunable wettability for redox flow batteries.",
+            "Bio-inspired superhydrophobic coating for wind turbine ice protection.",
+            "Contact angle measurements on self-cleaning surface prototypes.",
+            # Même "laser" seul ne suffit pas : c'est ce qui distingue cette garde d'un
+            # requires_any=("laser",), qui laissait entrer 3 projets de plus.
+            "Laser Based Surface Functionalization of parts for climate neutral manufacturing.",
+        )
+        for text in sans_laser:
+            with self.subTest(text=text[:50]):
+                labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
+                self.assertNotIn(axis, labels)
+                self.assertFalse(is_on_topic(text))
+
+        avec_femto = (
+            "Femtosecond‐Laser Mould Texturing Enables Tunable Biointerfaces in COC Microfluidics",
+            "High-throughput fabrication of biofunctional polymer surfaces via ultrafast laser structuring and injection molding",
+            "Research on the superhydrophobic surface of silicone rubber induced by femtosecond laser",
+        )
+        for title in avec_femto:
+            with self.subTest(title=title[:50]):
+                labels = {label for label, _ in _match_all_labels(title, PROCESS_TECHNOLOGIES)}
+                self.assertIn(axis, labels)
+
+    def test_superhydrophobic_is_listed_on_its_own(self):
+        # _term_pattern pose une frontière (?<!\w) : le préfixe "super" empêche
+        # "hydrophobic surface" de matcher "superhydrophobic surface". Sans le terme dédié,
+        # l'axe raterait la publication qui l'emploie (doc 206).
+        from lexicon import _contains_term
+        self.assertFalse(_contains_term("superhydrophobic surface of silicone rubber", "hydrophobic surface"))
+        self.assertTrue(_contains_term("superhydrophobic surface of silicone rubber", "superhydrophobic"))
+
     def test_bulk_does_not_match_a_maturity_statement(self):
         # "in-volume" est volontairement absent du lexique : _term_pattern accepte l'espace
         # comme séparateur, donc le terme matcherait "in volume production" -- une mention de

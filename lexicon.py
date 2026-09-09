@@ -205,6 +205,33 @@ PROCESS_TECHNOLOGIES: Lexicon = {
     # donc le terme matcherait "in volume production" -- une mention de maturité industrielle,
     # pas d'usinage en volume.
     "Bulk": {"any_of": ("bulk modification", "bulk modifications", "bulk material modification", "volume modification", "refractive index modification", "bulk silicon", "bulk glass")},
+    # Seul axe de cette table à décrire un RÉSULTAT (ce que la surface fait ensuite) plutôt
+    # qu'un procédé. D'où le libellé "Fonctionnalisation de surface" et non "Mouillabilité" :
+    # il nomme l'opération, ce qui garde le comptage par axe homogène avec les autres.
+    #
+    # Son garde-fou n'est PAS _GENERIC_PROCESS_AXES mais `requires_any`, et c'est plus fort :
+    # un axe dont le requires_any reprend le vocabulaire de LASER_RULES ne peut STRUCTURELLEMENT
+    # jamais élargir is_on_topic(), puisque tout texte qui le matche contient déjà un terme
+    # ultra-rapide -- _laser_match l'aurait admis de toute façon. Mesuré sur les 23 451 projets
+    # Horizon Europe : le vocabulaire seul ferait entrer +38 projets hors sujet (électrodes
+    # poreuses, catalyse, revêtements d'éoliennes), un requires_any=("laser",) encore +3, et
+    # cette version +0. Le +0 est ici une propriété, pas une observation sur le corpus du jour.
+    #
+    # Deuxième raison de préférer requires_any ici : il voyage avec la règle. _GENERIC_PROCESS_
+    # AXES n'est consulté qu'à deux endroits (is_on_topic, upsert_document_technology_signal),
+    # alors que ce lexique est aussi matché par l'extraction marché sur une simple `section`
+    # (scrapers._candidate), dont la garde amont porte sur une fenêtre plus large.
+    #
+    # "superhydrophobic" est listé séparément de "hydrophobic surface" : _term_pattern pose une
+    # frontière (?<!\w), donc le préfixe "super" empêche le second de matcher le premier.
+    "Fonctionnalisation de surface": {
+        "any_of": ("superhydrophobic", "superhydrophilic", "hydrophobic surface", "hydrophilic surface",
+                   "wettability", "wetting behavior", "biofunctional", "biointerface", "biointerfaces",
+                   "surface functionalization", "surface functionalisation", "anti-icing",
+                   "self-cleaning surface", "antibacterial surface", "contact angle"),
+        "requires_any": ("femtosecond", "femtoseconde", "ultrafast", "ultrashort", "ultra-short",
+                         "ultrakurzpulslaser"),
+    },
 }
 
 APPLICATION_ARCHITECTURES: Lexicon = {
@@ -475,6 +502,11 @@ def _laser_match(text: str) -> bool:
 # passent toutes _laser_match (21/21 vérifiées). Le garde-fou ne perd donc aucun document,
 # et ferme complètement le portail d'entrée -- exactement la fuite qui avait laissé RE4DY,
 # iDriving et EEETHOS s'afficher comme projets de l'observatoire.
+#
+# "Fonctionnalisation de surface" est délibérément ABSENT de cette liste : son `requires_any`
+# le rend déjà inoffensif pour is_on_topic (voir sa règle plus haut), et l'y ajouter en plus
+# dupliquerait la contrainte à deux endroits sans rien resserrer. Une seule garde, lisible
+# dans la règle elle-même.
 _GENERIC_PROCESS_AXES = frozenset({
     "Monitoring IA procédé", "Beam shaping", "Multi-beam / parallélisation", "Fabrication roll-to-roll (batteries)",
     "Burst GHz/MHz", "Soudage / assemblage de transparents", "Texturation de surface", "Bulk",
