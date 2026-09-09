@@ -188,6 +188,23 @@ PROCESS_TECHNOLOGIES: Lexicon = {
     "Haute puissance / hauts taux": {"any_of": ("high average power", "high repetition rate", "mhz processing", "high-throughput ablation")},
     "Multi-beam / parallélisation": {"any_of": ("multi-beam", "multibeam", "beam splitting", "diffractive optical element", "parallel processing")},
     "Fabrication roll-to-roll (batteries)": {"any_of": ("roll-to-roll", "roll to roll", "r2r processing", "battery electrode manufacturing")},
+    # Audit du corpus Technologie laser (09/09/2026) : 21 des 25 publications sortaient sans
+    # axe, non parce que la classification échouait mais parce que les 10 axes ci-dessus
+    # décrivent des familles de procédé nommées et des capacités machine, quand le corpus
+    # parle surtout de ce qu'on FAIT du laser (souder, modifier un volume, texturer) et du
+    # RÉGIME employé (burst). Les quatre axes suivants couvrent 13 de ces 21 documents.
+    #
+    # Chacun est mesuré, pas supposé : le nombre entre parenthèses est le nombre de projets
+    # Horizon Europe (sur les 23 451 du cache CORDIS) que l'axe ferait entrer dans
+    # l'observatoire s'il était utilisé SEUL comme filtre de pertinence, sans terme laser
+    # ultra-rapide. C'est ce qui justifie leur présence dans _GENERIC_PROCESS_AXES plus bas.
+    "Burst GHz/MHz": {"any_of": ("ghz burst", "mhz burst", "burst mode", "burst regime", "burst regimes", "laser burst", "laser bursts", "single burst", "intra-burst")},
+    "Soudage / assemblage de transparents": {"any_of": ("glass welding", "welding of glass", "weld glass", "transparent welding", "microwelding", "micro-welding", "dissimilar bonding")},
+    "Texturation de surface": {"any_of": ("surface texturing", "surface structuring", "microstructuring", "micro-structuring")},
+    # "in-volume" est délibérément absent : _term_pattern autorise l'espace comme séparateur,
+    # donc le terme matcherait "in volume production" -- une mention de maturité industrielle,
+    # pas d'usinage en volume.
+    "Bulk": {"any_of": ("bulk modification", "bulk modifications", "bulk material modification", "volume modification", "refractive index modification", "bulk silicon", "bulk glass")},
 }
 
 APPLICATION_ARCHITECTURES: Lexicon = {
@@ -446,8 +463,21 @@ def _laser_match(text: str) -> bool:
 # pas seulement laser) rejoignent la même exclusion pour la même raison (Lot 2 §2.7) :
 # "Haute puissance / hauts taux" reste hors de cette liste, ses termes (repetition rate, mhz
 # processing) étant assez spécifiquement photonique pour rester fiables seuls.
+# Les quatre axes ajoutés le 09/09/2026 rejoignent cette liste, mesure à l'appui : passés sur
+# les 23 451 projets Horizon Europe du cache, en ne comptant que ceux SANS terme laser
+# ultra-rapide, ils feraient entrer respectivement +0 (Burst), +2 (Soudage : un système de
+# puissance spatial et un projet de stockage d'hydrogène), +4 (Texturation, dont une cellule
+# solaire) et +0 (Bulk) projets hors sujet. Deux d'entre eux sont donc déjà des portes
+# ouvertes, et les deux à +0 le doivent au corpus du moment, pas à leur vocabulaire : "burst
+# mode" et "bulk silicon" sont de l'anglais courant en télécom comme en microélectronique.
+#
+# Les y mettre tous ne coûte RIEN, et c'est ce qui a tranché : les 21 publications visées
+# passent toutes _laser_match (21/21 vérifiées). Le garde-fou ne perd donc aucun document,
+# et ferme complètement le portail d'entrée -- exactement la fuite qui avait laissé RE4DY,
+# iDriving et EEETHOS s'afficher comme projets de l'observatoire.
 _GENERIC_PROCESS_AXES = frozenset({
     "Monitoring IA procédé", "Beam shaping", "Multi-beam / parallélisation", "Fabrication roll-to-roll (batteries)",
+    "Burst GHz/MHz", "Soudage / assemblage de transparents", "Texturation de surface", "Bulk",
 })
 
 def is_on_topic(text: str) -> bool:

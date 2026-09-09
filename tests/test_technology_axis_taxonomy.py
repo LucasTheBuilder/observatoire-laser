@@ -158,5 +158,87 @@ class NewProcessTechnologyAxesTests(unittest.TestCase):
         self.assertTrue(is_on_topic(text))
 
 
+class CorpusDrivenAxesTests(unittest.TestCase):
+    """Quatre axes ajoutés le 09/09/2026 après audit du corpus : 21 des 25 publications
+    sortaient sans axe parce que le lexique ne nommait ni le régime burst, ni le soudage de
+    transparents, ni l'usinage en volume, ni la texturation de surface.
+
+    Les titres testés sont ceux des publications réellement en base, pas des exemples
+    fabriqués : c'est ce qui rend ces tests capables de détecter une régression de lexique.
+    """
+
+    AXES = ("Burst GHz/MHz", "Soudage / assemblage de transparents", "Texturation de surface", "Bulk")
+
+    # (titre réel, axe attendu) -- couvre les variantes d'écriture rencontrées : "MHz Burst",
+    # "GHz-burst regimes", "laser bursts", "micro-welding" contre "microwelding".
+    REELS = (
+        ("GHz and MHz Burst enhanced femtosecond laser structuring of electrodes for improved Li-Ion battery performances", "Burst GHz/MHz"),
+        ("Comparative study of bulk modifications in borosilicate glass induced by femtosecond laser in single pulse, MHz-, and GHz-burst regimes", "Burst GHz/MHz"),
+        ("High-precision polishing of laser-engraved complex profiles using femtosecond laser bursts", "Burst GHz/MHz"),
+        ("Enhancement of ultrashort laser pulses absorption in glass using single MHz burst", "Burst GHz/MHz"),
+        ("Large-area glass welding and dissimilar bonding using femtosecond lasers", "Soudage / assemblage de transparents"),
+        ("Large-scale, high-strength transparent welding of thick fused silica using femtosecond laser pulses", "Soudage / assemblage de transparents"),
+        ("Ultrafast laser microwelding for quantum technology", "Soudage / assemblage de transparents"),
+        ("Strength-plasticity synergic and low-thermal-resistance sapphire/Cu joints via ultrafast laser micro-welding with intermediate Cu2O nanolayer", "Soudage / assemblage de transparents"),
+        ("40MHz femtosecond laser single burst to weld glass", "Soudage / assemblage de transparents"),
+        ("Monitoring of ultrashort pulse laser surface texturing using spectroscopy and deep learning model", "Texturation de surface"),
+        ("Comparative study of bulk modifications in borosilicate glass induced by femtosecond laser in single pulse, MHz-, and GHz-burst regimes", "Bulk"),
+        ("Study of bottom-up column formation in bulk silicon initiated at silicon-air and silicon-glass interfaces by ultrafast laser processing", "Bulk"),
+    )
+
+    def test_all_four_axes_are_registered(self):
+        for axis in self.AXES:
+            self.assertIn(axis, PROCESS_TECHNOLOGIES)
+
+    def test_real_titles_get_their_axis(self):
+        for title, axis in self.REELS:
+            with self.subTest(axis=axis, title=title[:60]):
+                labels = {label for label, _ in _match_all_labels(title, PROCESS_TECHNOLOGIES)}
+                self.assertIn(axis, labels)
+
+    def test_every_new_axis_is_generic(self):
+        # C'est le garde-fou qui empêche ces axes de rouvrir le portail d'entrée : mesuré sur
+        # les 23 451 projets Horizon Europe, "Texturation de surface" seul ferait entrer 4
+        # projets sans aucun terme laser ultra-rapide. Les 21 publications visées passant
+        # toutes _laser_match, le classement en générique ne coûte aucun document.
+        from lexicon import _GENERIC_PROCESS_AXES
+        for axis in self.AXES:
+            with self.subTest(axis=axis):
+                self.assertIn(axis, _GENERIC_PROCESS_AXES)
+
+    def test_new_axes_alone_never_make_content_on_topic(self):
+        # Un texte industriel qui porte le vocabulaire mais aucun terme ultra-rapide : c'est
+        # exactement ce qui avait laissé entrer RE4DY/iDriving/EEETHOS via "digital twin".
+        hors_sujet = (
+            "Laser-based surface texturing of parts for climate neutral manufacturing.",
+            "Glass welding line for architectural panels, with dissimilar bonding of frames.",
+            "Characterisation of bulk silicon wafers for photovoltaic cell production.",
+            "The receiver switches to burst mode during peak data transfer.",
+        )
+        for text in hors_sujet:
+            with self.subTest(text=text[:50]):
+                labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
+                self.assertTrue(labels & set(self.AXES), "le texte doit bien porter le vocabulaire")
+                self.assertFalse(is_on_topic(text))
+
+    def test_same_content_with_an_ultrafast_term_is_on_topic(self):
+        for text in (
+            "Femtosecond laser surface texturing of parts.",
+            "Ultrafast laser glass welding with dissimilar bonding.",
+            "Ultrashort pulse bulk modification of silicon.",
+            "GHz burst ablation with an ultrafast laser source.",
+        ):
+            with self.subTest(text=text[:50]):
+                self.assertTrue(is_on_topic(text))
+
+    def test_bulk_does_not_match_a_maturity_statement(self):
+        # "in-volume" est volontairement absent du lexique : _term_pattern accepte l'espace
+        # comme séparateur, donc le terme matcherait "in volume production" -- une mention de
+        # production industrielle, pas d'usinage en volume.
+        text = "Femtosecond laser cutting already in volume production for automotive parts."
+        labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
+        self.assertNotIn("Bulk", labels)
+
+
 if __name__ == "__main__":
     unittest.main()
