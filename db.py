@@ -576,19 +576,32 @@ def _migrate_industrial_stage_placeholder_values(db: sqlite3.Connection) -> None
 _TECHNOLOGY_AXIS_ALIASES: dict[str, str] = {
     "Monitoring + IA / digital twin": "Monitoring IA procédé",
     "Beam shaping / surfaces 3D": "Beam shaping",
+    # Écrit dans PROCESS_TECHNOLOGIES le 09/09/2026, retiré le lendemain : il faisait double
+    # emploi avec OPERATIONS["Soudage"], qui a absorbé ses termes, et les deux s'affichaient
+    # côte à côte dans deux groupes de facettes voisins.
+    "Soudage / assemblage de transparents": "Soudage",
 }
 
 
 def _normalize_technology_axes(db: sqlite3.Connection) -> None:
     """Canonise les libellés d'axe hérités vers leur entrée de lexique -- fusionne (union des
     actor_names, comme _upsert_technology_signal) si la ligne canonique existe déjà pour le
-    même projet, sinon renomme la ligne en place."""
+    même discriminant, sinon renomme la ligne en place.
+
+    Le discriminant n'est pas toujours le projet : cordis.py dérive fact_key de (axe, projet),
+    scrapers.upsert_document_technology_signal de (axe, URL du document). Cette fonction ne
+    connaissait que le premier cas -- écrite quand la table ne portait que des projets -- et
+    aurait donc calculé une clé fausse pour tout signal documentaire, en fusionnant entre elles
+    des lignes qui n'ont rien à voir (project_name NULL pour toutes). Corrigé le 10/09/2026, à
+    l'occasion du premier alias qui touche des documents.
+    """
     for old_axis, new_axis in _TECHNOLOGY_AXIS_ALIASES.items():
         rows = db.execute(
-            "SELECT id,project_name,actor_names FROM technology_signals WHERE axis=?", (old_axis,)
+            "SELECT id,project_name,source_url,actor_names FROM technology_signals WHERE axis=?", (old_axis,)
         ).fetchall()
         for row in rows:
-            new_fact_key = technology_signal_key(new_axis, row["project_name"])
+            discriminant = row["project_name"] or row["source_url"]
+            new_fact_key = technology_signal_key(new_axis, discriminant)
             existing = db.execute(
                 "SELECT id,actor_names FROM technology_signals WHERE fact_key=?", (new_fact_key,)
             ).fetchone()
@@ -597,6 +610,15 @@ def _normalize_technology_axes(db: sqlite3.Connection) -> None:
                 db.execute(
                     "UPDATE technology_signals SET actor_names=? WHERE id=?",
                     (json.dumps(merged, ensure_ascii=False), existing["id"]),
+                )
+                # Les citations suivent le fait survivant : sans ce transfert, ON DELETE CASCADE
+                # les emporterait, et la fusion ferait donc DISPARAÎTRE de la preuve. OR IGNORE
+                # parce que l'empreinte est unique -- une citation déjà portée à l'identique par
+                # la ligne survivante reste sur l'ancienne et part avec elle, ce qui est le
+                # comportement voulu (c'est un doublon).
+                db.execute(
+                    "UPDATE OR IGNORE technology_signal_sources SET signal_id=? WHERE signal_id=?",
+                    (existing["id"], row["id"]),
                 )
                 db.execute("DELETE FROM technology_signals WHERE id=?", (row["id"],))
             else:
@@ -2000,8 +2022,14 @@ def _init_tech_db() -> None:
         # libellés voisins pour deux concepts différents, indiscernables au comptage) -- d'où
         # cette colonne, qui sert aussi de groupe de facettes sur le front.
         _add_columns(db, "technology_signals", {"dimension": "TEXT"})
-        _reconcile_technology_signal_dimensions(db)
         _normalize_technology_axes(db)
+        # APRÈS _normalize_technology_axes, jamais avant : la dimension se déduit du libellé,
+        # donc elle doit être calculée sur le libellé DÉFINITIF. Dans l'autre ordre, une ligne
+        # renommée par un alias garde la dimension de son ancien libellé -- constaté en
+        # production le 10/09/2026 sur l'alias "Soudage / assemblage de transparents" ->
+        # "Soudage", où une ligne renommée restait en `process_technology` alors que "Soudage"
+        # appartient à OPERATIONS.
+        _reconcile_technology_signal_dimensions(db)
         _reconcile_technology_signal_maturity(db)
         _add_columns(db, "documents", {
             "last_seen_at": "TEXT",

@@ -135,6 +135,31 @@ class DimensionReconciliationTests(unittest.TestCase):
             row = dbmod.rows(tech_db, "SELECT axis,dimension FROM technology_signals")[0]
             self.assertEqual("operation", row["dimension"])
 
+    def test_a_renamed_axis_gets_the_dimension_of_its_new_label(self):
+        """init_databases doit normaliser les libellés AVANT de déduire les dimensions : une
+        ligne renommée par un alias garderait sinon la dimension de son ancien libellé.
+        Constaté en production sur "Soudage / assemblage de transparents" -> "Soudage", qui
+        restait en `process_technology` alors que "Soudage" appartient à OPERATIONS."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = _setup(tmp)
+            url = "https://doi.org/10.1/renamed"
+            with dbmod.connect(tech_db) as db:
+                dbmod.upsert_technology_signal(
+                    db, fact_key=dbmod.technology_signal_key("Soudage / assemblage de transparents", url),
+                    axis="Soudage / assemblage de transparents", maturity_stage="Prototype",
+                    bucket="radar", actor_names=[], source_url=url, quote="q",
+                    field_confidence=0.7, dimension="process_technology",
+                )
+            with (
+                patch.object(dbmod, "ACTORS_DB", Path(tmp) / "actors.db"),
+                patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+                patch.object(dbmod, "TECH_DB", tech_db),
+            ):
+                dbmod.init_databases()
+            row = dbmod.rows(tech_db, "SELECT axis,dimension FROM technology_signals")[0]
+            self.assertEqual("Soudage", row["axis"])
+            self.assertEqual("operation", row["dimension"])
+
     def test_an_unknown_label_falls_back_to_process_technology(self):
         with tempfile.TemporaryDirectory() as tmp:
             tech_db = _setup(tmp)

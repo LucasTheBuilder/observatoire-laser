@@ -160,7 +160,15 @@ OPERATIONS: Lexicon = {
         "anti-icing", "self-cleaning surface", "antibacterial surface", "contact angle",
     )},
     "Ablation": {"any_of": ("ablation", "selective ablation")},
-    "Soudage": {"any_of": ("welding", "soudage", "micro-welding", "microwelding")},
+    # A absorbé "Soudage / assemblage de transparents" le 10/09/2026 : cet axe, écrit la veille
+    # dans PROCESS_TECHNOLOGIES, faisait double emploi avec celui-ci et s'affichait à côté de
+    # lui dans deux groupes de facettes voisins. "welding" couvrait déjà le gros du corpus ; ce
+    # qui manquait ici, ce sont les formes que le mot seul ne matche pas (weld glass) et
+    # l'assemblage sans fusion (dissimilar bonding).
+    "Soudage": {"any_of": (
+        "welding", "soudage", "micro-welding", "microwelding",
+        "weld glass", "transparent welding", "dissimilar bonding",
+    )},
     "Gravure": {"any_of": ("engraving", "gravure")},
     "Scribing": {"any_of": ("laser scribing", "scribing")},
     "Dicing": {"any_of": ("laser dicing", "stealth dicing", "dicing")},
@@ -211,7 +219,6 @@ PROCESS_TECHNOLOGIES: Lexicon = {
     # l'observatoire s'il était utilisé SEUL comme filtre de pertinence, sans terme laser
     # ultra-rapide. C'est ce qui justifie leur présence dans _GENERIC_PROCESS_AXES plus bas.
     "Burst GHz/MHz": {"any_of": ("ghz burst", "mhz burst", "burst mode", "burst regime", "burst regimes", "laser burst", "laser bursts", "single burst", "intra-burst")},
-    "Soudage / assemblage de transparents": {"any_of": ("glass welding", "welding of glass", "weld glass", "transparent welding", "microwelding", "micro-welding", "dissimilar bonding")},
     "Texturation de surface": {"any_of": ("surface texturing", "surface structuring", "microstructuring", "micro-structuring")},
     # "in-volume" est délibérément absent : _term_pattern autorise l'espace comme séparateur,
     # donc le terme matcherait "in volume production" -- une mention de maturité industrielle,
@@ -525,7 +532,7 @@ DOCUMENT_LEXICONS: dict[str, Lexicon] = {
 
 _GENERIC_PROCESS_AXES = frozenset({
     "Monitoring IA procédé", "Beam shaping", "Multi-beam / parallélisation", "Fabrication roll-to-roll (batteries)",
-    "Burst GHz/MHz", "Soudage / assemblage de transparents", "Texturation de surface", "Bulk",
+    "Burst GHz/MHz", "Texturation de surface", "Bulk",
 })
 
 def is_on_topic(text: str) -> bool:

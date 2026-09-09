@@ -89,6 +89,51 @@ class NormalizeTechnologyAxesTests(unittest.TestCase):
             count = dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signals")
             self.assertEqual(1, count)
 
+    def test_a_document_signal_is_renamed_on_its_own_url_not_on_a_null_project(self):
+        """Le discriminant du fact_key n'est pas toujours le projet : un signal documentaire le
+        dérive de l'URL du document. La fonction ne connaissait que le cas projet, et aurait
+        calculé la même clé pour DEUX documents distincts (project_name NULL des deux côtés) --
+        donc fusionné des lignes sans rapport. Corrigé le 10/09/2026."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = _setup(tmp)
+            with dbmod.connect(tech_db) as db:
+                for url in ("https://doi.org/10.1/a", "https://doi.org/10.1/b"):
+                    dbmod.upsert_technology_signal(
+                        db, fact_key=dbmod.technology_signal_key("Soudage / assemblage de transparents", url),
+                        axis="Soudage / assemblage de transparents", maturity_stage="Prototype",
+                        bucket="radar", actor_names=[], source_url=url, quote="q",
+                        field_confidence=0.7, dimension="process_technology",
+                    )
+                dbmod._normalize_technology_axes(db)
+
+            rows = dbmod.rows(tech_db, "SELECT axis,source_url FROM technology_signals ORDER BY source_url")
+            self.assertEqual(2, len(rows), "deux documents distincts ne doivent jamais fusionner")
+            self.assertEqual(["Soudage", "Soudage"], [row["axis"] for row in rows])
+            self.assertEqual(["https://doi.org/10.1/a", "https://doi.org/10.1/b"], [row["source_url"] for row in rows])
+
+    def test_merging_moves_the_citations_instead_of_deleting_them(self):
+        """Une fusion ne doit jamais faire disparaître de la preuve : les sources de la ligne
+        absorbée sont transférées avant le DELETE, que ON DELETE CASCADE emporterait sinon."""
+        url = "https://doi.org/10.1/merge"
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = _setup(tmp)
+            with dbmod.connect(tech_db) as db:
+                for axis, quote in (("Soudage", "cite du survivant"), ("Soudage / assemblage de transparents", "cite de l'absorbe")):
+                    _, signal_id = dbmod.upsert_technology_signal(
+                        db, fact_key=dbmod.technology_signal_key(axis, url), axis=axis,
+                        maturity_stage="Prototype", bucket="radar", actor_names=[], source_url=url,
+                        quote=quote, field_confidence=0.7, dimension="operation",
+                    )
+                    dbmod.upsert_fact_source(
+                        db, "technology_signal_sources", signal_id,
+                        source_url=url, quote=quote, fingerprint=f"fp-{axis}",
+                    )
+                dbmod._normalize_technology_axes(db)
+
+            self.assertEqual(1, dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signals"))
+            quotes = {row["quote"] for row in dbmod.rows(tech_db, "SELECT quote FROM technology_signal_sources")}
+            self.assertEqual({"cite du survivant", "cite de l'absorbe"}, quotes)
+
     def test_axis_not_in_the_alias_map_is_left_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
             tech_db = _setup(tmp)
@@ -167,7 +212,7 @@ class CorpusDrivenAxesTests(unittest.TestCase):
     fabriqués : c'est ce qui rend ces tests capables de détecter une régression de lexique.
     """
 
-    AXES = ("Burst GHz/MHz", "Soudage / assemblage de transparents", "Texturation de surface", "Bulk")
+    AXES = ("Burst GHz/MHz", "Texturation de surface", "Bulk")
 
     # (titre réel, axe attendu) -- couvre les variantes d'écriture rencontrées : "MHz Burst",
     # "GHz-burst regimes", "laser bursts", "micro-welding" contre "microwelding".
@@ -176,19 +221,37 @@ class CorpusDrivenAxesTests(unittest.TestCase):
         ("Comparative study of bulk modifications in borosilicate glass induced by femtosecond laser in single pulse, MHz-, and GHz-burst regimes", "Burst GHz/MHz"),
         ("High-precision polishing of laser-engraved complex profiles using femtosecond laser bursts", "Burst GHz/MHz"),
         ("Enhancement of ultrashort laser pulses absorption in glass using single MHz burst", "Burst GHz/MHz"),
-        ("Large-area glass welding and dissimilar bonding using femtosecond lasers", "Soudage / assemblage de transparents"),
-        ("Large-scale, high-strength transparent welding of thick fused silica using femtosecond laser pulses", "Soudage / assemblage de transparents"),
-        ("Ultrafast laser microwelding for quantum technology", "Soudage / assemblage de transparents"),
-        ("Strength-plasticity synergic and low-thermal-resistance sapphire/Cu joints via ultrafast laser micro-welding with intermediate Cu2O nanolayer", "Soudage / assemblage de transparents"),
-        ("40MHz femtosecond laser single burst to weld glass", "Soudage / assemblage de transparents"),
         ("Monitoring of ultrashort pulse laser surface texturing using spectroscopy and deep learning model", "Texturation de surface"),
         ("Comparative study of bulk modifications in borosilicate glass induced by femtosecond laser in single pulse, MHz-, and GHz-burst regimes", "Bulk"),
         ("Study of bottom-up column formation in bulk silicon initiated at silicon-air and silicon-glass interfaces by ultrafast laser processing", "Bulk"),
     )
 
-    def test_all_four_axes_are_registered(self):
+    def test_registered_axes(self):
         for axis in self.AXES:
-            self.assertIn(axis, PROCESS_TECHNOLOGIES)
+            with self.subTest(axis=axis):
+                self.assertIn(axis, PROCESS_TECHNOLOGIES)
+
+    def test_welding_lives_only_in_operations(self):
+        """"Soudage / assemblage de transparents" a vécu un jour dans PROCESS_TECHNOLOGIES.
+        OPERATIONS["Soudage"] a absorbé ses termes : deux libellés voisins s'affichaient côte à
+        côte dans deux groupes de facettes, pour la même idée."""
+        from lexicon import OPERATIONS
+        self.assertNotIn("Soudage / assemblage de transparents", PROCESS_TECHNOLOGIES)
+        for title in (
+            "Large-area glass welding and dissimilar bonding using femtosecond lasers",
+            "Large-scale, high-strength transparent welding of thick fused silica using femtosecond laser pulses",
+            "Ultrafast laser microwelding for quantum technology",
+            "40MHz femtosecond laser single burst to weld glass",
+            "Strength-plasticity synergic sapphire/Cu joints via ultrafast laser micro-welding",
+        ):
+            with self.subTest(title=title[:50]):
+                labels = {label for label, _ in _match_all_labels(title, OPERATIONS)}
+                self.assertIn("Soudage", labels)
+
+        # Et le vocabulaire absorbé n'ouvre toujours aucune porte : OPERATIONS n'entre pas
+        # dans is_on_topic, donc une ligne de soudage industrielle sans terme ultra-rapide
+        # reste dehors -- ce que garantissait auparavant _GENERIC_PROCESS_AXES.
+        self.assertFalse(is_on_topic("Glass welding line for architectural panels, with dissimilar bonding of frames."))
 
     def test_real_titles_get_their_axis(self):
         for title, axis in self.REELS:
@@ -211,7 +274,6 @@ class CorpusDrivenAxesTests(unittest.TestCase):
         # exactement ce qui avait laissé entrer RE4DY/iDriving/EEETHOS via "digital twin".
         hors_sujet = (
             "Laser-based surface texturing of parts for climate neutral manufacturing.",
-            "Glass welding line for architectural panels, with dissimilar bonding of frames.",
             "Characterisation of bulk silicon wafers for photovoltaic cell production.",
             "The receiver switches to burst mode during peak data transfer.",
         )
