@@ -1973,6 +1973,11 @@ def _init_tech_db() -> None:
             # ci-dessus. date_confidence in ('published','observed_only','unknown').
             "date_confidence": "TEXT",
             "is_backfill": "INTEGER",
+            # Non NULL = ligne entrée à la main (voir curated_sources.py), donc jamais retirée
+            # par prune_documents(). Porte le nom de la curation plutôt qu'un booléen : la table
+            # n'a aucune colonne rattachant une publication à un projet, et c'est ce qui permet
+            # de retrouver l'ensemble d'une même initiative.
+            "curated_by": "TEXT",
         })
         db.execute("UPDATE documents SET last_seen_at=COALESCE(last_seen_at,created_at)")
         _normalize_partial_document_dates(db)

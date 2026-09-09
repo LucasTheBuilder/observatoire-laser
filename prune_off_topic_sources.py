@@ -101,9 +101,18 @@ def prune_technology_signals(*, cache_path: Path = CORDIS_CACHE_PATH) -> dict:
 
     Les lignes technology_signal_sources partent avec leur signal (ON DELETE CASCADE, et
     db.connect() active PRAGMA foreign_keys).
+
+    Les signaux relus par un humain (``reviewed_at`` non NULL) sont hors d'atteinte : c'est la
+    même garde que les trois sites d'upsert de scrapers.py, où ``reviewed_at IS NULL`` empêche
+    déjà un collecteur d'écraser une décision humaine. Elle est indispensable ici : les projets
+    entrés à la main (voir curated_sources.py) le sont justement parce que leur source ne dit
+    pas ce qu'ils font -- BILASURF, dont l'objectif CORDIS ne contient aucun terme
+    ultra-rapide, serait supprimé à chaque passage sans elle.
     """
     with connect(TECH_DB) as db:
-        signals = db.execute("SELECT id,source_url,project_name FROM technology_signals").fetchall()
+        signals = db.execute(
+            "SELECT id,source_url,project_name FROM technology_signals WHERE reviewed_at IS NULL"
+        ).fetchall()
         known_documents = {row["source_url"] for row in db.execute("SELECT source_url FROM documents")}
 
     project_signals = {row["id"]: pid for row in signals if (pid := _cordis_project_id(row["source_url"]))}
@@ -151,10 +160,16 @@ def prune_documents() -> dict:
     de spectroscopie d'absorption transitoire femtoseconde, collecté par Crossref et affiché
     comme document de l'observatoire, et c'est le même angle mort que celui qui avait laissé
     quatre projets hors sujet dans technology_signals.
+
+    Les lignes curées à la main (``curated_by`` non NULL, voir curated_sources.py) sont hors
+    d'atteinte : elles existent PRÉCISÉMENT parce que le filtre automatique les rejette, une
+    source ne disant pas toujours ce qu'elle fait vraiment. Les supprimer ici reviendrait à
+    défaire une décision humaine à chaque passage -- même principe que la garde
+    ``reviewed_at IS NULL`` des trois sites d'upsert de scrapers.py.
     """
     with connect(TECH_DB) as db:
         rows = db.execute(
-            "SELECT id,title FROM documents WHERE document_type='publication'"
+            "SELECT id,title FROM documents WHERE document_type='publication' AND curated_by IS NULL"
         ).fetchall()
 
     off_topic_ids = [row["id"] for row in rows if not _work_is_on_topic(row["title"] or "")]
