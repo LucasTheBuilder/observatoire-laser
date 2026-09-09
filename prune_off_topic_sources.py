@@ -83,7 +83,7 @@ def prune_technology_signals(*, cache_path: Path = CORDIS_CACHE_PATH) -> dict:
     """Retire les technology_signals qu'une collecte lancée aujourd'hui n'aurait pas créés.
 
     Cette table manquait au nettoyage (audit du 08/09/2026) : prune_cordis() ne touche que
-    actors.db, prune_openalex_documents() que `documents`. Les signaux techniques issus de
+    actors.db, prune_documents() que `documents`. Les signaux techniques issus de
     projets hors sujet survivaient donc aux deux passes, et restaient affichés comme "projets
     européens" sur la page Technologie laser -- quatre en production (RE4DY, iDriving, EEETHOS,
     INTELLASE), dont trois sans une seule occurrence du mot "laser" dans leur objectif CORDIS.
@@ -140,15 +140,21 @@ def prune_technology_signals(*, cache_path: Path = CORDIS_CACHE_PATH) -> dict:
     }
 
 
-def prune_openalex_documents() -> dict:
-    """Retire les publications attribuées à un acteur (actor_name non NULL -- la marque des
-    lignes issues d'openalex.py, voir openalex._upsert_document) dont le titre ne passe plus
-    _work_is_on_topic(). Les publications Crossref jamais attribuées (actor_name NULL) sont
-    hors du champ de ce nettoyage : scrapers.scrape_technology() les filtre déjà à la collecte.
+def prune_documents() -> dict:
+    """Retire les publications dont le titre ne passe plus _work_is_on_topic().
+
+    Couvre TOUTES les publications depuis l'audit du 09/09/2026, alors que la version d'origine
+    se limitait à celles attribuées à un acteur (actor_name non NULL, la marque d'openalex.py).
+    L'argument qui excluait les lignes Crossref -- "scrape_technology() les filtre déjà à la
+    collecte" -- ne vaut que pour les collectes À VENIR : une ligne écrite avant un durcissement
+    du filtre reste en base pour toujours. C'est exactement ce qui s'est produit avec un article
+    de spectroscopie d'absorption transitoire femtoseconde, collecté par Crossref et affiché
+    comme document de l'observatoire, et c'est le même angle mort que celui qui avait laissé
+    quatre projets hors sujet dans technology_signals.
     """
     with connect(TECH_DB) as db:
         rows = db.execute(
-            "SELECT id,title FROM documents WHERE document_type='publication' AND actor_name IS NOT NULL"
+            "SELECT id,title FROM documents WHERE document_type='publication'"
         ).fetchall()
 
     off_topic_ids = [row["id"] for row in rows if not _work_is_on_topic(row["title"] or "")]
@@ -173,13 +179,13 @@ if __name__ == "__main__":
         f"{cordis_report['relations_removed']} actor_relations supprimés."
     )
 
-    openalex_report = prune_openalex_documents()
+    documents_report = prune_documents()
     print(
-        f"OpenAlex : {openalex_report['documents_checked']} publications réexaminées, "
-        f"{openalex_report['documents_removed']} hors sujet supprimées."
+        f"Publications : {documents_report['documents_checked']} réexaminées, "
+        f"{documents_report['documents_removed']} hors sujet supprimées."
     )
 
-    # Après prune_openalex_documents(), jamais avant : la détection des signaux orphelins lit
+    # Après prune_documents(), jamais avant : la détection des signaux orphelins lit
     # `documents`, et doit donc la voir déjà nettoyée.
     signals_report = prune_technology_signals()
     print(

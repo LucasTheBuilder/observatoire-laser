@@ -275,6 +275,29 @@ class CorpusDrivenAxesTests(unittest.TestCase):
         self.assertFalse(_contains_term("superhydrophobic surface of silicone rubber", "hydrophobic surface"))
         self.assertTrue(_contains_term("superhydrophobic surface of silicone rubber", "superhydrophobic"))
 
+    def test_through_vias_in_glass_matches_tgv(self):
+        """L'axe TGV attendait "through glass via" : _term_pattern joint les mots avec [\\s-]+,
+        donc la formulation où le matériau est rejeté après le perçage ("through vias in glass
+        interposer production", Oxford Lasers) ne matchait pas. Trou trouvé sur une publication
+        réelle du corpus.
+        """
+        from lexicon import APPLICATION_ARCHITECTURES, _rule_matches
+        tgv = APPLICATION_ARCHITECTURES["TGV"]
+        for text in (
+            "Customised through vias in glass interposer production using ultrafast lasers and chemical etching",
+            "Through-vias in glass for advanced packaging",
+            "Through glass vias for semiconductor interposers",
+            "TGV drilling in glass wafers",
+        ):
+            with self.subTest(text=text[:50]):
+                self.assertTrue(_rule_matches(text, tgv))
+
+    def test_tgv_still_needs_its_context_guard(self):
+        # requires_any inchangé : "via" seul dans une phrase sans contexte verre/packaging ne
+        # doit pas suffire.
+        from lexicon import APPLICATION_ARCHITECTURES, _rule_matches
+        self.assertFalse(_rule_matches("Delivered via courier to the customer", APPLICATION_ARCHITECTURES["TGV"]))
+
     def test_bulk_does_not_match_a_maturity_statement(self):
         # "in-volume" est volontairement absent du lexique : _term_pattern accepte l'espace
         # comme séparateur, donc le terme matcherait "in volume production" -- une mention de

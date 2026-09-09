@@ -235,7 +235,19 @@ PROCESS_TECHNOLOGIES: Lexicon = {
 }
 
 APPLICATION_ARCHITECTURES: Lexicon = {
-    "TGV": {"any_of": ("through glass via", "through-glass via", "through glass vias", "through-glass vias"), "regex": (r"\bTGVs?\b",), "requires_any": ("glass", "via", "interposer", "semiconductor", "packaging")},
+    # "through vias in glass" et ses variantes : la formulation employée quand le matériau est
+    # rejeté après le nom du perçage plutôt qu'inséré dedans ("Customised through vias in glass
+    # interposer production", Oxford Lasers). Aucune des quatre formes d'origine ne la matchait
+    # -- _term_pattern joint les mots avec [\s-]+, donc "through glass via" exige que "glass"
+    # soit entre les deux. Trou trouvé pendant l'audit du 09/09/2026, sur une publication réelle
+    # du corpus. `requires_any` inchangé : il couvre déjà "glass"/"via"/"interposer".
+    "TGV": {
+        "any_of": ("through glass via", "through-glass via", "through glass vias", "through-glass vias",
+                   "through via in glass", "through vias in glass", "through-via in glass", "through-vias in glass",
+                   "via in glass", "vias in glass", "glass via", "glass vias"),
+        "regex": (r"\bTGVs?\b",),
+        "requires_any": ("glass", "via", "interposer", "semiconductor", "packaging"),
+    },
 }
 
 MATERIALS: Lexicon = {
@@ -525,6 +537,46 @@ def is_on_topic(text: str) -> bool:
         return True
     labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
     return bool(labels - _GENERIC_PROCESS_AXES)
+
+
+# Techniques de CARACTÉRISATION ultra-rapides : dans ces travaux, l'impulsion femtoseconde est
+# l'instrument de mesure, pas le procédé de fabrication. Le vocabulaire laser est bien là --
+# _laser_match dit vrai -- mais le sujet est de la physico-chimie, pas de la mise en œuvre
+# matière. Cas trouvé en production (audit du 09/09/2026) : "Revealing the enhanced
+# photocatalytic hydrogen production mechanism [...] by femtosecond transient absorption
+# spectroscopy", collecté par Crossref et affiché comme document de l'observatoire.
+LASER_AS_INSTRUMENT_CUES = (
+    "transient absorption spectroscopy", "transient absorption", "pump-probe spectroscopy",
+    "pump probe spectroscopy", "time-resolved photoluminescence", "ultrafast spectroscopy",
+    "femtosecond spectroscopy", "two-photon absorption spectroscopy",
+)
+
+
+def is_laser_the_instrument(text: str) -> bool:
+    """Vrai quand le texte relève d'une caractérisation ultra-rapide SANS procédé nommé.
+
+    La seconde moitié de la condition est ce qui rend la règle utilisable : la spectroscopie
+    sert aussi, légitimement, à SURVEILLER un procédé laser (deux publications IREPA du corpus,
+    "Monitoring of ultrashort pulse laser surface texturing using spectroscopy..."). Exiger
+    l'absence de tout procédé nommé -- PROCESS_TECHNOLOGIES, OPERATIONS ou une architecture
+    applicative -- distingue les deux sans avoir à lister les exceptions une par une. Vérifié
+    sur les 25 publications en base : rejette la seule qui doit l'être, garde les deux de
+    monitoring.
+
+    Volontairement PAS appliqué dans is_on_topic() : ce serait aussi le filtre des projets
+    CORDIS, où il retirerait 26 des 257 projets aujourd'hui admis (dynamique électronique
+    attoseconde, physique ultra-rapide des pérovskites, simulations de matière quantique...).
+    C'est probablement souhaitable, mais c'est une décision de périmètre distincte de la
+    collecte documentaire -- voir les appelants dans openalex.py et scrapers.py.
+    """
+    if not any(_contains_term(text, cue) for cue in LASER_AS_INSTRUMENT_CUES):
+        return False
+    if {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}:
+        return False
+    if {label for label, _ in _match_all_labels(text, OPERATIONS)}:
+        return False
+    return not any(_rule_matches(text, rule) for rule in APPLICATION_ARCHITECTURES.values())
+
 
 def _detect_maturity(text: str) -> tuple[str, str]:
     """Return the most mature explicit stage, using boundary-safe matching."""

@@ -117,6 +117,7 @@ from lexicon import (  # noqa: F401  (reexports pour les importateurs historique
     _specificity_score,
     _term_pattern,
     _term_variants,
+    is_laser_the_instrument,
     is_on_topic,
 )
 from site_profiles import SITE_OVERRIDES, crawl_budget, get_site_profile, seed_urls
@@ -3001,6 +3002,13 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
                         # Crossref search can return spectroscopy/biology papers despite a laser query.
                         # Require an explicit ultrafast/femtosecond signal in title or abstract.
                         if not _laser_match(f"{title} {abstract}"):
+                            continue
+                        # ...mais ce signal ne suffit pas : la garde ci-dessus laissait passer les
+                        # travaux où l'impulsion femtoseconde est l'INSTRUMENT DE MESURE, ce que le
+                        # commentaire précédent croyait justement écarter. Un article de
+                        # spectroscopie d'absorption transitoire dit "femtosecond" autant qu'un
+                        # article d'usinage (audit du 09/09/2026, un cas en production).
+                        if is_laser_the_instrument(f"{title} {abstract}"):
                             continue
 
                         doi = str(item.get("DOI") or "").strip() or None

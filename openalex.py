@@ -38,7 +38,7 @@ import httpx
 from actor_discovery import _known_actor_names_and_domains, _normalize_name, upsert_actor_candidate
 from db import ACTORS_DB, TECH_DB, connect, upsert_document, utc_now
 from http_client import CRAWLER_CONTACT, connector_client
-from scrapers import TECHNOLOGY_QUERIES, is_on_topic, upsert_document_technology_signal
+from scrapers import TECHNOLOGY_QUERIES, is_laser_the_instrument, is_on_topic, upsert_document_technology_signal
 
 OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "").strip()
 OPENALEX_API = "https://api.openalex.org"
@@ -143,8 +143,14 @@ def _work_is_on_topic(title: str) -> bool:
     généraliste, les publications les plus récentes sur n'importe quel sujet (poultry farming,
     fusion inertielle, Six Sigma...) écrasent mécaniquement la production laser -- voir audit v8
     §2.1 (123/203 publications hors sujet avant ce filtre).
+
+    Second garde-fou (audit du 09/09/2026) : is_on_topic() dit vrai dès qu'un terme
+    ultra-rapide est présent, y compris quand l'impulsion femtoseconde est l'INSTRUMENT DE
+    MESURE et non le procédé (spectroscopie d'absorption transitoire, pompe-sonde). Voir
+    lexicon.is_laser_the_instrument, qui ne rejette que les travaux sans aucun procédé nommé --
+    la spectroscopie qui surveille un procédé laser reste retenue.
     """
-    return is_on_topic(title)
+    return is_on_topic(title) and not is_laser_the_instrument(title)
 
 
 def _co_institutions(work: dict, exclude_institution_id: str) -> list[tuple[str, str | None]]:
