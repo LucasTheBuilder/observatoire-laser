@@ -355,6 +355,9 @@ button.ex-row:last-child { border-bottom: 0; }
 }
 .ex-doc-meta .ex-axis { font-size: 11.5px; color: var(--ex-ink-2); }
 .ex-doc-meta .ex-axis.ex-none { color: var(--ex-disabled); font-style: italic; }
+/* Familles autres que l'axe technologique (opération, matériau, marché...) : même taille, mais
+   en retrait, pour que l'axe reste ce que l'œil trouve en premier sur une ligne. */
+.ex-doc-meta .ex-family { font-size: 11.5px; color: var(--ex-label); }
 .ex-doc-meta .ex-actor { font-size: 11.5px; color: var(--ex-accent); }
 .ex-doc-meta .ex-ref { font-size: 11px; color: var(--ex-label); }
 .ex-doc-meta .ex-sep { font-size: 11px; color: var(--ex-hairline); }

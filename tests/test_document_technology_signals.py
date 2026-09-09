@@ -20,6 +20,19 @@ import db as dbmod
 from scrapers import upsert_document_technology_signal
 
 
+def _process_axes(tech_db: Path) -> set[str]:
+    """Les seuls libelles de dimension `process_technology`.
+
+    Depuis le 09/09/2026, upsert_document_technology_signal lit les SIX vocabulaires fermes
+    (voir lexicon.DOCUMENT_LEXICONS) : un titre parlant de silice ou de dispositifs medicaux
+    produit aussi un signal `material`/`market`. Ces tests portent sur l'axe de PROCEDE, donc
+    ils comptent cette dimension-la plutot que la table entiere -- sinon ils casseraient a
+    chaque enrichissement d'un autre vocabulaire, sans qu'aucun bug n'existe.
+    """
+    return {row["axis"] for row in dbmod.rows(
+        tech_db, "SELECT axis FROM technology_signals WHERE dimension='process_technology'")}
+
+
 def _setup(tmp: str) -> Path:
     tech_db = Path(tmp) / "technology.db"
     with (
@@ -40,12 +53,12 @@ class UpsertDocumentTechnologySignalTests(unittest.TestCase):
                     db, "Selective laser etching (SLE) of fused silica microchannels", "",
                     "https://doi.org/10.1/example", "ALPHANOV",
                 )
-            self.assertEqual(1, added)
-            row = dbmod.rows(tech_db, "SELECT axis,bucket,actor_names FROM technology_signals")[0]
-            self.assertEqual("SLE", row["axis"])
+            self.assertGreaterEqual(added, 1)
+            self.assertEqual({"SLE"}, _process_axes(tech_db))
+            row = dbmod.rows(tech_db, "SELECT bucket,actor_names FROM technology_signals WHERE axis='SLE'")[0]
             self.assertIn("ALPHANOV", row["actor_names"])
 
-    def test_no_matching_axis_creates_nothing(self):
+    def test_no_matching_process_axis_leaves_that_dimension_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             tech_db = _setup(tmp)
             with dbmod.connect(tech_db) as db:
@@ -53,9 +66,12 @@ class UpsertDocumentTechnologySignalTests(unittest.TestCase):
                     db, "Femtosecond laser micromachining of glass for medical devices", "",
                     "https://doi.org/10.1/example",
                 )
-            self.assertEqual(0, added)
-            count = dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signals")
-            self.assertEqual(0, count)
+            # Aucun axe de PROCEDE ici -- mais le titre nomme bien un materiau et un marche,
+            # que les cinq autres vocabulaires classent desormais.
+            self.assertEqual(set(), _process_axes(tech_db))
+            self.assertGreater(added, 0)
+            others = {row["dimension"] for row in dbmod.rows(tech_db, "SELECT dimension FROM technology_signals")}
+            self.assertIn("material", others)
 
     def test_generic_axis_without_laser_context_is_excluded(self):
         # Same false-positive guard as is_on_topic(): "digital twin" alone (Monitoring IA
@@ -112,10 +128,10 @@ class UpsertDocumentTechnologySignalTests(unittest.TestCase):
             with dbmod.connect(tech_db) as db:
                 first = upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/example")
                 second = upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/example")
-            self.assertEqual(1, first)
+            self.assertGreater(first, 0)
             self.assertEqual(0, second)
             count = dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signals")
-            self.assertEqual(1, count)
+            self.assertEqual(first, count)
 
     def test_second_actor_on_same_document_merges_into_actor_names(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -133,7 +149,7 @@ class UpsertDocumentTechnologySignalTests(unittest.TestCase):
             with dbmod.connect(tech_db) as db:
                 upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/a")
                 upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/b")
-            count = dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signals")
+            count = dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signals WHERE axis='SLE'")
             self.assertEqual(2, count)
 
     def test_multiple_axes_on_one_document_each_create_a_signal(self):
@@ -144,9 +160,8 @@ class UpsertDocumentTechnologySignalTests(unittest.TestCase):
                     db, "Selective laser etching (SLE) combined with LIPSS structuring of glass", "",
                     "https://doi.org/10.1/example",
                 )
-            self.assertEqual(2, added)
-            axes = {row["axis"] for row in dbmod.rows(tech_db, "SELECT axis FROM technology_signals")}
-            self.assertEqual({"SLE", "LIPSS"}, axes)
+            self.assertGreaterEqual(added, 2)
+            self.assertEqual({"SLE", "LIPSS"}, _process_axes(tech_db))
 
 
 class DocumentTechnologySignalSourcesTests(unittest.TestCase):
@@ -163,11 +178,13 @@ class DocumentTechnologySignalSourcesTests(unittest.TestCase):
                     db, "Selective laser etching (SLE) of fused silica microchannels", "",
                     "https://doi.org/10.1/example", "ALPHANOV",
                 )
-            source = dbmod.rows(tech_db, "SELECT signal_id,source_url,source_title,quote FROM technology_signal_sources")
-            self.assertEqual(1, len(source))
-            self.assertEqual("https://doi.org/10.1/example", source[0]["source_url"])
-            signal_id = dbmod.scalar(tech_db, "SELECT id FROM technology_signals")
-            self.assertEqual(signal_id, source[0]["signal_id"])
+            # Une preuve par signal, quelle que soit la dimension.
+            signals = dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signals")
+            sources = dbmod.rows(tech_db, "SELECT signal_id,source_url FROM technology_signal_sources")
+            self.assertEqual(signals, len(sources))
+            self.assertEqual({"https://doi.org/10.1/example"}, {row["source_url"] for row in sources})
+            signal_id = dbmod.scalar(tech_db, "SELECT id FROM technology_signals WHERE axis='SLE'")
+            self.assertIn(signal_id, {row["signal_id"] for row in sources})
 
     def test_quote_is_the_matched_text_not_an_invention(self):
         # Sans abstract -- le cas de toute la base aujourd'hui -- le passage matché EST le
@@ -195,10 +212,16 @@ class DocumentTechnologySignalSourcesTests(unittest.TestCase):
     def test_replaying_the_same_document_does_not_duplicate_the_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             tech_db = _setup(tmp)
+            # Deux blocs `connect` distincts : dbmod.scalar ouvre sa propre connexion, donc
+            # compter à l'intérieur du premier bloc lirait une transaction pas encore validée.
             with dbmod.connect(tech_db) as db:
                 upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/example")
+            before_count = dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signal_sources")
+            self.assertGreater(before_count, 0)
+
+            with dbmod.connect(tech_db) as db:
                 upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/example")
-            self.assertEqual(1, dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signal_sources"))
+            self.assertEqual(before_count, dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signal_sources"))
 
     def test_source_is_backfilled_on_a_signal_that_predates_this_fix(self):
         # Le rattrapage des signaux déjà en base : le signal existe, sa preuve non. Rejouer la
@@ -217,10 +240,15 @@ class DocumentTechnologySignalSourcesTests(unittest.TestCase):
             self.assertEqual(0, dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signal_sources"))
 
             with dbmod.connect(tech_db) as db:
-                added = upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/example")
+                upsert_document_technology_signal(db, "SLE etching of glass", "", "https://doi.org/10.1/example")
 
-            self.assertEqual(0, added)  # aucun signal neuf
-            self.assertEqual(1, dbmod.scalar(tech_db, "SELECT COUNT(*) FROM technology_signal_sources"))
+            # Le compte global ne vaut plus 0 : SLE existait déjà, mais "glass" crée un
+            # signal `material`. Ce que ce test fixe, c'est que le signal PRÉEXISTANT gagne sa
+            # preuve manquante -- pas le compte global.
+            self.assertEqual({"SLE"}, _process_axes(tech_db))
+            sle = dbmod.scalar(tech_db, "SELECT id FROM technology_signals WHERE axis='SLE'")
+            self.assertEqual(1, dbmod.scalar(
+                tech_db, "SELECT COUNT(*) FROM technology_signal_sources WHERE signal_id=?", (sle,)))
 
 
 class CrossrefDateTests(unittest.TestCase):

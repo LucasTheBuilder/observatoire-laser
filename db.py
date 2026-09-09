@@ -38,6 +38,11 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+# lexicon.py est une feuille (re, unicodedata, functools) : elle n'importe ni db ni scrapers,
+# donc aucun cycle. Seul DOCUMENT_LEXICONS est utilisé ici, pour déduire la dimension d'un
+# libellé d'axe (voir _reconcile_technology_signal_dimensions).
+from lexicon import DOCUMENT_LEXICONS
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 ACTORS_DB = DATA_DIR / "actors.db"
@@ -649,6 +654,27 @@ def _normalize_partial_document_dates(db: sqlite3.Connection) -> None:
         normalized = "-".join([year, *(f"{int(part):02d}" for part in rest if part)])
         if normalized != row["published_at"]:
             db.execute("UPDATE documents SET published_at=? WHERE id=?", (normalized, row["id"]))
+
+
+def _reconcile_technology_signal_dimensions(db: sqlite3.Connection) -> None:
+    """Renseigne technology_signals.dimension à partir du vocabulaire qui possède le libellé.
+
+    Déduite plutôt que figée : les six vocabulaires de DOCUMENT_LEXICONS ont des libellés
+    disjoints, donc l'axe suffit à retrouver sa dimension. C'est ce qui rattrape sans migration
+    ponctuelle les lignes écrites avant la colonne, ET celles dont le libellé a changé de
+    vocabulaire -- "Fonctionnalisation de surface" est passée de PROCESS_TECHNOLOGIES à
+    OPERATIONS le 09/09/2026, et ses lignes suivent d'elles-mêmes au prochain démarrage.
+
+    Un libellé inconnu des six vocabulaires (axe écrit en texte libre avant le lexique fermé,
+    voir _normalize_technology_axes) retombe sur 'process_technology' : c'était la seule
+    dimension possible à l'époque où il a été écrit, donc c'est un fait, pas une supposition.
+    Idempotent : ne touche que les lignes dont la dimension diffère de celle attendue.
+    """
+    owner = {label: dimension for dimension, lexicon in DOCUMENT_LEXICONS.items() for label in lexicon}
+    for row in db.execute("SELECT id,axis,dimension FROM technology_signals").fetchall():
+        expected = owner.get(row["axis"], "process_technology")
+        if row["dimension"] != expected:
+            db.execute("UPDATE technology_signals SET dimension=? WHERE id=?", (expected, row["id"]))
 
 
 def _migrate_lei_out_of_registry_columns(db: sqlite3.Connection) -> None:
@@ -1965,6 +1991,16 @@ def _init_tech_db() -> None:
             """
         )
         _add_columns(db, "technology_signals", dict(_REVIEW_TRACE_COLUMNS))
+        # De quel vocabulaire vient `axis`. Jusqu'au 09/09/2026 la colonne ne pouvait porter
+        # que des libellés de PROCESS_TECHNOLOGIES, seul lexique branché sur les documents ; la
+        # page n'arrivait donc à classer que 33% du corpus alors que cinq autres vocabulaires
+        # fermés (OPERATIONS, MATERIALS, MARKETS, APPLICATION_ARCHITECTURES, PERFORMANCE_TERMS)
+        # existaient déjà et couvraient 41 des 61 documents restants. Les mélanger dans une
+        # colonne sans les distinguer aurait recréé le défaut corrigé par l'audit §10.10 (deux
+        # libellés voisins pour deux concepts différents, indiscernables au comptage) -- d'où
+        # cette colonne, qui sert aussi de groupe de facettes sur le front.
+        _add_columns(db, "technology_signals", {"dimension": "TEXT"})
+        _reconcile_technology_signal_dimensions(db)
         _normalize_technology_axes(db)
         _reconcile_technology_signal_maturity(db)
         _add_columns(db, "documents", {
@@ -2450,6 +2486,7 @@ def upsert_technology_signal(
     field_confidence: float,
     project_name: str | None = None,
     source_title: str | None = None,
+    dimension: str = "process_technology",
 ) -> tuple[int, int]:
     """Insère un signal technologique, ou fusionne ses acteurs s'il existe déjà.
 
@@ -2479,13 +2516,13 @@ def upsert_technology_signal(
     new_id = db.execute(
         """INSERT INTO technology_signals(
                axis,maturity_stage,bucket,project_name,actor_names,source_url,source_title,quote,
-               fact_key,fingerprint,review_status,field_confidence,created_at,updated_at,last_seen_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?,?)""",
+               fact_key,fingerprint,review_status,field_confidence,dimension,created_at,updated_at,last_seen_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?,?,?)""",
         (
             axis, maturity_stage, bucket, project_name,
             json.dumps(sorted(set(actor_names)), ensure_ascii=False),
             source_url, source_title, quote, fact_key,
-            hashlib.sha256(fact_key.encode()).hexdigest(), field_confidence, stamp, stamp, stamp,
+            hashlib.sha256(fact_key.encode()).hexdigest(), field_confidence, dimension, stamp, stamp, stamp,
         ),
     ).lastrowid
     assert new_id is not None  # garanti par sqlite3 juste après un INSERT AUTOINCREMENT réussi

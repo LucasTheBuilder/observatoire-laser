@@ -64,13 +64,26 @@ class LaserAsInstrumentTests(unittest.TestCase):
         self.assertFalse(is_laser_the_instrument("Ultrafast laser structuring of battery electrodes"))
         self.assertFalse(is_laser_the_instrument(""))
 
-    def test_is_on_topic_is_deliberately_left_unchanged(self):
-        """La garde n'est PAS câblée dans is_on_topic : ce serait aussi le filtre des projets
-        CORDIS, où elle retirerait 26 des 257 projets aujourd'hui admis. Décision de périmètre
-        distincte de la collecte documentaire -- si elle est prise un jour, ce test doit changer
-        volontairement, pas se casser par surprise.
+    def test_is_on_topic_applies_the_guard_to_every_source(self):
+        """Décision de périmètre prise le 09/09/2026 : la veille suit les DÉVELOPPEMENTS de la
+        technologie laser ultra-rapide, pas les travaux qui s'en servent comme instrument pour
+        observer autre chose. La garde est donc câblée dans is_on_topic, donc appliquée aussi
+        aux projets CORDIS -- où elle retire 26 des 257 projets qui y étaient admis.
+
+        La version précédente de ce test fixait l'inverse, précisément pour que ce changement
+        soit délibéré plutôt que subi.
         """
         for text in INSTRUMENT_SEUL:
+            with self.subTest(text=text[:60]):
+                self.assertFalse(is_on_topic(text))
+
+    def test_a_source_development_project_stays_on_topic(self):
+        # Le pendant du test ci-dessus : développer une source ultra-rapide à haute cadence
+        # EST un développement de la technologie, même sans procédé de fabrication nommé.
+        for text in (
+            "Technology for High-Repetition-rate Intense Laser Laboratories: high-energy ultrafast laser technology",
+            "This high-average-power platform will deliver ultrashort optical pulses at very high repetition rates",
+        ):
             with self.subTest(text=text[:60]):
                 self.assertTrue(is_on_topic(text))
 

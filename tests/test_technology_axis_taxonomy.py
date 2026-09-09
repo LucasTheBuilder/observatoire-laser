@@ -231,41 +231,39 @@ class CorpusDrivenAxesTests(unittest.TestCase):
             with self.subTest(text=text[:50]):
                 self.assertTrue(is_on_topic(text))
 
-    def test_surface_functionalisation_needs_an_ultrafast_term_in_the_rule_itself(self):
-        """L'axe "Fonctionnalisation de surface" (09/09/2026) est gardé par `requires_any`, pas
-        par _GENERIC_PROCESS_AXES : son vocabulaire (superhydrophobe, mouillabilité,
-        biointerface) est du matériau générique, présent dans 38 projets Horizon Europe sans
-        rapport avec le laser. Couplé à un terme ultra-rapide, il n'en laisse entrer aucun.
+    def test_surface_functionalisation_lives_in_operations_not_here(self):
+        """Écrit d'abord ici le 09/09/2026, avec un `requires_any` femto, avant de constater que
+        le libellé existait déjà dans OPERATIONS. Les termes y ont été fusionnés et l'entrée
+        retirée d'ici : un même libellé dans deux vocabulaires s'afficherait deux fois sur la
+        page et fausserait le comptage par famille.
+
+        Le garde `requires_any` est devenu inutile du même coup. OPERATIONS n'entre pas dans
+        is_on_topic(), donc ce vocabulaire ne peut plus élargir le portail d'entrée -- alors
+        que dans PROCESS_TECHNOLOGIES il l'aurait fait de 38 projets Horizon Europe.
         """
-        from lexicon import _GENERIC_PROCESS_AXES
+        from lexicon import OPERATIONS
         axis = "Fonctionnalisation de surface"
-        self.assertIn(axis, PROCESS_TECHNOLOGIES)
-        # La garde vit dans la règle : l'ajouter aussi aux génériques dupliquerait sans resserrer.
-        self.assertNotIn(axis, _GENERIC_PROCESS_AXES)
+        self.assertNotIn(axis, PROCESS_TECHNOLOGIES)
+        self.assertIn(axis, OPERATIONS)
 
-        sans_laser = (
-            "Engineered porous electrodes with tunable wettability for redox flow batteries.",
-            "Bio-inspired superhydrophobic coating for wind turbine ice protection.",
-            "Contact angle measurements on self-cleaning surface prototypes.",
-            # Même "laser" seul ne suffit pas : c'est ce qui distingue cette garde d'un
-            # requires_any=("laser",), qui laissait entrer 3 projets de plus.
-            "Laser Based Surface Functionalization of parts for climate neutral manufacturing.",
-        )
-        for text in sans_laser:
-            with self.subTest(text=text[:50]):
-                labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
-                self.assertNotIn(axis, labels)
-                self.assertFalse(is_on_topic(text))
-
-        avec_femto = (
+        # Le vocabulaire classe toujours les mêmes publications, depuis son nouveau foyer.
+        for title in (
             "Femtosecond‐Laser Mould Texturing Enables Tunable Biointerfaces in COC Microfluidics",
             "High-throughput fabrication of biofunctional polymer surfaces via ultrafast laser structuring and injection molding",
             "Research on the superhydrophobic surface of silicone rubber induced by femtosecond laser",
-        )
-        for title in avec_femto:
+        ):
             with self.subTest(title=title[:50]):
-                labels = {label for label, _ in _match_all_labels(title, PROCESS_TECHNOLOGIES)}
+                labels = {label for label, _ in _match_all_labels(title, OPERATIONS)}
                 self.assertIn(axis, labels)
+
+        # Et il ne fait plus entrer quoi que ce soit : OPERATIONS est hors du filtre d'entrée.
+        for text in (
+            "Engineered porous electrodes with tunable wettability for redox flow batteries.",
+            "Bio-inspired superhydrophobic coating for wind turbine ice protection.",
+            "Laser Based Surface Functionalization of parts for climate neutral manufacturing.",
+        ):
+            with self.subTest(text=text[:50]):
+                self.assertFalse(is_on_topic(text))
 
     def test_superhydrophobic_is_listed_on_its_own(self):
         # _term_pattern pose une frontière (?<!\w) : le préfixe "super" empêche

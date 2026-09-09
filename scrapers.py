@@ -91,6 +91,7 @@ from lexicon import (  # noqa: F401  (reexports pour les importateurs historique
     APPLICATION_ARCHITECTURES,
     COMPONENTS,
     CONTRAST_CUES,
+    DOCUMENT_LEXICONS,
     LASER_RULES,
     MARKET_INFERENCE,
     MARKET_SYNONYM_CLUSTERS,
@@ -351,6 +352,18 @@ def _discover_sitemap_urls(client: httpx.Client, official_url: str, profile: dic
 
 
 # Requêtes bibliographiques envoyées à l'API Crossref par scrape_technology(), une par ligne.
+# Crossref n'indexe pas que des articles : chez plusieurs éditeurs, CHAQUE étape éditoriale
+# reçoit son propre DOI -- rapport de relecteur, décision d'éditeur, réponse d'auteur. Leur
+# titre est généré automatiquement sous la forme `Review for "<titre de l'article>"`, donc il
+# porte tout le vocabulaire de l'article et passe _laser_match comme lui. Deux d'entre eux
+# étaient en base (audit du 09/09/2026), et l'article qu'ils relisent, lui, n'y était pas.
+# Mesuré en rejouant les six requêtes : 12 enregistrements `peer-review` passaient les filtres.
+#
+# `proceedings-article` est indispensable dans cette liste : les actes SPIE (10.1117/...) sont
+# une grande part du corpus. `posted-content` (préprints) en est écarté -- manuscrits non
+# relus, et le seul remonté ici était une étude de chirurgie ophtalmique.
+CROSSREF_PUBLICATION_TYPES = frozenset({"journal-article", "proceedings-article"})
+
 TECHNOLOGY_QUERIES = (
     "femtosecond laser micromachining",
     "ultrafast laser processing manufacturing",
@@ -2874,12 +2887,30 @@ def upsert_document_technology_signal(
 
     La citation est le passage effectivement matché par le lexique. Quand la source n'expose
     pas d'abstract (cas de toute la base aujourd'hui), ce passage EST le titre : la ligne dit
-    alors, exactement et sans le maquiller, que l'axe repose sur le seul titre."""
+    alors, exactement et sans le maquiller, que l'axe repose sur le seul titre.
+
+    Depuis le 09/09/2026, les SIX vocabulaires fermés sont lus, pas seulement
+    PROCESS_TECHNOLOGIES (voir DOCUMENT_LEXICONS). Le classement d'un document n'a aucune
+    raison de se limiter au procédé nommé : "ablation du verre en régime burst" croise trois
+    vocabulaires qui existaient déjà, dont deux n'étaient utilisés que par l'extraction de
+    faits marché. Mesuré avant branchement : 61 des 92 documents ressortaient sans aucune
+    famille, dont 41 qu'un de ces cinq autres lexiques classait déjà."""
     text = f"{title} {abstract or ''}"
-    labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
-    if not _laser_match(text):
-        labels -= _GENERIC_PROCESS_AXES
-    if not labels:
+    laser = _laser_match(text)
+    # (dimension, axe) -> règle, pour retrouver ensuite les termes qui servent à choisir la
+    # citation. Un même libellé peut exister dans deux vocabulaires ("Texturation" côté
+    # opération, "Texturation de surface" côté procédé) : la dimension les sépare, en base
+    # comme dans les facettes.
+    matched: dict[tuple[str, str], LexiconRule] = {}
+    for dimension, lexicon in DOCUMENT_LEXICONS.items():
+        for label, _hits in _match_all_labels(text, lexicon):
+            # Même garde-fou anti-faux-positif que is_on_topic(), et il ne concerne que les
+            # axes de procédé : les autres vocabulaires ne sont jamais génériques au point de
+            # faire passer un contenu pour du laser.
+            if dimension == "process_technology" and not laser and label in _GENERIC_PROCESS_AXES:
+                continue
+            matched[(dimension, label)] = lexicon[label]
+    if not matched:
         return 0
 
     bucket, stage = _detect_maturity(text)
@@ -2887,12 +2918,14 @@ def upsert_document_technology_signal(
         bucket = "radar"
     actor_names = [actor_name] if actor_name else []
     added = 0
-    for axis in sorted(labels):
+    for (dimension, axis), rule in sorted(matched.items()):
         # Discriminant sur l'URL du document (stable, toujours disponible), pas son titre --
         # deux documents distincts ne partagent jamais une URL, contrairement à un titre qui
-        # pourrait coïncider.
+        # pourrait coïncider. La dimension n'entre PAS dans la clé : les six vocabulaires ont
+        # des libellés disjoints (garanti par un test), donc l'axe seul discrimine déjà -- et
+        # préfixer aurait changé la clé des signaux déjà en base, donc tout dupliqué.
         fact_key = technology_signal_key(axis, source_url)
-        quote = _quote(text, PROCESS_TECHNOLOGIES.get(axis, {}).get("any_of", ()))
+        quote = _quote(text, rule.get("any_of", ()))
         created, signal_id = upsert_technology_signal(
             db,
             fact_key=fact_key,
@@ -2904,6 +2937,7 @@ def upsert_document_technology_signal(
             quote=quote,
             field_confidence=0.7,
             source_title=title,
+            dimension=dimension,
         )
         # Même empreinte que cordis._upsert_technology_signal : (fait, source, citation), donc
         # rejouer la collecte sur un document inchangé n'ajoute jamais de doublon.
@@ -2981,7 +3015,7 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
                             "query.bibliographic": query,
                             "rows": per_query,
                             "filter": f"from-pub-date:{from_date}",
-                            "select": "DOI,title,URL,published,abstract",
+                            "select": "DOI,title,URL,published,abstract,type",
                             # Crossref accorde 3 req/s à un appelant identifié contre 1 req/s
                             # à l'anonyme (en-tête x-rate-limit-limit). Sans ce mailto, 2 à 4
                             # des 6 requêtes revenaient avec un corps non-JSON.
@@ -2997,6 +3031,11 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
                         abstract = re.sub(r"<[^>]+>", " ", item.get("abstract") or "")
                         abstract = re.sub(r"\s+", " ", abstract).strip()[:3000]
                         if not title or not url:
+                            continue
+                        # Le type est testé AVANT le vocabulaire : un rapport de relecture porte
+                        # le titre de l'article qu'il relit, donc tout filtre lexical le laisse
+                        # passer par construction (voir CROSSREF_PUBLICATION_TYPES).
+                        if (item.get("type") or "") not in CROSSREF_PUBLICATION_TYPES:
                             continue
 
                         # Crossref search can return spectroscopy/biology papers despite a laser query.

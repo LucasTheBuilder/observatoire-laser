@@ -1874,7 +1874,7 @@ def tech_corpus() -> list[dict[str, Any]]:
     """
     signals = rows(
         TECH_DB,
-        """SELECT id,axis,maturity_stage,bucket,project_name,actor_names,source_url,created_at
+        """SELECT id,axis,dimension,maturity_stage,bucket,project_name,actor_names,source_url,created_at
            FROM technology_signals
            WHERE review_status='accepted'
            ORDER BY created_at DESC,id""",
@@ -1882,24 +1882,36 @@ def tech_corpus() -> list[dict[str, Any]]:
 
     # Signaux rattachés à un document (pas de project_name) : indexés par URL source pour
     # donner leur axe/maturité au document correspondant.
+    #
+    # `axes` ne porte QUE la dimension process_technology, et garde donc exactement le sens
+    # qu'il avait avant le 09/09/2026 -- la facette "AXE TECHNOLOGIQUE", le KPI "AXES SUIVIS"
+    # et l'export CSV s'appuient dessus. Les cinq autres vocabulaires arrivent à côté, dans
+    # `families`, groupés par dimension : c'est ce qui permet de croiser "ablation" (opération)
+    # avec "verre" (matériau) sans mélanger deux vocabulaires dans une même liste.
+    def _add_family(entry: dict[str, Any], signal: Any) -> None:
+        dimension = signal["dimension"] or "process_technology"
+        labels = entry["families"].setdefault(dimension, [])
+        if signal["axis"] not in labels:
+            labels.append(signal["axis"])
+        if dimension == "process_technology" and signal["axis"] not in entry["axes"]:
+            entry["axes"].append(signal["axis"])
+
     axis_by_url: dict[str, dict[str, Any]] = {}
     project_groups: dict[str, dict[str, Any]] = {}
     for signal in signals:
         url = signal["source_url"] or ""
         if not (signal["project_name"] or "").strip():
-            entry = axis_by_url.setdefault(url, {"axes": [], "maturity": None, "signal_ids": []})
-            if signal["axis"] not in entry["axes"]:
-                entry["axes"].append(signal["axis"])
+            entry = axis_by_url.setdefault(url, {"axes": [], "families": {}, "maturity": None, "signal_ids": []})
+            _add_family(entry, signal)
             entry["maturity"] = entry["maturity"] or signal["maturity_stage"]
             entry["signal_ids"].append(int(signal["id"]))
             continue
         group = project_groups.setdefault(url, {
             "title": signal["project_name"],
-            "axes": [], "actors": [], "maturity": None, "bucket": signal["bucket"],
+            "axes": [], "families": {}, "actors": [], "maturity": None, "bucket": signal["bucket"],
             "signal_ids": [], "observed_at": signal["created_at"],
         })
-        if signal["axis"] not in group["axes"]:
-            group["axes"].append(signal["axis"])
+        _add_family(group, signal)
         for actor in _corpus_actor_names(signal["actor_names"]):
             if actor not in group["actors"]:
                 group["actors"].append(actor)
@@ -1927,6 +1939,7 @@ def tech_corpus() -> list[dict[str, Any]]:
             "title": document["title"],
             "reference": reference,
             "axes": qualified.get("axes", []),
+            "families": qualified.get("families", {}),
             "actors": [document["actor_name"]] if document["actor_name"] else [],
             "maturity": qualified.get("maturity"),
             "published_at": document["published_at"],
@@ -1948,6 +1961,7 @@ def tech_corpus() -> list[dict[str, Any]]:
             "title": group["title"],
             "reference": f"CORDIS · GA {ga.group(1)}" if ga else (f"Projet européen · {host}" if host else "Projet européen"),
             "axes": group["axes"],
+            "families": group["families"],
             "actors": group["actors"],
             "maturity": group["maturity"],
             # CORDIS expose bien une période de projet, mais cordis.py ne la garde que dans
