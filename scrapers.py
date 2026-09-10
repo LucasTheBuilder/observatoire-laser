@@ -93,6 +93,7 @@ from lexicon import (  # noqa: F401  (reexports pour les importateurs historique
     CONTRAST_CUES,
     DOCUMENT_LEXICONS,
     LASER_RULES,
+    MACHINE_CAPABILITIES,
     MARKET_INFERENCE,
     MARKET_SYNONYM_CLUSTERS,
     MARKETS,
@@ -103,6 +104,7 @@ from lexicon import (  # noqa: F401  (reexports pour les importateurs historique
     OPERATIONS,
     PERFORMANCE_TERMS,
     PROCESS_TECHNOLOGIES,
+    TECHNOLOGY_AXES,
     Lexicon,
     LexiconRule,
     _contains_term,
@@ -1022,7 +1024,7 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
         _inc_diagnostic(diagnostics, "relation_partial_accepted")
 
     # Complementary dimensions may use the local section, but they can never substitute a core one.
-    process, process_hits = _match_label_details(section, PROCESS_TECHNOLOGIES)
+    process, process_hits = _match_label_details(section, TECHNOLOGY_AXES)
     architecture, architecture_hits = _match_label_details(section, APPLICATION_ARCHITECTURES)
     material, material_hits = _match_label_details(section, MATERIALS)
     performance, performance_hits = _match_label_details(section, PERFORMANCE_TERMS)
@@ -1133,7 +1135,7 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
         return []
 
     operations = _match_all_labels(section, OPERATIONS)
-    processes = _match_all_labels(section, PROCESS_TECHNOLOGIES)
+    processes = _match_all_labels(section, TECHNOLOGY_AXES)
     materials = _match_all_labels(section, MATERIALS)
     performances = _match_all_labels(section, PERFORMANCE_TERMS)
     bucket, maturity = _detect_maturity(section)
@@ -1165,7 +1167,7 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
         if operation:
             by_dimension["operation"] = _matching_terms(direct, OPERATIONS)
         if process:
-            by_dimension["process"] = _matching_terms(direct, PROCESS_TECHNOLOGIES)
+            by_dimension["process"] = _matching_terms(direct, TECHNOLOGY_AXES)
         by_dimension["material"] = _matching_terms(direct, MATERIALS)
         by_dimension["performance"] = _matching_terms(direct, PERFORMANCE_TERMS)
         match_terms = {dimension: found for dimension, found in by_dimension.items() if found}
@@ -1366,7 +1368,7 @@ def _ai_candidates(
         "actor": actor_name, "url": url,
         "allowed_labels": {
             "markets": list(MARKETS), "components": list(COMPONENTS), "operations": list(OPERATIONS),
-            "process_technologies": list(PROCESS_TECHNOLOGIES), "application_architectures": list(APPLICATION_ARCHITECTURES),
+            "process_technologies": list(TECHNOLOGY_AXES), "application_architectures": list(APPLICATION_ARCHITECTURES),
             "materials": list(MATERIALS), "performance": list(PERFORMANCE_TERMS),
             "maturity": [stage for stage, _, _ in MATURITY_RULES],
         },
@@ -1405,7 +1407,7 @@ def _ai_candidates(
 
     block_by_index = {i: (block, section) for i, block, section in relevant}
     complementary = {
-        "process_technology": set(PROCESS_TECHNOLOGIES), "application_architecture": set(APPLICATION_ARCHITECTURES),
+        "process_technology": set(TECHNOLOGY_AXES), "application_architecture": set(APPLICATION_ARCHITECTURES),
         "material": set(MATERIALS), "performance": set(PERFORMANCE_TERMS),
     }
     maturity_to_bucket = {stage: bucket for stage, bucket, _ in MATURITY_RULES}
@@ -1778,7 +1780,7 @@ def _diff_page_blocks(previous_blocks_json: str | None, new_blocks_json: str | N
     new_text = " ".join(filter(None, (b.get("text") for b in new_blocks)))
     previous_labels: set[str] = set()
     new_labels: set[str] = set()
-    for lexicon in (MARKETS, COMPONENTS, OPERATIONS, PROCESS_TECHNOLOGIES, MATERIALS, PERFORMANCE_TERMS):
+    for lexicon in (MARKETS, COMPONENTS, OPERATIONS, TECHNOLOGY_AXES, MATERIALS, PERFORMANCE_TERMS):
         previous_labels |= {label for label, _ in _match_all_labels(previous_text, lexicon)}
         new_labels |= {label for label, _ in _match_all_labels(new_text, lexicon)}
     for label in sorted(new_labels - previous_labels):
@@ -2904,10 +2906,13 @@ def upsert_document_technology_signal(
     matched: dict[tuple[str, str], LexiconRule] = {}
     for dimension, lexicon in DOCUMENT_LEXICONS.items():
         for label, _hits in _match_all_labels(text, lexicon):
-            # Même garde-fou anti-faux-positif que is_on_topic(), et il ne concerne que les
-            # axes de procédé : les autres vocabulaires ne sont jamais génériques au point de
-            # faire passer un contenu pour du laser.
-            if dimension == "process_technology" and not laser and label in _GENERIC_PROCESS_AXES:
+            # Même garde-fou anti-faux-positif que is_on_topic(). Le test porte sur le LIBELLÉ
+            # et non sur sa dimension : depuis la scission procédé/capacité machine
+            # (10/09/2026), les libellés génériques se répartissent sur deux dimensions, et
+            # filtrer sur l'une d'elles aurait laissé passer l'autre. Les libellés des six
+            # vocabulaires étant disjoints (garanti par un test), l'appartenance à
+            # _GENERIC_PROCESS_AXES suffit à identifier le cas sans ambiguïté.
+            if not laser and label in _GENERIC_PROCESS_AXES:
                 continue
             matched[(dimension, label)] = lexicon[label]
     if not matched:

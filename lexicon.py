@@ -194,49 +194,63 @@ OPERATIONS: Lexicon = {
 # Dimensions "complémentaires" (facultatives, jamais requises pour valider un fait) : elles
 # enrichissent le fait mais ne peuvent jamais se substituer à market/component/operation
 # (voir _candidate(): "Complementary dimensions ... can never substitute a core one").
+# --- Dimension 1 : le PROCÉDÉ TECHNOLOGIQUE ---------------------------------------------
+#
+# Ce que le laser fait subir à la matière, par un mécanisme physique NOMMÉ. Séparé des
+# capacités machine le 10/09/2026 : les deux vivaient dans la même table sous l'étiquette
+# "axe technologique", qui répondait donc à deux questions différentes.
+#
+# La séparation n'est pas cosmétique, elle rend lisible une structure du corpus : mesuré sur
+# les 98 lignes, les procédés ne sortent QUE de publications (SLE, LIPSS, DLIP, Bulk : 10
+# publications, 0 projet) et les capacités machine quasi exclusivement de projets européens
+# (Haute puissance, Multi-beam, Roll-to-roll : 0 publication, 7 projets). Un article décrit un
+# mécanisme, un projet finance une machine -- voir le bloc de lecture en bas de la page
+# Technologie laser, qui recalcule ce contraste à chaque rendu.
 PROCESS_TECHNOLOGIES: Lexicon = {
     "SLE": {"any_of": ("selective laser etching", "selective laser-induced etching", "selective laser induced etching", "laser assisted etching", "laser-assisted etching", "isle process"), "regex": (r"\bSLE\b",), "requires_any": ("laser", "etching", "glass", "silica")},
-    "LIPSS": {"any_of": ("laser-induced periodic surface structures", "laser induced periodic surface structures"), "regex": (r"\bLIPSS\b",)},
+    # LSFL et HSFL (Low/High Spatial Frequency LIPSS) étaient deux libellés frères, et n'ont
+    # jamais classé un seul document : ce sont des sous-types de LIPSS, et leurs acronymes
+    # n'apparaissent pas dans les titres. Repliés ici le 10/09/2026 plutôt que laissés vides.
+    "LIPSS": {"any_of": ("laser-induced periodic surface structures", "laser induced periodic surface structures"), "regex": (r"\bLIPSS\b", r"\bLSFL\b", r"\bHSFL\b")},
     "DLIP": {"any_of": ("direct laser interference patterning",), "regex": (r"\bDLIP\b",)},
-    "LSFL": {"regex": (r"\bLSFL\b",)},
-    "HSFL": {"regex": (r"\bHSFL\b",)},
-    # Two more axes flagged as under-covered by an external audit -- genuinely absent, verified
-    # before adding (unlike its earlier, partly-stale claims elsewhere in the same audit).
-    "Beam shaping": {"any_of": ("beam shaping", "dynamic beam shaping", "programmable laser beam", "spatial light modulator", "adaptive optics beam")},
-    "Monitoring IA procédé": {"any_of": ("process monitoring", "in-line monitoring", "digital twin", "data-driven process optimization", "process optimization ai", "closed-loop process control")},
-    # §10.10 audit veille (30/08/2026, Lot 2 §2.7) : "deux libellés d'axe coexistent pour le
-    # même concept [...] les axes technologiques n'ont pas d'équivalent [à vocabulary_candidates]
-    # et sont écrits en texte libre. Il faut un lexique fermé pour axis." Trois axes trouvés en
-    # production sous forme de texte libre (écrits avant que cordis.py ne se limite à ce
-    # lexique) n'avaient encore aucune entrée correspondante -- ajoutés ici plutôt que fusionnés
-    # dans un axe existant qui en changerait le sens (voir db._normalize_technology_axes pour la
-    # migration ponctuelle qui canonise les DEUX vrais doublons : "Monitoring + IA / digital
-    # twin" -> "Monitoring IA procédé", "Beam shaping / surfaces 3D" -> "Beam shaping").
-    "Haute puissance / hauts taux": {"any_of": ("high average power", "high repetition rate", "mhz processing", "high-throughput ablation")},
-    "Multi-beam / parallélisation": {"any_of": ("multi-beam", "multibeam", "beam splitting", "diffractive optical element", "parallel processing")},
-    "Fabrication roll-to-roll (batteries)": {"any_of": ("roll-to-roll", "roll to roll", "r2r processing", "battery electrode manufacturing")},
-    # Audit du corpus Technologie laser (09/09/2026) : 21 des 25 publications sortaient sans
-    # axe, non parce que la classification échouait mais parce que les 10 axes ci-dessus
-    # décrivent des familles de procédé nommées et des capacités machine, quand le corpus
-    # parle surtout de ce qu'on FAIT du laser (souder, modifier un volume, texturer) et du
-    # RÉGIME employé (burst). Les quatre axes suivants couvrent 13 de ces 21 documents.
-    #
-    # Chacun est mesuré, pas supposé : le nombre entre parenthèses est le nombre de projets
-    # Horizon Europe (sur les 23 451 du cache CORDIS) que l'axe ferait entrer dans
-    # l'observatoire s'il était utilisé SEUL comme filtre de pertinence, sans terme laser
-    # ultra-rapide. C'est ce qui justifie leur présence dans _GENERIC_PROCESS_AXES plus bas.
-    "Burst GHz/MHz": {"any_of": ("ghz burst", "mhz burst", "burst mode", "burst regime", "burst regimes", "laser burst", "laser bursts", "single burst", "intra-burst")},
     # "in-volume" est délibérément absent : _term_pattern autorise l'espace comme séparateur,
     # donc le terme matcherait "in volume production" -- une mention de maturité industrielle,
     # pas d'usinage en volume.
     "Bulk": {"any_of": ("bulk modification", "bulk modifications", "bulk material modification", "volume modification", "refractive index modification", "bulk silicon", "bulk glass")},
-    # "Fonctionnalisation de surface" a vécu ici du 09/09/2026 au même jour : le libellé existait
-    # déjà dans OPERATIONS, où ses termes ont été fusionnés. Un libellé présent dans deux
-    # vocabulaires s'afficherait deux fois sur la page et fausserait le comptage par famille --
-    # voir _assert_disjoint_labels dans les tests. Son garde `requires_any` femto est devenu
-    # inutile en même temps : OPERATIONS n'entre pas dans is_on_topic(), donc ce vocabulaire ne
-    # peut plus élargir le portail d'entrée, alors qu'ici il l'aurait fait de +38 projets.
+    # "Fonctionnalisation de surface", "Soudage / assemblage de transparents" et "Texturation de
+    # surface" ont vécu ici moins de deux jours : les trois libellés existaient déjà dans
+    # OPERATIONS, qui a absorbé leurs termes. Un libellé présent dans deux vocabulaires
+    # s'afficherait deux fois sur la page et fausserait le comptage par famille (voir le test de
+    # disjonction). Leçon générale : chercher dans les six vocabulaires AVANT d'en écrire un.
 }
+
+# --- Dimension 2 : la CAPACITÉ MACHINE ---------------------------------------------------
+#
+# Ce dont la source, le faisceau, la ligne ou le pilotage sont capables -- indépendamment du
+# procédé qu'on en tire. C'est le vocabulaire des projets européens, qui financent le
+# développement d'une machine plutôt que la description d'un mécanisme.
+#
+# Ces libellés sont presque tous dans _GENERIC_PROCESS_AXES, et ce n'est pas un hasard : une
+# capacité se décrit avec des mots ("process monitoring", "parallel processing", "burst mode")
+# que d'autres industries emploient aussi. La frontière conceptuelle procédé/capacité et la
+# frontière technique spécifique/générique décrivent presque la même chose.
+MACHINE_CAPABILITIES: Lexicon = {
+    "Burst GHz/MHz": {"any_of": ("ghz burst", "mhz burst", "burst mode", "burst regime", "burst regimes", "laser burst", "laser bursts", "single burst", "intra-burst")},
+    "Beam shaping": {"any_of": ("beam shaping", "dynamic beam shaping", "programmable laser beam", "spatial light modulator", "adaptive optics beam")},
+    "Haute puissance / hauts taux": {"any_of": ("high average power", "high repetition rate", "mhz processing", "high-throughput ablation")},
+    "Multi-beam / parallélisation": {"any_of": ("multi-beam", "multibeam", "beam splitting", "diffractive optical element", "parallel processing")},
+    "Monitoring IA procédé": {"any_of": ("process monitoring", "in-line monitoring", "digital twin", "data-driven process optimization", "process optimization ai", "closed-loop process control")},
+    # Architecture de ligne plutôt que capacité de faisceau, et le seul libellé de cette table
+    # à porter un marché dans son nom. Classé ici sur décision de Lucas (10/09/2026) : c'est
+    # bien une capacité de la MACHINE, même si c'est la ligne entière et non la source.
+    "Fabrication roll-to-roll (batteries)": {"any_of": ("roll-to-roll", "roll to roll", "r2r processing", "battery electrode manufacturing")},
+}
+
+# Vue fusionnée, pour les appelants qui raisonnent sur "l'axe technologique" au sens large et
+# n'ont aucune raison de distinguer les deux : l'extraction de faits marché (scrapers._candidate)
+# et la classification des projets CORDIS. Les scinder là-bas aurait retiré des libellés à ces
+# deux chemins sans rien apporter -- seule la PAGE a besoin de la distinction.
+TECHNOLOGY_AXES: Lexicon = {**PROCESS_TECHNOLOGIES, **MACHINE_CAPABILITIES}
 
 APPLICATION_ARCHITECTURES: Lexicon = {
     # "through vias in glass" et ses variantes : la formulation employée quand le matériau est
@@ -529,6 +543,7 @@ def _laser_match(text: str) -> bool:
 # OPERATIONS au lieu de la laisser aussi dans PROCESS_TECHNOLOGIES.
 DOCUMENT_LEXICONS: dict[str, Lexicon] = {
     "process_technology": PROCESS_TECHNOLOGIES,
+    "machine_capability": MACHINE_CAPABILITIES,
     "operation": OPERATIONS,
     "material": MATERIALS,
     "market": MARKETS,
@@ -545,8 +560,8 @@ def is_on_topic(text: str) -> bool:
     """Filtre de pertinence thématique réutilisé HORS du pipeline de crawl (cordis.py,
     openalex.py) pour décider si un contenu obtenu ailleurs (projet CORDIS, publication
     OpenAlex) relève seulement du laser ultra-rapide -- mêmes lexiques que le reste de ce
-    module (LASER_RULES via _laser_match, PROCESS_TECHNOLOGIES pour un procédé nommé), moins
-    les deux axes trop génériques ci-dessus. Voir audit v8 §2.1 : sans ce filtre, un centre
+    module (LASER_RULES via _laser_match, TECHNOLOGY_AXES pour un procédé ou une capacité
+    nommés), moins les axes trop génériques ci-dessus. Voir audit v8 §2.1 : sans ce filtre, un centre
     technologique généraliste matché par alias (Tekniker, CEIT) fait remonter la totalité de
     ses projets/publications, quel que soit leur sujet réel.
 
@@ -562,7 +577,7 @@ def is_on_topic(text: str) -> bool:
         return False
     if _laser_match(text):
         return True
-    labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
+    labels = {label for label, _ in _match_all_labels(text, TECHNOLOGY_AXES)}
     return bool(labels - _GENERIC_PROCESS_AXES)
 
 
@@ -585,7 +600,7 @@ def is_laser_the_instrument(text: str) -> bool:
     La seconde moitié de la condition est ce qui rend la règle utilisable : la spectroscopie
     sert aussi, légitimement, à SURVEILLER un procédé laser (deux publications IREPA du corpus,
     "Monitoring of ultrashort pulse laser surface texturing using spectroscopy..."). Exiger
-    l'absence de tout procédé nommé -- PROCESS_TECHNOLOGIES, OPERATIONS ou une architecture
+    l'absence de tout procédé nommé -- TECHNOLOGY_AXES, OPERATIONS ou une architecture
     applicative -- distingue les deux sans avoir à lister les exceptions une par une. Vérifié
     sur les 25 publications en base : rejette la seule qui doit l'être, garde les deux de
     monitoring.
@@ -601,7 +616,7 @@ def is_laser_the_instrument(text: str) -> bool:
     """
     if not any(_contains_term(text, cue) for cue in LASER_AS_INSTRUMENT_CUES):
         return False
-    if {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}:
+    if {label for label, _ in _match_all_labels(text, TECHNOLOGY_AXES)}:
         return False
     if {label for label, _ in _match_all_labels(text, OPERATIONS)}:
         return False

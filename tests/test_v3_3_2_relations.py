@@ -11,7 +11,7 @@ from scrapers import (
     MARKETS,
     OPERATIONS,
     PERFORMANCE_TERMS,
-    PROCESS_TECHNOLOGIES,
+    TECHNOLOGY_AXES,
     _candidate,
     _match_all_labels,
     _relation_evidence,
@@ -176,7 +176,9 @@ class LocalRelationTests(unittest.TestCase):
         ]
         for text, expected in cases:
             with self.subTest(expected=expected):
-                labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
+                # TECHNOLOGY_AXES : la vue fusionnée procédé + capacité machine, depuis la
+                # scission du 10/09/2026. Ces trois cas couvrent les deux dimensions.
+                labels = {label for label, _ in _match_all_labels(text, TECHNOLOGY_AXES)}
                 self.assertIn(expected, labels)
 
     def test_page_title_cannot_supply_market(self):

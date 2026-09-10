@@ -16,7 +16,7 @@ from db import connect, scalar
 from hybrid import ContentBlock, _pdf_metadata_date, classify_source, parse_document
 from scrapers import (
     APPLICATION_ARCHITECTURES,
-    PROCESS_TECHNOLOGIES,
+    TECHNOLOGY_AXES,
     _candidate,
     _context_for_block,
     _match_label,
@@ -114,7 +114,7 @@ class HybridExtractionTests(unittest.TestCase):
         self.assertEqual("Texturation", candidate["operation"])
 
     def test_tgv_requires_a_glass_or_via_context(self):
-        self.assertIsNone(_match_label("The TGV train operates a high speed transport service.", PROCESS_TECHNOLOGIES))
+        self.assertIsNone(_match_label("The TGV train operates a high speed transport service.", TECHNOLOGY_AXES))
         self.assertEqual("TGV", _match_label("Femtosecond laser TGV glass via drilling for interposer packaging.", APPLICATION_ARCHITECTURES))
 
     def test_first_mapping_checks_three_manutech_sections_immediately(self):

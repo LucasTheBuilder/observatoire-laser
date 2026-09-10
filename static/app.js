@@ -64,7 +64,10 @@ const state = {
   // Facettes cumulatives : plusieurs valeurs cochées dans un même groupe s'unissent (OU),
   // et les groupes se croisent entre eux (ET). C'est ce que la maquette décrit pour la
   // production, là où le prototype se contentait d'un état actif décoratif.
-  techFacets: {axis: [], operation: [], material: [], market: [], architecture: [], performance: [], actor: []},
+  // Les clés doivent couvrir TC_FACET_GROUPS : une dimension ajoutée au lexique sans clé ici
+  // faisait passer `undefined` à facetGroupHtml, qui plantait le rendu de toute la page.
+  // Le `|| []` aux points d'appel est la vraie garde ; cette liste reste la valeur de départ.
+  techFacets: {axis: [], machine_capability: [], operation: [], material: [], market: [], architecture: [], performance: [], actor: []},
   // Groupes de facettes dépliés (voir explorer.js) -- purement d'affichage.
   techExpanded: [],
   techMoreFilters: false,
@@ -1007,6 +1010,7 @@ function tcHaystack(row) {
 // (voir facetGroupHtml), donc rien n'encombre la colonne tant qu'une dimension n'est pas
 // alimentée.
 const TC_FAMILY_GROUPS = [
+  {key: "machine_capability", label: "CAPACITÉ MACHINE"},
   {key: "operation", label: "OPÉRATION"},
   {key: "material", label: "MATÉRIAU"},
   {key: "market", label: "MARCHÉ"},
@@ -1018,11 +1022,92 @@ function tcRowFamily(row, dimension) {
   return (row.families && row.families[dimension]) || [];
 }
 
+// L'ordre se lit comme une phrase : quel procédé, avec quelle machine, pour quelle opération,
+// sur quel matériau, par qui. C'est l'ordre demandé par Lucas le 10/09/2026, et il prime sur
+// tout classement par taux de remplissage -- une colonne dont l'ordre change avec les données
+// ne s'apprend jamais.
 const TC_FACET_GROUPS = [
-  {key: "axis", label: "AXE TECHNOLOGIQUE", valuesOf: tcRowAxes},
+  {key: "axis", label: "PROCÉDÉ TECHNOLOGIQUE", valuesOf: tcRowAxes},
   ...TC_FAMILY_GROUPS.map(({key, label}) => ({key, label, valuesOf: row => tcRowFamily(row, key)})),
   {key: "actor", label: "ACTEUR", valuesOf: tcRowActors},
 ];
+
+// Bloc de lecture, en bas de page : ce que la répartition des familles dit du corpus.
+//
+// Le constat qui a motivé ce bloc (Lucas, 10/09/2026) : les procédés technologiques ne sortent
+// que de publications, les capacités machine quasi exclusivement de projets européens. Un
+// article décrit un mécanisme physique, un projet finance le développement d'une machine --
+// c'est une information stratégique, et elle n'était visible nulle part.
+//
+// Elle est RECALCULÉE à chaque rendu, jamais écrite en dur : le corpus a triplé en une
+// collecte, et une phrase figée deviendrait fausse sans que personne s'en aperçoive. La
+// lecture n'est affichée que si le contraste tient réellement (voir TC_SKEW) ; sinon les
+// chiffres sont donnés seuls, sans interprétation.
+// Un libellé n'est déclaré "exclusif" qu'au-delà de ce nombre d'occurrences : à 1, l'exclusivité
+// ne dit rien -- c'est juste un document isolé.
+const TC_EXCLUSIVE_MIN = 2;
+
+function tcOriginSplit(corpus, dimension) {
+  const rows = corpus.filter(row => tcRowFamily(row, dimension).length);
+  const projets = rows.filter(row => row.kind === "projet").length;
+  return {total: rows.length, projets, publications: rows.length - projets};
+}
+
+// Les libellés d'une dimension vus UNIQUEMENT dans les projets, ou uniquement dans les
+// publications. C'est là que le contraste est réel : agrégée, la dimension "capacité machine"
+// est portée par les deux populations (Burst et Beam shaping viennent surtout d'articles),
+// alors que "Haute puissance", "Multi-beam" et "Roll-to-roll" ne viennent QUE de projets.
+function tcExclusiveLabels(corpus, dimension, kind) {
+  const compte = new Map();
+  for (const row of corpus) {
+    for (const label of tcRowFamily(row, dimension)) {
+      const entry = compte.get(label) || {projet: 0, autre: 0};
+      entry[row.kind === "projet" ? "projet" : "autre"] += 1;
+      compte.set(label, entry);
+    }
+  }
+  const [voulu, exclu] = kind === "projet" ? ["projet", "autre"] : ["autre", "projet"];
+  return [...compte.entries()]
+    .filter(([, e]) => e[exclu] === 0 && e[voulu] >= TC_EXCLUSIVE_MIN)
+    .sort((a, b) => b[1][voulu] - a[1][voulu])
+    .map(([label, e]) => `${label} (${e[voulu]})`);
+}
+
+function tcCorpusReading(corpus) {
+  const procede = tcOriginSplit(corpus, "process_technology");
+  const capacite = tcOriginSplit(corpus, "machine_capability");
+  if (!procede.total && !capacite.total) return "";
+
+  const chiffres = `Les <b>procédés technologiques</b> sont portés par ${procede.publications} publication(s) et ${procede.projets} projet(s) européen(s).
+    Les <b>capacités machine</b> le sont par ${capacite.publications} publication(s) et ${capacite.projets} projet(s).`;
+
+  // Chaque phrase n'est écrite que si elle a de quoi être écrite. Un bloc d'analyse qui
+  // affirme la même chose quelles que soient les données ne vaut pas mieux qu'un texte figé.
+  const financeNonPublie = [
+    ...tcExclusiveLabels(corpus, "machine_capability", "projet"),
+    ...tcExclusiveLabels(corpus, "process_technology", "projet"),
+  ];
+  const publieNonFinance = [
+    ...tcExclusiveLabels(corpus, "process_technology", "pub"),
+    ...tcExclusiveLabels(corpus, "machine_capability", "pub"),
+  ];
+
+  const lignes = [`<p>${chiffres}</p>`];
+  const napparait = labels => (labels.length > 1 ? "n’apparaissent" : "n’apparaît");
+  if (financeNonPublie.length) {
+    lignes.push(`<p><span class="ex-reading-take">Financé, pas publié —</span> ${esc(financeNonPublie.join(", "))}
+      ${napparait(financeNonPublie)} que dans des projets européens, jamais dans la littérature du corpus.
+      Un sujet qu’on finance avant d’en publier les résultats se voit ici en premier.</p>`);
+  }
+  if (publieNonFinance.length) {
+    lignes.push(`<p><span class="ex-reading-take">Publié, pas financé —</span> ${esc(publieNonFinance.join(", "))}
+      ${napparait(publieNonFinance)} que dans des publications, sans projet européen correspondant dans le corpus.</p>`);
+  }
+  if (!financeNonPublie.length && !publieNonFinance.length) {
+    lignes.push(`<p><span class="ex-reading-take">Aucune famille n’est aujourd’hui exclusive à l’une des deux populations.</span></p>`);
+  }
+  return `<div class="ex-reading"><div class="ex-reading-title">CE QUE LE CORPUS DIT DE LUI-MÊME</div>${lignes.join("")}</div>`;
+}
 
 // Un objet neuf à chaque appel : les sélections sont remplacées, jamais mutées (voir
 // toggleFacet), donc partager une même constante entre deux réinitialisations suffirait à
@@ -1041,7 +1126,12 @@ function tcEmptyFacets() {
 // se remplit remonte d'elle-même. Type, axe et acteur restent toujours visibles : ce sont les
 // trois entrées par lesquelles on aborde le corpus, indépendamment de leur taux de remplissage.
 const TC_PRIMARY_COVERAGE = 0.2;
-const TC_ALWAYS_PRIMARY = ["axis", "actor"];
+// Les cinq dimensions de lecture retenues par Lucas le 10/09/2026 : procédé, capacité machine,
+// opération, matériau, acteur. Elles restent visibles quel que soit leur remplissage -- procédé
+// (10 %) et capacité machine (18 %) passeraient sous le seuil, et la première dimension de la
+// grille de lecture derrière un bouton n'aurait aucun sens. La règle de couverture ne gouverne
+// donc plus que le reste : marché, architecture, bénéfice visé.
+const TC_ALWAYS_PRIMARY = ["axis", "machine_capability", "operation", "material", "actor"];
 
 function tcSplitFacetGroups(corpus) {
   const primary = [];
@@ -1107,16 +1197,15 @@ function renderTechCorpus() {
   // situé (ablation, verre, optique) sans porter d'axe de procédé nommé : l'annoncer comme non
   // qualifié désignerait au relecteur un travail qui n'est pas à faire.
   const unclassified = corpus.filter(row => !Object.values(row.families || {}).flat().length).length;
-  const distinctAxes = new Set(corpus.flatMap(row => row.axes)).size;
   // Les deux notes de KPI reposaient sur la maturité, retirée de cette page le 10/09/2026 :
   // 91 lignes sur 98 tombaient dans "non déterminée" ou "non qualifiée", parce que
   // MATURITY_RULES cherche "ligne pilote" ou "production en série" -- des mots qu'un titre de
   // publication n'emploie jamais. Remplacées par deux mesures que le corpus porte vraiment.
   // (La maturité du MARCHÉ, elle, reste : autre mécanisme, alimenté par market.db.)
-  const solidAxes = new Set(
-    [...new Set(corpus.flatMap(row => row.axes))].filter(
-      axis => corpus.filter(row => row.axes.includes(axis)).length >= 2),
-  ).size;
+  // Compte les libellés distincts sur TOUTES les dimensions, pas seulement le procédé : depuis
+  // la scission du 10/09/2026, ce dernier ne porte plus que 4 libellés, et un KPI "AXES SUIVIS"
+  // à 4 aurait laissé croire que le classement s'était appauvri alors qu'il s'est étoffé.
+  const distinctFamilies = new Set(corpus.flatMap(row => Object.values(row.families || {}).flat())).size;
   const projectsWithActor = corpus.filter(row => row.kind === "projet" && row.actors.length).length;
 
   const {primary: primaryGroups, secondary: secondaryGroups} = tcSplitFacetGroups(corpus);
@@ -1135,7 +1224,7 @@ function renderTechCorpus() {
       <div>
         <p class="ex-eyebrow">INTELLIGENCE</p>
         <h1>Technologie laser</h1>
-        <p class="ex-lede">Le corpus technique complet : publications, brevets et projets européens. Les facettes croisent axe technologique, opération, matériau et acteur ; marché, bénéfice et architecture s’ajoutent d’un clic.</p>
+        <p class="ex-lede">Le corpus technique complet : publications, brevets et projets européens. Les facettes se lisent dans l’ordre : procédé technologique, capacité machine, opération, matériau, acteur. Marché, architecture et bénéfice s’ajoutent d’un clic.</p>
       </div>
       <div class="ex-head-actions">
         <button type="button" class="ex-btn" data-ex-export>↓ Exporter CSV</button>
@@ -1144,7 +1233,7 @@ function renderTechCorpus() {
     </div>
 
     <div class="ex-kpis">
-      <div class="ex-kpi"><div class="ex-kpi-label">AXES SUIVIS</div><div class="ex-kpi-value">${distinctAxes}</div><div class="ex-kpi-note">${solidAxes} sur 2 documents ou plus</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">FAMILLES TECHNIQUES</div><div class="ex-kpi-value">${distinctFamilies}</div><div class="ex-kpi-note">sur ${TC_FACET_GROUPS.length - 1} dimensions</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">PROJETS EUROPÉENS</div><div class="ex-kpi-value">${projects}</div><div class="ex-kpi-note">${projectsWithActor} avec un acteur suivi</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">BREVETS</div><div class="ex-kpi-value">${patents}</div><div class="ex-kpi-note">${patents ? "collectés" : "aucune collecte aboutie"}</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">PUBLICATIONS</div><div class="ex-kpi-value">${publications}</div><div class="ex-kpi-note">${unclassified} sans aucune famille</div></div>
@@ -1166,12 +1255,12 @@ function renderTechCorpus() {
             return `<button type="button" class="ex-facet${on ? " is-active" : ""}${count ? "" : " is-empty"}" data-ex-tab="${esc(label)}" aria-pressed="${on}"${count || on ? "" : " disabled"}><span>${esc(label)}</span><span>${count}</span></button>`;
           }).join("")}
         </div>
-        ${primaryGroups.map(g => facetGroupHtml(g.label, g.key, options[g.key], state.techFacets[g.key], {expanded: state.techExpanded.includes(g.key)})).join("")}
+        ${primaryGroups.map(g => facetGroupHtml(g.label, g.key, options[g.key], state.techFacets[g.key] || [], {expanded: state.techExpanded.includes(g.key)})).join("")}
         ${secondaryGroups.length ? `
           <button type="button" class="ex-facet-toggle ex-more-filters" data-ex-more-filters aria-expanded="${showSecondary}">
             ${showSecondary ? "− Moins de filtres" : `+ ${secondaryGroups.length} autre${secondaryGroups.length > 1 ? "s" : ""} filtre${secondaryGroups.length > 1 ? "s" : ""}${secondaryActive ? ` (${secondaryActive} actif${secondaryActive > 1 ? "s" : ""})` : ""}`}
           </button>
-          ${showSecondary ? secondaryGroups.map(g => facetGroupHtml(g.label, g.key, options[g.key], state.techFacets[g.key], {expanded: state.techExpanded.includes(g.key)})).join("") : ""}
+          ${showSecondary ? secondaryGroups.map(g => facetGroupHtml(g.label, g.key, options[g.key], state.techFacets[g.key] || [], {expanded: state.techExpanded.includes(g.key)})).join("") : ""}
         ` : ""}
         ${facetsActive ? `<button type="button" class="ex-facet-reset" data-ex-reset-facets>Réinitialiser les facettes (${facetsActive})</button>` : ""}
       </div>
@@ -1184,12 +1273,14 @@ function renderTechCorpus() {
         </div>
 
         <div class="ex-table">
-          <div class="ex-row ex-thead"><div>TYPE</div><div>DOCUMENT · AXE · ACTEUR</div><div>DATE</div></div>
+          <div class="ex-row ex-thead"><div>TYPE</div><div>DOCUMENT · FAMILLES · ACTEUR</div><div>DATE</div></div>
           ${shown.length ? shown.map(tcCorpusRow).join("") : `<div class="ex-empty"><strong>Aucun document ne correspond à cette recherche.</strong><p>Essayez un mot-clé plus court, ou <button type="button" data-ex-reset-all>réinitialisez la recherche</button>.</p></div>`}
         </div>
         <div class="ex-foot">Affichage de ${shown.length} document(s) sur ${filtered.length}${filtered.length === corpus.length ? "" : ` (corpus complet : ${corpus.length})`}. ${shown.length < filtered.length ? `<button type="button" class="ex-more" data-ex-more>Charger la suite →</button>` : ""}</div>
       </div>
     </div>
+
+    ${tcCorpusReading(corpus)}
   </div></div>`;
 
   const input = document.querySelector("#ex-search");

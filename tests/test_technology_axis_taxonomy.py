@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import db as dbmod
-from scrapers import PROCESS_TECHNOLOGIES, _match_all_labels, is_on_topic
+from scrapers import MACHINE_CAPABILITIES, PROCESS_TECHNOLOGIES, TECHNOLOGY_AXES, _match_all_labels, is_on_topic
 
 
 def _setup(tmp: str) -> Path:
@@ -186,15 +186,19 @@ class ReconcileTechnologySignalMaturityTests(unittest.TestCase):
 
 
 class NewProcessTechnologyAxesTests(unittest.TestCase):
-    def test_three_new_axes_are_registered(self):
+    def test_machine_capability_axes_are_registered(self):
+        # Ces trois-là décrivent ce dont la MACHINE est capable, pas un mécanisme physique :
+        # depuis la scission du 10/09/2026, ils vivent dans MACHINE_CAPABILITIES.
         for axis in ("Haute puissance / hauts taux", "Multi-beam / parallélisation", "Fabrication roll-to-roll (batteries)"):
-            self.assertIn(axis, PROCESS_TECHNOLOGIES)
+            with self.subTest(axis=axis):
+                self.assertIn(axis, MACHINE_CAPABILITIES)
+                self.assertNotIn(axis, PROCESS_TECHNOLOGIES)
 
     def test_roll_to_roll_alone_is_not_on_topic_without_laser_context(self):
         # §10.10: these new axes carry generic manufacturing terms (roll-to-roll, parallel
         # processing) that must not, by themselves, make unrelated content look laser-relevant.
         text = "This system supports roll-to-roll battery electrode manufacturing."
-        labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
+        labels = {label for label, _ in _match_all_labels(text, TECHNOLOGY_AXES)}
         self.assertIn("Fabrication roll-to-roll (batteries)", labels)
         self.assertFalse(is_on_topic(text))
 
@@ -228,14 +232,14 @@ class CorpusDrivenAxesTests(unittest.TestCase):
     def test_registered_axes(self):
         for axis in self.AXES:
             with self.subTest(axis=axis):
-                self.assertIn(axis, PROCESS_TECHNOLOGIES)
+                self.assertIn(axis, TECHNOLOGY_AXES)
 
     def test_welding_lives_only_in_operations(self):
         """"Soudage / assemblage de transparents" a vécu un jour dans PROCESS_TECHNOLOGIES.
         OPERATIONS["Soudage"] a absorbé ses termes : deux libellés voisins s'affichaient côte à
         côte dans deux groupes de facettes, pour la même idée."""
         from lexicon import OPERATIONS
-        self.assertNotIn("Soudage / assemblage de transparents", PROCESS_TECHNOLOGIES)
+        self.assertNotIn("Soudage / assemblage de transparents", TECHNOLOGY_AXES)
         for title in (
             "Large-area glass welding and dissimilar bonding using femtosecond lasers",
             "Large-scale, high-strength transparent welding of thick fused silica using femtosecond laser pulses",
@@ -255,7 +259,7 @@ class CorpusDrivenAxesTests(unittest.TestCase):
     def test_real_titles_get_their_axis(self):
         for title, axis in self.REELS:
             with self.subTest(axis=axis, title=title[:60]):
-                labels = {label for label, _ in _match_all_labels(title, PROCESS_TECHNOLOGIES)}
+                labels = {label for label, _ in _match_all_labels(title, TECHNOLOGY_AXES)}
                 self.assertIn(axis, labels)
 
     def test_every_new_axis_is_generic(self):
@@ -272,7 +276,7 @@ class CorpusDrivenAxesTests(unittest.TestCase):
         """Même sort que "Soudage" : OPERATIONS["Texturation"] portait déjà "texturing" et
         "surface structuring", donc l'axe de procédé écrit la veille était redondant à 90 %."""
         from lexicon import OPERATIONS
-        self.assertNotIn("Texturation de surface", PROCESS_TECHNOLOGIES)
+        self.assertNotIn("Texturation de surface", TECHNOLOGY_AXES)
         for title in (
             "Monitoring of ultrashort pulse laser surface texturing using spectroscopy and deep learning model",
             "Enabling in-situ monitoring of ultrashort pulse laser surface texturing",
@@ -294,7 +298,7 @@ class CorpusDrivenAxesTests(unittest.TestCase):
         )
         for text in hors_sujet:
             with self.subTest(text=text[:50]):
-                labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
+                labels = {label for label, _ in _match_all_labels(text, TECHNOLOGY_AXES)}
                 self.assertTrue(labels & set(self.AXES), "le texte doit bien porter le vocabulaire")
                 self.assertFalse(is_on_topic(text))
 
@@ -378,7 +382,7 @@ class CorpusDrivenAxesTests(unittest.TestCase):
         # comme séparateur, donc le terme matcherait "in volume production" -- une mention de
         # production industrielle, pas d'usinage en volume.
         text = "Femtosecond laser cutting already in volume production for automotive parts."
-        labels = {label for label, _ in _match_all_labels(text, PROCESS_TECHNOLOGIES)}
+        labels = {label for label, _ in _match_all_labels(text, TECHNOLOGY_AXES)}
         self.assertNotIn("Bulk", labels)
 
 

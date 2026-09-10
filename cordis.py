@@ -9,7 +9,7 @@ remplir -- sans jamais deviner -- trois tables jusque-là vides ou saisies à la
                      pas des suppositions).
 - technology_signals : un axe technologique (SLE, LIPSS, TGV...) SEULEMENT quand le titre/
                      objectif du projet contient explicitement un terme du lexique
-                     PROCESS_TECHNOLOGIES déjà utilisé par scrapers.py pour l'extraction marché
+                     TECHNOLOGY_AXES (procédé + capacité machine), déjà utilisé par scrapers.py
                      -- jamais un axe inventé à partir du seul nom du projet.
 
 Source de données : le jeu "HORIZON Projects" (CSV), publié mensuellement par CORDIS sur
@@ -54,7 +54,7 @@ from db import (
     utc_now,
 )
 from http_client import connector_client
-from lexicon import PROCESS_TECHNOLOGIES, best_quote, detect_maturity, is_on_topic, match_label_details
+from lexicon import TECHNOLOGY_AXES, best_quote, detect_maturity, is_on_topic, match_label_details
 
 CORDIS_PROJECTS_ZIP_URL = "https://cordis.europa.eu/data/cordis-HORIZONprojects-csv.zip"
 CORDIS_CACHE_PATH = DATA_DIR / "cordis_cache" / "horizon_projects.zip"
@@ -410,7 +410,7 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
                             actors_db, actor_id, related_name[:180], related_actor_id, note, source_url,
                         )
 
-                axis, hits = match_label_details(f"{project.get('title') or ''} {project.get('objective') or ''}", PROCESS_TECHNOLOGIES)
+                axis, hits = match_label_details(f"{project.get('title') or ''} {project.get('objective') or ''}", TECHNOLOGY_AXES)
                 if axis:
                     quote = best_quote(project.get("objective") or project.get("title") or "", hits)[:700]
                     if quote:

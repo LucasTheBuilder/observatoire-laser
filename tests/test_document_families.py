@@ -69,7 +69,8 @@ class DocumentFamilyClassificationTests(unittest.TestCase):
             families = self._families(tech_db)
             self.assertIn("Ablation", families.get("operation", set()))
             self.assertIn("Verre", families.get("material", set()))
-            self.assertIn("Burst GHz/MHz", families.get("process_technology", set()))
+            # Burst est une CAPACITE MACHINE depuis la scission du 10/09/2026, pas un procede.
+            self.assertIn("Burst GHz/MHz", families.get("machine_capability", set()))
 
     def test_dimension_is_written_on_every_signal(self):
         with tempfile.TemporaryDirectory() as tmp:

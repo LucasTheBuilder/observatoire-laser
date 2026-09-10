@@ -236,6 +236,21 @@ main.ex-host {
    détache donc de la facette précédente au lieu de la prolonger. */
 .ex-more-filters { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--ex-line); width: 100%; text-align: left; }
 
+/* Bloc de lecture, sous la liste : une observation sur le corpus entier, pas un filtre. Il se
+   détache donc de la carte des résultats -- même largeur, fond légèrement teinté, filet en
+   haut -- pour se lire comme une note d'analyse et non comme un élément d'interface. */
+.ex-reading {
+  margin-top: 26px;
+  padding: 20px 24px 22px;
+  border-top: 2px solid var(--ex-line-control);
+  background: #f6f7f4;
+}
+.ex-reading-title { font-size: 10.5px; letter-spacing: 1.2px; color: var(--ex-label); margin-bottom: 12px; }
+.ex-reading p { margin: 0 0 10px; font: 13.5px/1.7 Spectral, Georgia, serif; color: var(--ex-ink-2); }
+.ex-reading p:last-child { margin-bottom: 0; }
+.ex-reading b { color: var(--ex-ink); font-weight: 600; }
+.ex-reading-take { color: var(--ex-ink); }
+
 .ex-facet-reset {
   padding: 0;
   border: 0;
