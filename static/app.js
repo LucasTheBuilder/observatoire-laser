@@ -67,7 +67,7 @@ const state = {
   // Les clés doivent couvrir TC_FACET_GROUPS : une dimension ajoutée au lexique sans clé ici
   // faisait passer `undefined` à facetGroupHtml, qui plantait le rendu de toute la page.
   // Le `|| []` aux points d'appel est la vraie garde ; cette liste reste la valeur de départ.
-  techFacets: {axis: [], machine_capability: [], operation: [], material: [], market: [], architecture: [], performance: [], actor: []},
+  techFacets: {axis: [], machine_capability: [], operation: [], material: [], market: [], architecture: [], actor: []},
   // Groupes de facettes dépliés (voir explorer.js) -- purement d'affichage.
   techExpanded: [],
   techMoreFilters: false,
@@ -1015,7 +1015,6 @@ const TC_FAMILY_GROUPS = [
   {key: "material", label: "MATÉRIAU"},
   {key: "market", label: "MARCHÉ"},
   {key: "architecture", label: "ARCHITECTURE"},
-  {key: "performance", label: "BÉNÉFICE VISÉ"},
 ];
 
 function tcRowFamily(row, dimension) {

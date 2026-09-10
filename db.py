@@ -681,6 +681,35 @@ def _normalize_partial_document_dates(db: sqlite3.Connection) -> None:
             db.execute("UPDATE documents SET published_at=? WHERE id=?", (normalized, row["id"]))
 
 
+def _purge_unknown_document_axes(db: sqlite3.Connection) -> None:
+    """Retire les signaux DOCUMENTAIRES dont le libellé ne vient plus d'aucun vocabulaire.
+
+    Un signal de document est produit par le lexique et par rien d'autre (voir
+    scrapers.upsert_document_technology_signal) : si son libellé quitte DOCUMENT_LEXICONS, la
+    ligne n'est plus adossée à rien et ne peut plus être reproduite par une collecte. La garder
+    laisserait une famille orpheline s'afficher, et
+    _reconcile_technology_signal_dimensions la rangerait par défaut en 'process_technology',
+    c'est-à-dire au mauvais endroit.
+
+    Sert au retrait du 10/09/2026 : "Micro-usinage" (trop générique -- il décrit en réalité une
+    découpe, une gravure ou un perçage), "Écriture de guide d'onde" (un produit, pas un geste),
+    "Scribing" (mot anglais du marquage), et la dimension "bénéfice visé" entière.
+
+    Deux exclusions : les signaux de PROJET, dont les libellés peuvent être hérités d'avant le
+    lexique fermé (voir _normalize_technology_axes), et toute ligne relue par un humain --
+    même garde que prune_technology_signals.
+    """
+    known = {label for lexicon in DOCUMENT_LEXICONS.values() for label in lexicon}
+    stale = [
+        row["id"] for row in db.execute(
+            "SELECT id,axis FROM technology_signals WHERE project_name IS NULL AND reviewed_at IS NULL"
+        ).fetchall()
+        if row["axis"] not in known
+    ]
+    for signal_id in stale:
+        db.execute("DELETE FROM technology_signals WHERE id=?", (signal_id,))
+
+
 def _reconcile_technology_signal_dimensions(db: sqlite3.Connection) -> None:
     """Renseigne technology_signals.dimension à partir du vocabulaire qui possède le libellé.
 
@@ -2026,6 +2055,9 @@ def _init_tech_db() -> None:
         # cette colonne, qui sert aussi de groupe de facettes sur le front.
         _add_columns(db, "technology_signals", {"dimension": "TEXT"})
         _normalize_technology_axes(db)
+        # Après les alias (un libellé renommé n'est pas inconnu) et avant la déduction des
+        # dimensions (inutile de ranger une ligne qu'on va supprimer).
+        _purge_unknown_document_axes(db)
         # APRÈS _normalize_technology_axes, jamais avant : la dimension se déduit du libellé,
         # donc elle doit être calculée sur le libellé DÉFINITIF. Dans l'autre ordre, une ligne
         # renommée par un alias garde la dimension de son ancien libellé -- constaté en

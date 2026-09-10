@@ -144,7 +144,19 @@ COMPONENTS: Lexicon = {
 OPERATIONS: Lexicon = {
     "Micro-usinage": {"any_of": ("micromachining", "micro-machining", "micro machining")},
     "Microdécoupe": {"any_of": ("microcutting", "micro-cutting", "laser cutting", "microdécoupe", "découpe laser", "tube cutting")},
-    "Microperçage": {"any_of": ("microdrilling", "micro-drilling", "laser drilling", "microperçage", "perçage laser")},
+    # Le vocabulaire TGV est ici plutôt que dans une opération à lui : un via traversant est un
+    # TROU, et le percer est une opération de perçage. L'architecture "TGV" reste par ailleurs
+    # dans APPLICATION_ARCHITECTURES -- un même document parle des deux, la structure obtenue et
+    # le geste qui l'obtient, et les deux dimensions ont le droit de partager des termes (seuls
+    # les LIBELLÉS doivent rester disjoints).
+    "Microperçage": {"any_of": (
+        "microdrilling", "micro-drilling", "laser drilling", "microperçage", "perçage laser",
+        "through glass via", "through-glass via", "through glass vias", "through-glass vias",
+        "through via in glass", "through vias in glass", "through-via in glass", "through-vias in glass",
+        "via in glass", "vias in glass", "glass via", "glass vias", "through hole", "through holes",
+    ), "regex": (r"\bTGVs?\b",), "requires_any": (
+        "laser", "glass", "silica", "via", "hole", "interposer", "drilling", "perçage",
+    )},
     # A absorbé "Texturation de surface" le 10/09/2026, comme "Soudage" la veille : cet axe,
     # écrit dans PROCESS_TECHNOLOGIES, faisait double emploi avec celui-ci. Seules les deux
     # formes "microstructuring" manquaient ici -- "texturing" et "surface structuring" y étaient
@@ -176,13 +188,24 @@ OPERATIONS: Lexicon = {
         "welding", "soudage", "micro-welding", "microwelding",
         "weld glass", "transparent welding", "dissimilar bonding",
     )},
-    "Gravure": {"any_of": ("engraving", "gravure")},
-    "Scribing": {"any_of": ("laser scribing", "scribing")},
+    # "etching" manquait : le lexique ne connaissait que "engraving"/"gravure", donc aucun
+    # titre en "laser-induced chemical etching" ou "selective etching" n'était classé -- alors
+    # que c'est la formulation courante pour le verre et le silicium. C'est l'opération réelle
+    # derrière l'ancien libellé "Écriture de guide d'onde" (10/09/2026), qui nommait un produit.
+    "Gravure": {"any_of": ("engraving", "gravure", "etching", "laser etching", "chemical etching", "selective etching")},
     "Dicing": {"any_of": ("laser dicing", "stealth dicing", "dicing")},
+    "Scribing": {"any_of": ("laser scribing", "scribing")},
+    "Écriture de guide d'onde": {"any_of": ("waveguide writing", "direct laser writing of waveguide")},
+    # Ajouté le 10/09/2026 : "scribing" a été retiré comme libellé (c'est le mot anglais du
+    # marquage, pas une opération française), mais le marquage lui-même manquait au lexique.
+    "Marquage": {"any_of": ("laser marking", "marquage laser", "marquage", "laser marker", "annealing marking", "color marking")},
     "Nettoyage": {"any_of": ("laser cleaning", "nettoyage laser")},
     "Polissage": {"any_of": ("laser polishing", "polishing")},
-    "Modification interne": {"any_of": ("internal modification", "in-volume modification", "volume modification", "bulk modification")},
-    "Écriture de guide d'onde": {"any_of": ("waveguide writing", "direct laser writing of waveguide")},
+    # "volumetric scribing" ajouté ici et non dans "Marquage" : le seul document du corpus qui
+    # employait "scribing" fait du scribing VOLUMIQUE du verre au faisceau de Bessel, c'est-à-dire
+    # une modification interne servant à séparer -- pas un marquage de surface. Le mot anglais
+    # "scribing" couvre les deux gestes, le français les distingue.
+    "Modification interne": {"any_of": ("internal modification", "in-volume modification", "volume modification", "bulk modification", "volumetric scribing")},
     "Debonding": {"any_of": ("laser debonding", "debonding")},
     "Rainurage": {"any_of": ("grooving", "laser grooving")},
     "Milling": {"any_of": ("laser milling", "micromilling", "micro-milling")},
@@ -541,14 +564,31 @@ def _laser_match(text: str) -> bool:
 # même libellé dans deux dimensions apparaîtrait deux fois sur la page et fausserait le
 # comptage par famille. C'est ce qui a fait fusionner "Fonctionnalisation de surface" dans
 # OPERATIONS au lieu de la laisser aussi dans PROCESS_TECHNOLOGIES.
+# Trois libellés d'opération que le chemin DOCUMENTAIRE n'utilise pas (10/09/2026) :
+#
+#   - "Micro-usinage" est générique. Dans un titre de publication il ne dit rien de plus que
+#     "laser" -- l'opération réelle est une découpe, une gravure ou un perçage, et c'est celle-là
+#     qu'il faut nommer.
+#   - "Écriture de guide d'onde" nomme un PRODUIT (la pièce obtenue), pas un geste.
+#   - "Scribing" est le mot anglais du marquage, pas une opération en français.
+#
+# Ils restent dans OPERATIONS, et c'est délibéré : l'extraction de faits marché et la page
+# Offres & capacités les emploient sur des pages d'ACTEURS, où "Micro-usinage" est le nom d'une
+# prestation vendue -- 45 capacités, 47 opérations et 37 faits marché en dépendent, et c'est la
+# valeur la plus fréquente des trois tables. Ce qui est du remplissage dans un titre d'article
+# est une offre commerciale sur un site d'entreprise.
+_NON_DOCUMENT_OPERATIONS = frozenset({"Micro-usinage", "Écriture de guide d'onde", "Scribing"})
+DOCUMENT_OPERATIONS: Lexicon = {
+    label: rule for label, rule in OPERATIONS.items() if label not in _NON_DOCUMENT_OPERATIONS
+}
+
 DOCUMENT_LEXICONS: dict[str, Lexicon] = {
     "process_technology": PROCESS_TECHNOLOGIES,
     "machine_capability": MACHINE_CAPABILITIES,
-    "operation": OPERATIONS,
+    "operation": DOCUMENT_OPERATIONS,
     "material": MATERIALS,
     "market": MARKETS,
     "architecture": APPLICATION_ARCHITECTURES,
-    "performance": PERFORMANCE_TERMS,
 }
 
 _GENERIC_PROCESS_AXES = frozenset({

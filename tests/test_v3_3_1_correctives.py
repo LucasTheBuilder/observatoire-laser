@@ -76,7 +76,22 @@ class StrictMarketVsOfferTests(unittest.TestCase):
             ),
         )
         market_fact = _candidate("ALPHANOV", "https://www.alphanov.com/en/products-and-services/test", "Laser processes", block)
-        self.assertIsNone(market_fact)
+
+        # Ce bloc ne produisait AUCUN fait jusqu'au 10/09/2026, faute d'opération reconnue :
+        # "etching" manquait à OPERATIONS["Gravure"], qui ne connaissait que "engraving". Le
+        # terme ajouté, le bloc décrit bien une gravure -- il en sort donc un fait PARTIEL, qui
+        # part en relecture humaine.
+        #
+        # Ce que ce test garde reste intact, et c'est là qu'il faut regarder : ni le procédé
+        # (SLE) ni le matériau (silice) ne se sont glissés dans market/component, et le marché
+        # reste None faute d'être nommé -- le fait ne peut donc pas être validé tel quel.
+        self.assertIsNotNone(market_fact)
+        self.assertIsNone(market_fact["market"])
+        self.assertEqual("partial", market_fact["fact_status"])
+        self.assertEqual("Gravure", market_fact["operation"])
+        self.assertEqual("SLE", market_fact["process"])
+        self.assertEqual("Verre", market_fact["material"])
+        self.assertNotIn(market_fact["component"], {"SLE", "Verre"})
         offers = _offer_candidates(
             "ALPHANOV", "https://www.alphanov.com/en/products-and-services/test", "Laser processes", block, page_type="service"
         )
