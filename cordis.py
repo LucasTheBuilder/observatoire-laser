@@ -56,25 +56,8 @@ from db import (
 from http_client import connector_client
 from lexicon import TECHNOLOGY_AXES, best_quote, detect_maturity, is_on_topic, match_label_details
 
-# Les trois programmes-cadres publiés par CORDIS, du plus récent au plus ancien. Jusqu'au
-# 10/09/2026 seul HORIZON était lu, ce qui rendait invisible tout l'historique : sur les 66
-# projets du cœur procédé recensés par l'audit du 10/09/2026, 51 sont H2020 ou FP7. Un
-# observatoire qui ne voit que le programme en cours ne peut ni tracer une trajectoire d'acteur
-# sur quinze ans, ni dire qu'un sujet est ancien.
-#
-# L'ordre compte : _project_details et les collecteurs parcourent les caches dans cet ordre et
-# gardent la PREMIÈRE occurrence d'un identifiant. Un projet prolongé d'un programme à l'autre
-# garde ainsi sa fiche la plus récente.
-CORDIS_PROGRAMMES: tuple[tuple[str, str], ...] = (
-    ("horizon", "https://cordis.europa.eu/data/cordis-HORIZONprojects-csv.zip"),
-    ("h2020", "https://cordis.europa.eu/data/cordis-h2020projects-csv.zip"),
-    ("fp7", "https://cordis.europa.eu/data/cordis-fp7projects-csv.zip"),
-)
-CORDIS_CACHE_DIR = DATA_DIR / "cordis_cache"
-
-# Conservés pour les appelants (et les tests) qui ne raisonnent que sur le programme courant.
-CORDIS_PROJECTS_ZIP_URL = CORDIS_PROGRAMMES[0][1]
-CORDIS_CACHE_PATH = CORDIS_CACHE_DIR / "horizon_projects.zip"
+CORDIS_PROJECTS_ZIP_URL = "https://cordis.europa.eu/data/cordis-HORIZONprojects-csv.zip"
+CORDIS_CACHE_PATH = DATA_DIR / "cordis_cache" / "horizon_projects.zip"
 # CORDIS republie ce jeu de données une fois par mois (voir la page du dataset sur
 # data.europa.eu, "Accrual Periodicity: monthly") -- inutile de le re-télécharger plus souvent.
 CORDIS_CACHE_MAX_AGE_DAYS = 25
@@ -141,58 +124,27 @@ def _project_is_on_topic(project: dict[str, str]) -> bool:
     return is_on_topic(text)
 
 
-def programme_cache_path(programme: str) -> Path:
-    """Le cache local d'un programme-cadre. "horizon" garde son nom historique, pour ne pas
-    invalider un cache de 37 Mo déjà téléchargé chez l'utilisateur."""
-    name = "horizon_projects.zip" if programme == "horizon" else f"{programme}_projects.zip"
-    return CORDIS_CACHE_DIR / name
-
-
-def _ensure_programme_cache(client: httpx.Client, programme: str, url: str) -> Path:
-    """Télécharge le ZIP d'un programme-cadre si le cache local est absent ou trop vieux.
+def _ensure_cache(client: httpx.Client) -> Path:
+    """Télécharge le ZIP "HORIZON Projects" si le cache local est absent ou trop vieux.
 
     Téléchargement en streaming vers un fichier temporaire puis renommage atomique, pour
     qu'un run interrompu (crash, timeout) ne laisse jamais un cache à moitié écrit derrière lui.
     """
-    path = programme_cache_path(programme)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        age_days = (time.time() - path.stat().st_mtime) / 86400
+    CORDIS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if CORDIS_CACHE_PATH.exists():
+        age_days = (time.time() - CORDIS_CACHE_PATH.stat().st_mtime) / 86400
         if age_days < CORDIS_CACHE_MAX_AGE_DAYS:
-            return path
-    tmp_path = path.with_suffix(".zip.part")
+            return CORDIS_CACHE_PATH
+    tmp_path = CORDIS_CACHE_PATH.with_suffix(".zip.part")
     # Pas de timeout par requête : le client est construit avec le profil "bulk" de
     # http_client (180 s), calibré précisément pour ce téléchargement.
-    with client.stream("GET", url) as response:
+    with client.stream("GET", CORDIS_PROJECTS_ZIP_URL) as response:
         response.raise_for_status()
         with open(tmp_path, "wb") as handle:
             for chunk in response.iter_bytes(chunk_size=1 << 20):
                 handle.write(chunk)
-    tmp_path.replace(path)
-    return path
-
-
-def ensure_all_caches(client: httpx.Client) -> list[Path]:
-    """Les trois caches, dans l'ordre de CORDIS_PROGRAMMES.
-
-    Un programme qui échoue au téléchargement ne prive pas des autres : FP7 est un dump figé
-    depuis 2013 et son indisponibilité ponctuelle ne doit pas bloquer la collecte du programme
-    en cours. Renvoie les caches réellement disponibles.
-    """
-    caches: list[Path] = []
-    for programme, url in CORDIS_PROGRAMMES:
-        try:
-            caches.append(_ensure_programme_cache(client, programme, url))
-        except Exception:
-            existing = programme_cache_path(programme)
-            if existing.exists():
-                caches.append(existing)
-    return caches
-
-
-def _ensure_cache(client: httpx.Client) -> Path:
-    """Le cache du programme en cours, pour les appelants qui n'en veulent qu'un."""
-    return _ensure_programme_cache(client, *CORDIS_PROGRAMMES[0])
+    tmp_path.replace(CORDIS_CACHE_PATH)
+    return CORDIS_CACHE_PATH
 
 
 def _csv_rows(zip_path: Path, member: str) -> Iterator[dict[str, str]]:
@@ -302,35 +254,6 @@ def _consortiums_for_projects(zip_path: Path, project_ids: set[str]) -> dict[str
     for rows in consortiums.values():
         rows.sort(key=lambda row: _ROLE_PRIORITY.get(row.get("role", ""), 9))
     return consortiums
-
-
-def available_caches() -> list[Path]:
-    """Les caches de programme présents localement, du plus récent au plus ancien.
-
-    Sans effet de bord : ne télécharge rien. Sert aux lecteurs (relecture d'un projet déjà en
-    base, nettoyage rétroactif) qui doivent pouvoir retrouver un projet quel que soit son
-    programme, sans déclencher 125 Mo de téléchargement au passage.
-    """
-    return [path for programme, _ in CORDIS_PROGRAMMES if (path := programme_cache_path(programme)).exists()]
-
-
-def project_details_across_programmes(project_ids: set[str], caches: list[Path] | None = None) -> dict[str, dict[str, str]]:
-    """Relit des projets par identifiant dans TOUS les caches disponibles.
-
-    Un identifiant CORDIS est unique tous programmes confondus, mais un projet n'existe que
-    dans le dump de SON programme : chercher dans le seul cache Horizon ne retrouvait donc
-    aucun projet H2020 ou FP7 -- soit 51 des 66 projets du cœur procédé recensés par l'audit du
-    10/09/2026. La première occurrence gagne (voir l'ordre de CORDIS_PROGRAMMES).
-    """
-    remaining = set(project_ids)
-    found: dict[str, dict[str, str]] = {}
-    for zip_path in caches if caches is not None else available_caches():
-        if not remaining:
-            break
-        for project_id, row in _project_details(zip_path, remaining).items():
-            found[project_id] = row
-        remaining -= set(found)
-    return found
 
 
 def _project_details(zip_path: Path, project_ids: set[str]) -> dict[str, dict[str, str]]:

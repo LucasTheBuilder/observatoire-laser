@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from cordis import CORDIS_CACHE_DIR, _project_is_on_topic, available_caches, project_details_across_programmes
+from cordis import CORDIS_CACHE_PATH, _project_details, _project_is_on_topic
 from db import ACTORS_DB, TECH_DB, backup_all_databases, connect
 from openalex import _work_is_on_topic
 
@@ -34,7 +34,7 @@ def _cordis_project_id(source_url: str | None) -> str | None:
     return match.group(1) if match else None
 
 
-def prune_cordis(*, caches: list[Path] | None = None) -> dict:
+def prune_cordis(*, cache_path: Path = CORDIS_CACHE_PATH) -> dict:
     """Retire les actor_events/actor_relations d'origine CORDIS dont le projet (identifié via
     source_url) ne passe plus (ou n'a jamais dû passer) _project_is_on_topic().
 
@@ -51,15 +51,13 @@ def prune_cordis(*, caches: list[Path] | None = None) -> dict:
     project_ids = {pid for row in (*events, *relations) if (pid := _cordis_project_id(row["source_url"]))}
     if not project_ids:
         return {"projects_checked": 0, "projects_off_topic": 0, "events_removed": 0, "relations_removed": 0}
-    available = available_caches() if caches is None else caches
-    if not available:
+    if not cache_path.exists():
         raise SystemExit(
-            f"Aucun cache CORDIS dans {CORDIS_CACHE_DIR} : impossible de relire titre/objectif "
-            "des projets déjà en base. Relancer cordis.collect_cordis() une fois pour le "
-            "reconstituer."
+            f"Cache CORDIS introuvable ({cache_path}) : impossible de relire titre/objectif des "
+            "projets déjà en base. Relancer cordis.collect_cordis() une fois pour le reconstituer."
         )
 
-    projects = project_details_across_programmes(project_ids, available)
+    projects = _project_details(cache_path, project_ids)
     off_topic_ids = {pid for pid, project in projects.items() if not _project_is_on_topic(project)}
 
     events_removed = relations_removed = 0
@@ -81,7 +79,7 @@ def prune_cordis(*, caches: list[Path] | None = None) -> dict:
     }
 
 
-def prune_technology_signals(*, caches: list[Path] | None = None) -> dict:
+def prune_technology_signals(*, cache_path: Path = CORDIS_CACHE_PATH) -> dict:
     """Retire les technology_signals qu'une collecte lancée aujourd'hui n'aurait pas créés.
 
     Cette table manquait au nettoyage (audit du 08/09/2026) : prune_cordis() ne touche que
@@ -97,7 +95,7 @@ def prune_technology_signals(*, caches: list[Path] | None = None) -> dict:
       dans `documents`. Un signal dont le document vient d'être retiré comme hors sujet est
       orphelin par construction, sans avoir besoin de rejuger son texte.
 
-    Un projet absent de TOUS les caches locaux n'est JAMAIS supprimé sur absence de preuve (même règle que
+    Un projet absent du cache local n'est JAMAIS supprimé sur absence de preuve (même règle que
     prune_cordis) : c'est ce qui protège les signaux dont la source n'est pas CORDIS du tout,
     comme Femtocell, documenté sur le site d'ALPHANOV.
 
@@ -126,14 +124,12 @@ def prune_technology_signals(*, caches: list[Path] | None = None) -> dict:
     off_topic_ids: list[int] = []
     projects: dict[str, dict[str, str]] = {}
     if project_signals:
-        available = available_caches() if caches is None else caches
-        if not available:
+        if not cache_path.exists():
             raise SystemExit(
-                f"Aucun cache CORDIS dans {CORDIS_CACHE_DIR} : impossible de relire titre/objectif "
-                "des projets déjà en base. Relancer cordis.collect_cordis() une fois pour le "
-                "reconstituer."
+                f"Cache CORDIS introuvable ({cache_path}) : impossible de relire titre/objectif des "
+                "projets déjà en base. Relancer cordis.collect_cordis() une fois pour le reconstituer."
             )
-        projects = project_details_across_programmes(set(project_signals.values()), available)
+        projects = _project_details(cache_path, set(project_signals.values()))
         off_topic_ids = [
             signal_id for signal_id, project_id in project_signals.items()
             if (project := projects.get(project_id)) is not None and not _project_is_on_topic(project)

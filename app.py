@@ -1949,26 +1949,12 @@ def tech_corpus() -> list[dict[str, Any]]:
             "abstract": document["abstract"],
         })
 
-    # Fiches projet, indexées par numéro de convention (voir db.eu_projects) : tier, catégorie,
-    # dates, montant et pays coordinateur. Elles portent ce qu'un signal ne peut pas porter --
-    # une ligne par (axe, projet) multiplierait tout SUM() par le nombre d'axes.
-    project_files = {
-        row["project_id"]: row
-        for row in rows(
-            TECH_DB,
-            """SELECT project_id,tier,category,programme,started_at,ended_at,
-                      coordinator,coordinator_country,participants,ec_contribution_eur
-               FROM eu_projects""",
-        )
-    }
-
     for url, group in project_groups.items():
         # Tous les projets ne sont pas sourcés sur CORDIS : Femtocell, par exemple, est
         # documenté sur le site d'ALPHANOV. Afficher "CORDIS" par défaut attribuerait la
         # source au mauvais éditeur -- on retombe sur le domaine réellement cité.
         ga = _PROJECT_GA_RE.search(url)
         host = urlparse(url).netloc.removeprefix("www.")
-        project_file = project_files.get(ga.group(1)) if ga else None
         corpus.append({
             "uid": f"proj:{group['signal_ids'][0]}",
             "kind": "projet",
@@ -1978,28 +1964,15 @@ def tech_corpus() -> list[dict[str, Any]]:
             "families": group["families"],
             "actors": group["actors"],
             "maturity": group["maturity"],
-            # Un projet importé depuis les dumps CORDIS porte sa vraie date de démarrage
-            # (eu_projects.started_at). Pour les autres -- ceux découverts par la collecte
-            # acteur→projets, dont cordis.py ne garde la période que dans actor_events --
-            # `published_at` reste NULL et le front affiche la date d'observation plutôt
-            # qu'une période inventée.
-            "published_at": (project_file or {}).get("started_at"),
+            # CORDIS expose bien une période de projet, mais cordis.py ne la garde que dans
+            # actor_events (actors.db), rattachée à un acteur suivi -- pas au signal. Un projet
+            # dont aucun participant n'est suivi n'a donc aucune date de projet en base. On
+            # affiche la date d'observation plutôt qu'une période inventée.
+            "published_at": None,
             "observed_at": group["observed_at"],
             "source_url": url,
             "signal_ids": group["signal_ids"],
             "abstract": None,
-            # Métadonnées de projet, absentes pour un projet non importé (Femtocell).
-            "project": {
-                "tier": project_file["tier"],
-                "category": project_file["category"],
-                "programme": project_file["programme"],
-                "started_at": project_file["started_at"],
-                "ended_at": project_file["ended_at"],
-                "coordinator": project_file["coordinator"],
-                "country": project_file["coordinator_country"],
-                "participants": project_file["participants"],
-                "ec_eur": project_file["ec_contribution_eur"],
-            } if project_file else None,
         })
 
     corpus.sort(key=lambda row: _corpus_sort_key(row["published_at"] or row["observed_at"]), reverse=True)

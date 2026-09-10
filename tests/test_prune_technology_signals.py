@@ -97,7 +97,7 @@ class PruneTechnologySignalsTests(unittest.TestCase):
             _signal(db, axis="Beam shaping", source_url="https://cordis.europa.eu/project/id/900001", project_name="USPFAB")
             _signal(db, axis="Monitoring IA procédé", source_url="https://cordis.europa.eu/project/id/900002", project_name="DATAFAB")
 
-        report = prune.prune_technology_signals(caches=[self.zip_path])
+        report = prune.prune_technology_signals(cache_path=self.zip_path)
 
         self.assertEqual(1, report["signals_off_topic"])
         self.assertEqual(1, report["signals_removed"])
@@ -108,7 +108,7 @@ class PruneTechnologySignalsTests(unittest.TestCase):
             _signal(db, axis="Monitoring IA procédé", source_url="https://cordis.europa.eu/project/id/900002", project_name="DATAFAB")
         self.assertEqual(1, dbmod.scalar(self.tech_db, "SELECT COUNT(*) FROM technology_signal_sources"))
 
-        prune.prune_technology_signals(caches=[self.zip_path])
+        prune.prune_technology_signals(cache_path=self.zip_path)
 
         self.assertEqual(0, dbmod.scalar(self.tech_db, "SELECT COUNT(*) FROM technology_signal_sources"))
 
@@ -121,7 +121,7 @@ class PruneTechnologySignalsTests(unittest.TestCase):
                 source_url="https://www.alphanov.com/en/collaborative-projects/femtocell", project_name="Femtocell",
             )
 
-        report = prune.prune_technology_signals(caches=[self.zip_path])
+        report = prune.prune_technology_signals(cache_path=self.zip_path)
 
         self.assertEqual(0, report["signals_removed"])
         self.assertEqual({"Fabrication roll-to-roll (batteries)"}, self._axes())
@@ -130,7 +130,7 @@ class PruneTechnologySignalsTests(unittest.TestCase):
         with dbmod.connect(self.tech_db) as db:
             _signal(db, axis="SLE", source_url="https://cordis.europa.eu/project/id/424242", project_name="INCONNU")
 
-        report = prune.prune_technology_signals(caches=[self.zip_path])
+        report = prune.prune_technology_signals(cache_path=self.zip_path)
 
         self.assertEqual(0, report["signals_removed"])
         self.assertEqual({"SLE"}, self._axes())
@@ -143,7 +143,7 @@ class PruneTechnologySignalsTests(unittest.TestCase):
             )
             _signal(db, axis="SLE", source_url="https://doi.org/10.1/kept", project_name=None)
 
-        report = prune.prune_technology_signals(caches=[self.zip_path])
+        report = prune.prune_technology_signals(cache_path=self.zip_path)
 
         self.assertEqual(0, report["signals_removed"])
         self.assertEqual({"SLE"}, self._axes())
@@ -152,7 +152,7 @@ class PruneTechnologySignalsTests(unittest.TestCase):
         with dbmod.connect(self.tech_db) as db:
             _signal(db, axis="DLIP", source_url="https://doi.org/10.1/gone", project_name=None)
 
-        report = prune.prune_technology_signals(caches=[self.zip_path])
+        report = prune.prune_technology_signals(cache_path=self.zip_path)
 
         self.assertEqual(1, report["signals_orphaned"])
         self.assertEqual(set(), self._axes())
@@ -166,7 +166,7 @@ class PruneTechnologySignalsTests(unittest.TestCase):
             )
             _signal(db, axis="SLE", source_url="https://doi.org/10.1/kept", project_name=None)
 
-        report = prune.prune_technology_signals(caches=[])
+        report = prune.prune_technology_signals(cache_path=Path("/inexistant/horizon.zip"))
 
         self.assertEqual(0, report["signals_removed"])
 
