@@ -139,26 +139,18 @@ CURATED_DOCUMENTS: list[dict[str, Any]] = [
         "doi": "10.1016/j.optlastec.2023.110283",
         "published_at": "2024-03",
     },
-    # Contributions en conférence : pas de DOI. Sourcées sur la page qui les recense, sauf
-    # celle d'euspen dont les actes sont publiquement adressables.
-    {
-        "title": "Environmental impact assessment of the laser micro-cladding manufacturing process for the energy sector (12th International Conference on Life Cycle Management)",
-        "source_url": BILASURF_SITE_URL,
-        "fingerprint_source": "bilasurf:lcm2025:micro-cladding-lca",
-        "published_at": "2025",
-    },
-    {
-        "title": "Quality improvement of laser-microstructured riblet geometries in forming tools for enhanced efficiency of injection-moulded fan impellers (25th International Conference & Exhibition of euspen)",
-        "source_url": "https://www.euspen.eu/knowledge-base/ICE25224.pdf",
-        "fingerprint_source": "https://www.euspen.eu/knowledge-base/ICE25224.pdf",
-        "published_at": "2025",
-    },
-    {
-        "title": "Acoustic trilateration monitoring for laser surface processing (25th International Symposium on Laser Precision Microfabrication)",
-        "source_url": BILASURF_SITE_URL,
-        "fingerprint_source": "bilasurf:lpm2024:acoustic-trilateration",
-        "published_at": "2024",
-    },
+    # Contributions en conférence : pas de DOI, sourcées sur la page qui les recense.
+    #
+    # Trois des neuf productions listées par BILASURF ont été RETIRÉES le 10/09/2026, à l'audit
+    # de la page. Les importer parce qu'elles figurent sur le site d'un projet pertinent était
+    # une erreur de méthode : la pertinence se juge sur le travail, pas sur son financeur.
+    #
+    #   - "Environmental impact assessment of the laser MICRO-CLADDING manufacturing process" :
+    #     le micro-cladding est un procédé de dépôt, pas un procédé ultra-rapide.
+    #   - "Quality improvement of laser-microstructured riblet geometries in forming tools" et
+    #     "Acoustic trilateration monitoring for laser surface processing" : aucune des deux
+    #     n'établit de régime femto ou ultra-rapide, et le périmètre retenu est femto +
+    #     ultra-rapide.
     {
         "title": "Generation of bio-based riblets to reduce drag in industrial parts using Direct Laser Writing techniques | Investigation of femtosecond laser induced multi-pulse ablation of aluminium surfaces (25th International Symposium on Laser Precision Microfabrication)",
         "source_url": BILASURF_SITE_URL,

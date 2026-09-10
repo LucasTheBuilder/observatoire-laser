@@ -143,7 +143,8 @@ COMPONENTS: Lexicon = {
 # texte, voir _relation_evidence).
 OPERATIONS: Lexicon = {
     "Micro-usinage": {"any_of": ("micromachining", "micro-machining", "micro machining")},
-    "Microdécoupe": {"any_of": ("microcutting", "micro-cutting", "laser cutting", "microdécoupe", "découpe laser", "tube cutting")},
+    "Microdécoupe": {"any_of": ("microcutting", "micro-cutting", "laser cutting", "microdécoupe", "découpe laser", "tube cutting",
+                            "cutting quality", "laser singulation", "singulation", "slicing", "laser slicing")},
     # Le vocabulaire TGV est ici plutôt que dans une opération à lui : un via traversant est un
     # TROU, et le percer est une opération de perçage. L'architecture "TGV" reste par ailleurs
     # dans APPLICATION_ARCHITECTURES -- un même document parle des deux, la structure obtenue et
@@ -151,6 +152,7 @@ OPERATIONS: Lexicon = {
     # les LIBELLÉS doivent rester disjoints).
     "Microperçage": {"any_of": (
         "microdrilling", "micro-drilling", "laser drilling", "microperçage", "perçage laser",
+        "drilling", "micro-hole", "microhole",
         "through glass via", "through-glass via", "through glass vias", "through-glass vias",
         "through via in glass", "through vias in glass", "through-via in glass", "through-vias in glass",
         "via in glass", "vias in glass", "glass via", "glass vias", "through hole", "through holes",
@@ -192,6 +194,18 @@ OPERATIONS: Lexicon = {
     # titre en "laser-induced chemical etching" ou "selective etching" n'était classé -- alors
     # que c'est la formulation courante pour le verre et le silicium. C'est l'opération réelle
     # derrière l'ancien libellé "Écriture de guide d'onde" (10/09/2026), qui nommait un produit.
+    # Le GESTE d'écrire dans la matière au faisceau, à distinguer de la pièce obtenue :
+    # "Écriture de guide d'onde" a été retiré le 10/09/2026 parce qu'il nommait un produit, mais
+    # l'opération elle-même manquait alors au lexique. Six publications du corpus l'emploient,
+    # dont quatre n'avaient aucune opération.
+    "Écriture directe": {"any_of": (
+        "direct laser writing", "laser direct writing", "direct writing", "laser writing",
+        "femtosecond laser writing", "écriture directe",
+    )},
+    "Nanostructuration": {"any_of": (
+        "nanostructure", "nanostructures", "nanostructuring", "nanopatterning",
+        "sub-wavelength patterning", "nanograting", "nanogratings",
+    )},
     "Gravure": {"any_of": ("engraving", "gravure", "etching", "laser etching", "chemical etching", "selective etching")},
     "Dicing": {"any_of": ("laser dicing", "stealth dicing", "dicing")},
     "Scribing": {"any_of": ("laser scribing", "scribing")},
@@ -239,6 +253,21 @@ PROCESS_TECHNOLOGIES: Lexicon = {
     # "in-volume" est délibérément absent : _term_pattern autorise l'espace comme séparateur,
     # donc le terme matcherait "in volume production" -- une mention de maturité industrielle,
     # pas d'usinage en volume.
+    # Catégorie unique pour la recherche fondamentale sur l'interaction laser-matière
+    # (décision de Lucas, 10/09/2026). Ces travaux étudient comment la matière RÉPOND, pas
+    # comment on la transforme : les mélanger aux publications de procédé fausse la lecture --
+    # la moitié d'entre eux ressortaient sous "Ablation", à côté d'articles d'usinage.
+    #
+    # Générique par nécessité : "molecular dynamics", "heat transport" et "numerical simulation"
+    # sont de la physique générale. Mesuré sur les 23 451 projets Horizon, ce vocabulaire seul
+    # en ferait entrer 141 sans aucun terme ultra-rapide.
+    "Interaction laser-matière": {"any_of": (
+        "two-temperature model", "two temperature model", "molecular dynamics", "ablation threshold",
+        "laser-material interaction", "laser material interaction", "laser-matter interaction",
+        "laser interaction with", "electron-phonon", "heat transport", "incubation factor",
+        "stress wave", "defect interaction", "beam degradation", "removal mechanisms",
+        "numerical modelling", "numerical simulation",
+    )},
     "Bulk": {"any_of": ("bulk modification", "bulk modifications", "bulk material modification", "volume modification", "refractive index modification", "bulk silicon", "bulk glass")},
     # "Fonctionnalisation de surface", "Soudage / assemblage de transparents" et "Texturation de
     # surface" ont vécu ici moins de deux jours : les trois libellés existaient déjà dans
@@ -593,7 +622,12 @@ DOCUMENT_LEXICONS: dict[str, Lexicon] = {
 
 _GENERIC_PROCESS_AXES = frozenset({
     "Monitoring IA procédé", "Beam shaping", "Multi-beam / parallélisation", "Fabrication roll-to-roll (batteries)",
-    "Burst GHz/MHz", "Bulk",
+    # DLIP rejoint la liste le 10/09/2026 : contrairement à SLE et LIPSS, qui sont par
+    # définition des procédés ultra-rapides, le DLIP se pratique aussi bien en nanoseconde
+    # qu'en femtoseconde. Trois publications du corpus l'employaient sans nommer de régime,
+    # dont une annonçant explicitement du "continuous-wave polishing". Le régime retenu étant
+    # femto + ultra-rapide, l'axe ne peut plus admettre un contenu à lui seul.
+    "Burst GHz/MHz", "Bulk", "DLIP", "Interaction laser-matière",
 })
 
 def is_on_topic(text: str) -> bool:
@@ -613,7 +647,7 @@ def is_on_topic(text: str) -> bool:
     elle s'en sert pour observer autre chose. Mesuré sur les 23 451 projets Horizon Europe du
     cache : 26 des 257 admis relèvent de cette catégorie.
     """
-    if is_laser_the_instrument(text):
+    if is_laser_the_instrument(text) or is_laser_the_source(text):
         return False
     if _laser_match(text):
         return True
@@ -632,6 +666,31 @@ LASER_AS_INSTRUMENT_CUES = (
     "pump probe spectroscopy", "time-resolved photoluminescence", "ultrafast spectroscopy",
     "femtosecond spectroscopy", "two-photon absorption spectroscopy",
 )
+
+
+# Vocabulaire du DÉVELOPPEMENT DE SOURCE : construire le laser, pas s'en servir pour
+# transformer la matière. Décision de périmètre de Lucas (10/09/2026) : « les informations
+# uniquement liées aux sources sont HORS SUJET ».
+LASER_AS_SOURCE_CUES = (
+    "laser platform", "laser source", "light source", "driver platform", "laser oscillator",
+    "fiber laser", "fibre laser", "thin-disk oscillator", "laser amplifier", "frequency comb",
+)
+
+
+def is_laser_the_source(text: str) -> bool:
+    """Vrai quand le texte porte sur la construction d'une SOURCE, sans procédé nommé.
+
+    Le second membre est ce qui rend la règle utilisable, exactement comme pour
+    is_laser_the_instrument : « Development of a modular femtosecond laser system for optical
+    fiber and surface micromachining » construit bien une machine, mais nomme son procédé --
+    c'est une machine de fabrication, elle reste. « Additive-manufactured monolithic femtosecond
+    laser platform » ne nomme rien d'autre que la source : elle sort.
+
+    Vérifié sur les 90 publications du corpus : rejette exactement les deux qui doivent l'être.
+    """
+    if not any(_contains_term(text, cue) for cue in LASER_AS_SOURCE_CUES):
+        return False
+    return not any(_match_all_labels(text, lexicon) for lexicon in (OPERATIONS, APPLICATION_ARCHITECTURES))
 
 
 def is_laser_the_instrument(text: str) -> bool:

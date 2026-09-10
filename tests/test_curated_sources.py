@@ -79,15 +79,28 @@ class CuratedSourcesTests(unittest.TestCase):
         self.assertEqual({"projects_added": 0, "project_sources_added": 0, "documents_added": 0, "axes_added": 0}, second)
 
     def test_conference_contributions_sharing_a_page_do_not_deduplicate_each_other(self):
-        # Trois contributions n'ont pas de DOI et sont sourcées sur la même page : sans
-        # fingerprint_source explicite, elles s'écraseraient l'une l'autre.
+        # Les contributions sans DOI sont toutes sourcées sur la même page du projet :
+        # l'empreinte se dériverait donc de cette URL commune et elles s'écraseraient l'une
+        # l'autre. Chacune doit porter un `fingerprint_source` propre, et se retrouver en base.
+        #
+        # Elles étaient trois jusqu'à l'audit du 10/09/2026, qui en a écarté deux faute de
+        # régime ultra-rapide établi ; le test se compte donc sur la liste plutôt que sur un
+        # nombre écrit en dur, pour rester vrai quelle que soit la longueur de la curation.
+        sans_doi = [d for d in curated_sources.CURATED_DOCUMENTS if not d.get("doi")]
+        self.assertTrue(sans_doi, "plus aucune contribution sans DOI : ce test ne teste plus rien")
+        self.assertEqual(
+            len(sans_doi),
+            len({d["fingerprint_source"] for d in sans_doi}),
+            "deux contributions partagent la même empreinte",
+        )
+
         curated_sources.restore_curated_sources()
         same_page = dbmod.scalar(
             self.tech_db,
             "SELECT COUNT(*) FROM documents WHERE source_url=?",
             (curated_sources.BILASURF_SITE_URL,),
         )
-        self.assertEqual(3, same_page)
+        self.assertEqual(len(sans_doi), same_page)
 
     def test_the_ultrashort_proof_is_stored_as_a_second_citation(self):
         # L'objectif CORDIS ne prouve pas le caractère ultra-rapide ; la page du projet si.
