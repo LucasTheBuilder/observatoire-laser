@@ -212,7 +212,7 @@ class CorpusDrivenAxesTests(unittest.TestCase):
     fabriqués : c'est ce qui rend ces tests capables de détecter une régression de lexique.
     """
 
-    AXES = ("Burst GHz/MHz", "Texturation de surface", "Bulk")
+    AXES = ("Burst GHz/MHz", "Bulk")
 
     # (titre réel, axe attendu) -- couvre les variantes d'écriture rencontrées : "MHz Burst",
     # "GHz-burst regimes", "laser bursts", "micro-welding" contre "microwelding".
@@ -221,7 +221,6 @@ class CorpusDrivenAxesTests(unittest.TestCase):
         ("Comparative study of bulk modifications in borosilicate glass induced by femtosecond laser in single pulse, MHz-, and GHz-burst regimes", "Burst GHz/MHz"),
         ("High-precision polishing of laser-engraved complex profiles using femtosecond laser bursts", "Burst GHz/MHz"),
         ("Enhancement of ultrashort laser pulses absorption in glass using single MHz burst", "Burst GHz/MHz"),
-        ("Monitoring of ultrashort pulse laser surface texturing using spectroscopy and deep learning model", "Texturation de surface"),
         ("Comparative study of bulk modifications in borosilicate glass induced by femtosecond laser in single pulse, MHz-, and GHz-burst regimes", "Bulk"),
         ("Study of bottom-up column formation in bulk silicon initiated at silicon-air and silicon-glass interfaces by ultrafast laser processing", "Bulk"),
     )
@@ -260,20 +259,36 @@ class CorpusDrivenAxesTests(unittest.TestCase):
                 self.assertIn(axis, labels)
 
     def test_every_new_axis_is_generic(self):
-        # C'est le garde-fou qui empêche ces axes de rouvrir le portail d'entrée : mesuré sur
-        # les 23 451 projets Horizon Europe, "Texturation de surface" seul ferait entrer 4
-        # projets sans aucun terme laser ultra-rapide. Les 21 publications visées passant
-        # toutes _laser_match, le classement en générique ne coûte aucun document.
+        # C'est le garde-fou qui empêche ces axes de rouvrir le portail d'entrée : "burst mode"
+        # est de l'anglais courant en télécom, "bulk silicon" en microélectronique. Les
+        # publications visées passant toutes _laser_match, le classement en générique ne coûte
+        # aucun document.
         from lexicon import _GENERIC_PROCESS_AXES
         for axis in self.AXES:
             with self.subTest(axis=axis):
                 self.assertIn(axis, _GENERIC_PROCESS_AXES)
 
+    def test_texturing_lives_only_in_operations(self):
+        """Même sort que "Soudage" : OPERATIONS["Texturation"] portait déjà "texturing" et
+        "surface structuring", donc l'axe de procédé écrit la veille était redondant à 90 %."""
+        from lexicon import OPERATIONS
+        self.assertNotIn("Texturation de surface", PROCESS_TECHNOLOGIES)
+        for title in (
+            "Monitoring of ultrashort pulse laser surface texturing using spectroscopy and deep learning model",
+            "Enabling in-situ monitoring of ultrashort pulse laser surface texturing",
+            "Surface smoothing and periodic microstructuring of additively manufactured scalmalloy",
+        ):
+            with self.subTest(title=title[:50]):
+                labels = {label for label, _ in _match_all_labels(title, OPERATIONS)}
+                self.assertIn("Texturation", labels)
+        # Et le vocabulaire absorbé n'ouvre plus aucune porte : OPERATIONS est hors is_on_topic,
+        # alors que cet axe seul faisait entrer 4 projets Horizon sans terme ultra-rapide.
+        self.assertFalse(is_on_topic("Laser-based surface texturing of parts for climate neutral manufacturing."))
+
     def test_new_axes_alone_never_make_content_on_topic(self):
         # Un texte industriel qui porte le vocabulaire mais aucun terme ultra-rapide : c'est
         # exactement ce qui avait laissé entrer RE4DY/iDriving/EEETHOS via "digital twin".
         hors_sujet = (
-            "Laser-based surface texturing of parts for climate neutral manufacturing.",
             "Characterisation of bulk silicon wafers for photovoltaic cell production.",
             "The receiver switches to burst mode during peak data transfer.",
         )

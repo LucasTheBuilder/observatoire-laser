@@ -110,9 +110,9 @@ class DocumentFamilyClassificationTests(unittest.TestCase):
             tech_db = _setup(tmp)
             with dbmod.connect(tech_db) as db:
                 upsert_document_technology_signal(
-                    db, "Chemical surface texturing of glass panels", "", "https://doi.org/10.1/b")
+                    db, "Chemical digital twin monitoring of glass panels", "", "https://doi.org/10.1/b")
             families = self._families(tech_db)
-            self.assertNotIn("Texturation de surface", families.get("process_technology", set()))
+            self.assertNotIn("Monitoring IA procédé", families.get("process_technology", set()))
             self.assertIn("Verre", families.get("material", set()))
 
 

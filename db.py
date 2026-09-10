@@ -580,6 +580,9 @@ _TECHNOLOGY_AXIS_ALIASES: dict[str, str] = {
     # emploi avec OPERATIONS["Soudage"], qui a absorbé ses termes, et les deux s'affichaient
     # côte à côte dans deux groupes de facettes voisins.
     "Soudage / assemblage de transparents": "Soudage",
+    # Même histoire, même lendemain : OPERATIONS["Texturation"] portait déjà "texturing" et
+    # "surface structuring", donc la redondance était quasi totale.
+    "Texturation de surface": "Texturation",
 }
 
 

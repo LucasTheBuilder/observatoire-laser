@@ -145,7 +145,14 @@ OPERATIONS: Lexicon = {
     "Micro-usinage": {"any_of": ("micromachining", "micro-machining", "micro machining")},
     "Microdécoupe": {"any_of": ("microcutting", "micro-cutting", "laser cutting", "microdécoupe", "découpe laser", "tube cutting")},
     "Microperçage": {"any_of": ("microdrilling", "micro-drilling", "laser drilling", "microperçage", "perçage laser")},
-    "Texturation": {"any_of": ("texturing", "surface texturing", "texturation", "surface structuring", "structuration")},
+    # A absorbé "Texturation de surface" le 10/09/2026, comme "Soudage" la veille : cet axe,
+    # écrit dans PROCESS_TECHNOLOGIES, faisait double emploi avec celui-ci. Seules les deux
+    # formes "microstructuring" manquaient ici -- "texturing" et "surface structuring" y étaient
+    # déjà, ce qui rendait la redondance quasi totale.
+    "Texturation": {"any_of": (
+        "texturing", "surface texturing", "texturation", "surface structuring", "structuration",
+        "microstructuring", "micro-structuring",
+    )},
     # Les termes de PROPRIÉTÉ (superhydrophobe, mouillabilité, biointerface...) ont d'abord été
     # écrits comme un axe séparé dans PROCESS_TECHNOLOGIES le 09/09/2026, avant de constater que
     # ce libellé existait déjà ici. Fusionnés plutôt que laissés en double : un même libellé dans
@@ -219,7 +226,6 @@ PROCESS_TECHNOLOGIES: Lexicon = {
     # l'observatoire s'il était utilisé SEUL comme filtre de pertinence, sans terme laser
     # ultra-rapide. C'est ce qui justifie leur présence dans _GENERIC_PROCESS_AXES plus bas.
     "Burst GHz/MHz": {"any_of": ("ghz burst", "mhz burst", "burst mode", "burst regime", "burst regimes", "laser burst", "laser bursts", "single burst", "intra-burst")},
-    "Texturation de surface": {"any_of": ("surface texturing", "surface structuring", "microstructuring", "micro-structuring")},
     # "in-volume" est délibérément absent : _term_pattern autorise l'espace comme séparateur,
     # donc le terme matcherait "in volume production" -- une mention de maturité industrielle,
     # pas d'usinage en volume.
@@ -532,7 +538,7 @@ DOCUMENT_LEXICONS: dict[str, Lexicon] = {
 
 _GENERIC_PROCESS_AXES = frozenset({
     "Monitoring IA procédé", "Beam shaping", "Multi-beam / parallélisation", "Fabrication roll-to-roll (batteries)",
-    "Burst GHz/MHz", "Texturation de surface", "Bulk",
+    "Burst GHz/MHz", "Bulk",
 })
 
 def is_on_topic(text: str) -> bool:
