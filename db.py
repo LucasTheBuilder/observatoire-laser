@@ -2030,6 +2030,34 @@ def _init_tech_db() -> None:
                 last_seen_at TEXT
             );
             CREATE UNIQUE INDEX IF NOT EXISTS technology_signals_fact_key_uq ON technology_signals(fact_key);
+            -- Un projet européen et sa fiche d'identité, une ligne par projet. Séparé de
+            -- technology_signals, qui porte une ligne par (axe, projet) : y mettre le montant
+            -- ou la date l'aurait répété autant de fois que le projet a d'axes, et rendu tout
+            -- SUM() faux. Cette table est ce qui permet de compter des projets, des euros et
+            -- des années -- ce que la page ne savait pas faire avant le 10/09/2026.
+            --
+            -- Le contenu vient des dumps CORDIS (titre, dates, coordinateur, montant), jamais
+            -- d'un document intermédiaire : seule la classification tier/category est humaine.
+            CREATE TABLE IF NOT EXISTS eu_projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL UNIQUE,
+                acronym TEXT NOT NULL,
+                title TEXT NOT NULL,
+                programme TEXT,
+                started_at TEXT,
+                ended_at TEXT,
+                coordinator TEXT,
+                coordinator_country TEXT,
+                participants INTEGER,
+                ec_contribution_eur REAL,
+                tier TEXT,
+                category TEXT,
+                source_url TEXT NOT NULL,
+                curated_by TEXT,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS eu_projects_tier_idx ON eu_projects(tier, category);
             CREATE TABLE IF NOT EXISTS technology_signal_sources (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 signal_id INTEGER NOT NULL REFERENCES technology_signals(id) ON DELETE CASCADE,
@@ -2534,6 +2562,41 @@ def upsert_document(
         db.execute("UPDATE documents SET actor_name=? WHERE fingerprint=?", (actor_name, fingerprint))
         return 0, 1
     return 0, 0
+
+
+def upsert_eu_project(db: sqlite3.Connection, *, project_id: str, **fields: Any) -> int:
+    """Écrit la fiche d'un projet européen, ou la rafraîchit si elle existe déjà.
+
+    Renvoie 1 si la ligne est neuve, 0 sinon. Les champs absents de l'appel ne sont jamais
+    écrasés par NULL : un import ultérieur qui n'apporte qu'une partie des métadonnées
+    (typiquement le montant, publié plus tard par CORDIS) complète la fiche au lieu de la
+    vider.
+    """
+    stamp = utc_now()
+    allowed = {
+        "acronym", "title", "programme", "started_at", "ended_at", "coordinator",
+        "coordinator_country", "participants", "ec_contribution_eur", "tier", "category",
+        "source_url", "curated_by",
+    }
+    payload = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    row = db.execute("SELECT id FROM eu_projects WHERE project_id=?", (project_id,)).fetchone()
+    if row:
+        if payload:
+            assignments = ",".join(f"{k}=?" for k in payload)
+            db.execute(
+                f"UPDATE eu_projects SET {assignments},last_seen_at=? WHERE id=?",
+                (*payload.values(), stamp, row["id"]),
+            )
+        else:
+            db.execute("UPDATE eu_projects SET last_seen_at=? WHERE id=?", (stamp, row["id"]))
+        return 0
+    columns = ["project_id", *payload, "created_at", "last_seen_at"]
+    placeholders = ",".join("?" * len(columns))
+    db.execute(
+        f"INSERT INTO eu_projects({','.join(columns)}) VALUES({placeholders})",
+        (project_id, *payload.values(), stamp, stamp),
+    )
+    return 1
 
 
 def upsert_technology_signal(

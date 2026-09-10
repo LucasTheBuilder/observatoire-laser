@@ -103,7 +103,7 @@ class CuratedSourcesTests(unittest.TestCase):
         signals_before = dbmod.scalar(self.tech_db, "SELECT COUNT(*) FROM technology_signals")
 
         documents_report = prune.prune_documents()
-        signals_report = prune.prune_technology_signals(cache_path=Path("/inexistant/horizon.zip"))
+        signals_report = prune.prune_technology_signals(caches=[])
 
         self.assertEqual(0, documents_report["documents_removed"])
         self.assertEqual(0, signals_report["signals_removed"])

@@ -1072,6 +1072,79 @@ function tcExclusiveLabels(corpus, dimension, kind) {
     .map(([label, e]) => `${label} (${e[voulu]})`);
 }
 
+// --- Lecture du programme européen ------------------------------------------------------
+//
+// Ces trois paragraphes ne sont possibles que depuis l'import de l'audit (10/09/2026) : la
+// table eu_projects porte tier, catégorie, montant, date de démarrage et pays coordinateur,
+// que technology_signals ne pouvait pas porter -- une ligne par (axe, projet) aurait multiplié
+// chaque somme par le nombre d'axes du projet.
+//
+// Tout est recalculé, y compris les superlatifs. Une phrase qui nomme "l'année la plus active"
+// doit désigner celle que les données désignent aujourd'hui, pas celle qui l'était le jour où
+// on a écrit la page.
+function tcTopEntries(rows, keyOf, limit = 3) {
+  const counts = new Map();
+  for (const row of rows) {
+    const key = keyOf(row);
+    if (key) counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]), "fr")).slice(0, limit);
+}
+
+function tcProgrammeReading(corpus) {
+  const fiches = corpus.filter(row => row.project).map(row => row.project);
+  if (!fiches.length) return "";
+  const euros = fiches.reduce((total, p) => total + (p.ec_eur || 0), 0);
+  const parCategorie = new Map();
+  for (const p of fiches) {
+    if (!p.category) continue;
+    const entry = parCategorie.get(p.category) || {n: 0, eur: 0};
+    entry.n += 1;
+    entry.eur += p.ec_eur || 0;
+    parCategorie.set(p.category, entry);
+  }
+  const classees = [...parCategorie.entries()].sort((a, b) => b[1].eur - a[1].eur);
+  const tete = classees.slice(0, 3)
+    .map(([nom, e]) => `${esc(nom)} (${e.n} projets, ${(e.eur / 1e6).toFixed(1)} M€)`)
+    .join(" · ");
+  return `<p><span class="ex-reading-take">Programme européen —</span> ${fiches.length} projets financés,
+    ${(euros / 1e6).toFixed(0)} M€ de contribution CE. Les trois familles les mieux dotées :
+    ${tete}.</p>`;
+}
+
+function tcLeadersReading(corpus) {
+  const fiches = corpus.filter(row => row.project).map(row => row.project);
+  const publications = corpus.filter(row => row.kind === "pub");
+  const morceaux = [];
+
+  const annees = tcTopEntries(fiches, p => (p.started_at || "").slice(0, 4), 1);
+  if (annees.length) {
+    morceaux.push(`l’année <b>${esc(annees[0][0])}</b> a ouvert le plus de projets (${annees[0][1]})`);
+  }
+  const pays = tcTopEntries(fiches, p => p.country, 2);
+  if (pays.length) {
+    morceaux.push(`les coordinations se concentrent sur ${pays.map(([c, n]) => `<b>${esc(c)}</b> (${n})`).join(" et ")}`);
+  }
+  const operations = tcTopEntries(publications, row => (row.families?.operation || [])[0], 1);
+  if (operations.length) {
+    morceaux.push(`l’opération la plus publiée est <b>${esc(operations[0][0])}</b> (${operations[0][1]} publications)`);
+  }
+  if (!morceaux.length) return "";
+
+  // L'acteur "qui publie le plus" est délibérément assorti de son taux d'attribution : sur ce
+  // corpus la majorité des publications sortent de Crossref, qui ne dépose presque jamais
+  // d'affiliation. Un podium sans ce chiffre décrirait qui OpenAlex a su rattacher, pas qui
+  // publie -- et se lirait comme un classement.
+  const attribuees = publications.filter(row => row.actors.length);
+  const acteurs = tcTopEntries(attribuees, row => row.actors[0], 1);
+  const reserve = acteurs.length
+    ? ` Côté acteurs, ${esc(acteurs[0][0])} arrive en tête (${acteurs[0][1]} publications), mais sur les
+       ${attribuees.length} publications seulement dont l’affiliation est connue, sur ${publications.length} —
+       le classement décrit ce que la collecte a su rattacher, pas la production réelle.`
+    : "";
+  return `<p><span class="ex-reading-take">Où se concentre l’effort —</span> ${morceaux.join(", ")}.${reserve}</p>`;
+}
+
 function tcCorpusReading(corpus) {
   const procede = tcOriginSplit(corpus, "process_technology");
   const capacite = tcOriginSplit(corpus, "machine_capability");
@@ -1091,7 +1164,7 @@ function tcCorpusReading(corpus) {
     ...tcExclusiveLabels(corpus, "machine_capability", "pub"),
   ];
 
-  const lignes = [`<p>${chiffres}</p>`];
+  const lignes = [`<p>${chiffres}</p>`, tcProgrammeReading(corpus), tcLeadersReading(corpus)].filter(Boolean);
   const napparait = labels => (labels.length > 1 ? "n’apparaissent" : "n’apparaît");
   if (financeNonPublie.length) {
     lignes.push(`<p><span class="ex-reading-take">Financé, pas publié —</span> ${esc(financeNonPublie.join(", "))}
