@@ -59,6 +59,22 @@ OPENALEX_LOOKBACK_DAYS_DEFAULT = 365
 OPENALEX_WORKS_PER_PAGE = 100
 OPENALEX_WORKS_PER_ACTOR = 600
 
+# Vocabulaire laser envoyé À OPENALEX, pour aller chercher l'historique profond d'un institut
+# sans se faire tronquer par son volume. Mesuré le 13/09/2026 sur dix ans et vingt institutions :
+# 10 806 travaux tous sujets confondus, dont 7 instituts au-delà du plafond de 600 (Fraunhofer
+# IPT 1 219, JOANNEUM 1 826, Tekniker 1 094) -- et 653 seulement avec ce filtre, tous atteignables.
+# Sans lui, « tout savoir » sur un institut généraliste est impossible : ses publications laser
+# sont noyées dans sa production, et la coupe tombe avant elles.
+#
+# Volontairement LARGE, et c'est sans risque : la sur-inclusion est rattrapée en local par
+# _work_is_on_topic(), qui reste le seul juge de la pertinence. C'est l'inverse qui coûterait --
+# un terme oublié ici est un travail jamais vu.
+OPENALEX_TOPIC_SEARCH = (
+    'femtosecond OR ultrafast OR ultrashort OR "ultra-short pulse" OR "fs laser" '
+    'OR ultrakurzpulslaser OR "laser ablation" OR "laser micromachining" '
+    'OR "laser texturing" OR "laser structuring" OR "laser welding" OR "laser drilling"'
+)
+
 # Ce qui compte comme une production de recherche. Le pendant de
 # scrapers.CROSSREF_PUBLICATION_TYPES, qui existait depuis l'audit du 09/09/2026 -- ce chemin-ci
 # n'avait aucun filtre de type, et la collecte du 10/09 l'a fait voir : un erratum de Tekniker,
@@ -173,6 +189,42 @@ def _fetch_recent_works(client: httpx.Client, institution_id: str, from_date: st
                 params={
                     "filter": f"authorships.institutions.id:{institution_id},from_publication_date:{from_date}",
                     "sort": "publication_date:desc",
+                    "per-page": OPENALEX_WORKS_PER_PAGE,
+                    "cursor": cursor,
+                    "select": "id,doi,title,type,publication_date,primary_location,authorships",
+                    **_mailto_params(),
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            break
+        works += payload.get("results", [])
+        cursor = (payload.get("meta") or {}).get("next_cursor")
+    return works[:OPENALEX_WORKS_PER_ACTOR]
+
+
+def _fetch_topic_works(client: httpx.Client, institution_id: str, from_date: str) -> list[dict]:
+    """Les travaux LASER de cette institution, demandés comme tels à OpenAlex.
+
+    Jumelle de _fetch_recent_works, et les deux sont nécessaires pour des raisons opposées :
+    celle-ci trie par pertinence de sujet et atteint donc l'historique profond d'un institut
+    généraliste, mais dépend du vocabulaire envoyé au serveur ; celle-là ne dépend d'aucun
+    vocabulaire mais coupe après OPENALEX_WORKS_PER_ACTOR travaux tous sujets confondus. Leur
+    union ne perd ni l'un ni l'autre, pour une requête de plus par institution.
+    """
+    works: list[dict] = []
+    cursor: str | None = "*"
+    while cursor and len(works) < OPENALEX_WORKS_PER_ACTOR:
+        try:
+            response = client.get(
+                f"{OPENALEX_API}/works",
+                params={
+                    "filter": (
+                        f"authorships.institutions.id:{institution_id},"
+                        f"from_publication_date:{from_date},"
+                        f"title_and_abstract.search:{OPENALEX_TOPIC_SEARCH}"
+                    ),
                     "per-page": OPENALEX_WORKS_PER_PAGE,
                     "cursor": cursor,
                     "select": "id,doi,title,type,publication_date,primary_location,authorships",
@@ -384,7 +436,16 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                 matched_actors += 1
                 institution_id = str(institution["id"]).rsplit("/", 1)[-1]
                 actor_by_institution[institution_id] = actor["name"]
-                works = _fetch_recent_works(client, institution_id, from_date)
+                # Deux lectures, unies par l'identifiant du travail : la récente tous sujets
+                # (aucune dépendance à un vocabulaire) et celle par sujet (aucune dépendance au
+                # volume de l'institut). Voir _fetch_topic_works pour ce que chacune rattrape.
+                works = list({
+                    str(work.get("id") or index): work
+                    for index, work in enumerate([
+                        *_fetch_recent_works(client, institution_id, from_date),
+                        *_fetch_topic_works(client, institution_id, from_date),
+                    ])
+                }.values())
                 with connect(TECH_DB) as db, connect(ACTORS_DB) as adb:
                     for work in works:
                         item = _parse_work(work)
