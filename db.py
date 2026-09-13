@@ -125,6 +125,17 @@ ACTORS = [
     # photonicfab : picoseconde revendiquée, pas femtoseconde -- périmètre USP, comme laserKRAFTwerk.
     ("photonicfab", "Allemagne", "Laser-Lohnfertigung en micro-usinage (nano/picoseconde)", 0, "https://photonicfab.de"),
     ("Scitech Precision", "Royaume-Uni", "Micro-usinage laser femtoseconde/excimer & micro-cibles pour laser de puissance", 0, "https://scitechprecision.com"),
+    # Troisième passe (13/09/2026) : dépouillement des annuaires nationaux (Swissphotonics, AILU,
+    # Club Laser et Procédés, OptecNet, Photonics Austria) et balayage en onze langues. Le CLP et
+    # OptecNet n'ont rien donné -- les prestataires français y sont en YAG UV ou fibre, et le seul
+    # job-shop allemand de la liste (Micreon) était déjà suivi. Les quatre entrées ci-dessous
+    # viennent de Swissphotonics et des recherches en néerlandais et en danois.
+    ("Sabato Lasertec", "Suisse", "Micro-usinage laser nano/pico/femtoseconde de pièces de précision", 0, "https://sabatolasertec.ch"),
+    ("Laser Technology Janssen", "Pays-Bas", "Sous-traitance de micro-usinage laser UKP femtoseconde", 0, "https://lasertechnologyjanssen.com"),
+    # LouwersHanique : gravure sélective (SLE) femtoseconde sur verre -- même procédé que
+    # FEMTOprint et LightFab, donc concurrent frontal et pas simple voisin.
+    ("LouwersHanique", "Pays-Bas", "Microfabrication du verre par gravure sélective femtoseconde (SLE)", 0, "https://www.louwershanique.com"),
+    ("Teknologisk Institut", "Danemark", "Centre technologique - micro-usinage laser femtoseconde & excimer", 0, "https://www.teknologisk.dk"),
 ]
 
 # Quelques URLs de pages connues, injectées d'office dans actor_sources au démarrage (avant
