@@ -127,6 +127,118 @@ class FindInstitutionTests(unittest.TestCase):
         with FakeClient() as client:
             self.assertIsNone(_find_institution(client, "Example", ""))
 
+    def test_falls_back_to_the_domain_stem_when_the_display_name_finds_nothing(self):
+        """Cas réel (10/09/2026) : « Sirris Laser Innovation Lab » ne renvoie RIEN sur
+        /institutions, alors qu'OpenAlex connaît Sirris et ses 997 travaux. Le nom stocké est
+        un nom d'usage, pas un nom d'institution."""
+        interrogations: list[str] = []
+
+        def institutions(params):
+            interrogations.append(params["search"])
+            if params["search"] != "sirris":
+                return {"results": []}
+            return {"results": [
+                {"id": "https://openalex.org/I3", "display_name": "Sirris", "homepage_url": "https://www.sirris.be/"},
+            ]}
+
+        FakeClient.handlers = {"/institutions": institutions}
+        with FakeClient() as client:
+            result = _find_institution(client, "Sirris Laser Innovation Lab", "https://www.sirris.be/")
+        self.assertIsNotNone(result)
+        self.assertEqual("https://openalex.org/I3", result["id"])
+        # Le nom complet reste essayé EN PREMIER : élargir n'est pas remplacer.
+        self.assertEqual("Sirris Laser Innovation Lab", interrogations[0])
+
+    def test_widening_the_search_never_widens_the_proof(self):
+        """La formulation change, la preuve d'identité non : une fiche au mauvais domaine
+        reste refusée, quel que soit le terme qui l'a trouvée."""
+        FakeClient.handlers = {
+            "/institutions": lambda params: {"results": [
+                {"id": "https://openalex.org/I9", "display_name": "Femtika UAB", "homepage_url": "https://vu.lt/"},
+            ]}
+        }
+        with FakeClient() as client:
+            self.assertIsNone(_find_institution(client, "Femtika", "https://femtika.com"))
+
+    def test_two_country_entities_sharing_a_domain_stay_ambiguous(self):
+        """TRUMPF (Germany) et TRUMPF (United Kingdom) publient tous deux sous trumpf.com.
+        Élargir la recherche ne doit pas donner l'occasion d'en choisir un au hasard."""
+        FakeClient.handlers = {
+            "/institutions": lambda params: {"results": [
+                {"id": "https://openalex.org/I4", "display_name": "TRUMPF (Germany)", "homepage_url": "https://www.trumpf.com/"},
+                {"id": "https://openalex.org/I5", "display_name": "TRUMPF (United Kingdom)", "homepage_url": "https://www.trumpf.com/en_GB/"},
+            ]}
+        }
+        with FakeClient() as client:
+            self.assertIsNone(_find_institution(client, "TRUMPF", "https://www.trumpf.com"))
+
+
+class SearchTermsTests(unittest.TestCase):
+    def test_full_name_first_then_domain_stem(self):
+        terms = openalex._search_terms("AIMEN Technology Centre", "https://www.aimen.es")
+        self.assertEqual("AIMEN Technology Centre", terms[0])
+        self.assertIn("aimen", terms)
+
+    def test_no_duplicate_terms(self):
+        # « Sirris » comme nom et « sirris » comme radical ne font qu'une interrogation.
+        terms = openalex._search_terms("Sirris", "https://www.sirris.be/")
+        self.assertEqual(len(terms), len({term.casefold() for term in terms}))
+
+    def test_punctuation_is_not_a_search_term(self):
+        terms = openalex._search_terms("Manufacturing Technology Centre (MTC)", "https://www.the-mtc.org/")
+        self.assertIn("Manufacturing Technology", terms)
+        self.assertNotIn("(", "".join(terms[1:]))
+
+
+class FetchRecentWorksTests(unittest.TestCase):
+    """Le plafond de 25 travaux les plus récents, tous sujets confondus, rendait les gros
+    instituts invisibles : mesuré le 10/09/2026, aucune des 3 publications laser de CEIT ni
+    des 3 de Fraunhofer ILT n'était dans les 25 premières de leur année."""
+
+    def _pages(self, total: int, page_size: int = openalex.OPENALEX_WORKS_PER_PAGE):
+        pages = [
+            [{"id": f"W{i}"} for i in range(start, min(start + page_size, total))]
+            for start in range(0, total, page_size)
+        ]
+        state = {"page": 0}
+
+        def works(params):
+            index = state["page"]
+            state["page"] += 1
+            if index >= len(pages):
+                return {"results": [], "meta": {"next_cursor": None}}
+            cursor = f"c{index + 1}" if index + 1 < len(pages) else None
+            return {"results": pages[index], "meta": {"next_cursor": cursor}}
+
+        return works
+
+    def test_pagination_reads_past_the_first_page(self):
+        FakeClient.handlers = {"/works": self._pages(176)}
+        with FakeClient() as client:
+            works = openalex._fetch_recent_works(client, "I1", "2025-01-01")
+        self.assertEqual(176, len(works))
+
+    def test_a_safety_cap_still_bounds_an_outlier(self):
+        FakeClient.handlers = {"/works": self._pages(5000)}
+        with FakeClient() as client:
+            works = openalex._fetch_recent_works(client, "I1", "2025-01-01")
+        self.assertEqual(openalex.OPENALEX_WORKS_PER_ACTOR, len(works))
+
+    def test_a_failing_page_keeps_what_was_already_read(self):
+        """Perdre la suite vaut mieux que perdre le début : l'ancienne version renvoyait [] sur
+        la moindre erreur, ce qui effaçait aussi les pages déjà lues."""
+        state = {"calls": 0}
+
+        def works(params):
+            state["calls"] += 1
+            if state["calls"] > 1:
+                raise RuntimeError("502 depuis OpenAlex")
+            return {"results": [{"id": "W1"}], "meta": {"next_cursor": "c1"}}
+
+        FakeClient.handlers = {"/works": works}
+        with FakeClient() as client:
+            self.assertEqual(1, len(openalex._fetch_recent_works(client, "I1", "2025-01-01")))
+
 
 class ParseWorkTests(unittest.TestCase):
     def test_strips_doi_prefix_and_uses_landing_page(self):
@@ -257,7 +369,7 @@ class CollectOpenAlexTests(unittest.TestCase):
 
                 def works_handler(params):
                     return {"results": [
-                        {"id": "https://openalex.org/W1", "doi": "https://doi.org/10.1/a", "title": "Femtosecond laser micromachining of fused silica", "publication_date": "2026-01-01",
+                        {"id": "https://openalex.org/W1", "doi": "https://doi.org/10.1/a", "title": "Femtosecond laser micromachining of fused silica", "type": "article", "publication_date": "2026-01-01",
                          "primary_location": {"landing_page_url": "https://doi.org/10.1/a"},
                          # §4.D audit veille (Lot 3 §3.2): a co-authoring institution on an
                          # on-topic work must surface as an actor_candidates row.
@@ -269,9 +381,16 @@ class CollectOpenAlexTests(unittest.TestCase):
                         # counted and skipped, not stored (audit v8 §2.1). Its co-institution
                         # must NOT surface as a candidate either -- off-topic works are skipped
                         # before candidate extraction runs.
-                        {"id": "https://openalex.org/W2", "doi": None, "title": "Effects of graded dietary levels of microalgae on poultry growth", "publication_date": "2026-02-01",
+                        {"id": "https://openalex.org/W2", "doi": None, "title": "Effects of graded dietary levels of microalgae on poultry growth", "type": "article", "publication_date": "2026-02-01",
                          "primary_location": {},
                          "authorships": [{"institutions": [{"id": "https://openalex.org/I8", "display_name": "Off Topic Institute"}]}]},
+                        # Lexicalement irréprochable, et pourtant pas une publication : un
+                        # erratum de Tekniker, un dépôt de données d'IREPA et les
+                        # « Supplementary Data » d'un article déjà en base sont entrés ainsi le
+                        # 10/09/2026, la dernière en doublon de son propre article.
+                        {"id": "https://openalex.org/W3", "doi": "https://doi.org/10.1/c", "title": "Supplementary Data for Paper \"Femtosecond laser drilling of glass\"", "type": "supplementary-materials", "publication_date": "2026-03-01",
+                         "primary_location": {"landing_page_url": "https://doi.org/10.1/c"},
+                         "authorships": [{"institutions": [{"id": "https://openalex.org/I1", "display_name": "ALPhANOV"}]}]},
                     ]}
 
                 FakeClient.handlers = {"/institutions": institutions_handler, "/works": works_handler}
@@ -280,7 +399,8 @@ class CollectOpenAlexTests(unittest.TestCase):
 
                 self.assertEqual(1, result["actors_matched"])
                 self.assertEqual(1, result["documents_added"])
-                self.assertEqual(1, result["documents_off_topic"])
+                # Le hors-sujet et le mauvais type se comptent ensemble : deux écartés.
+                self.assertEqual(2, result["documents_off_topic"])
                 self.assertEqual(1, result["actor_candidates_added"])
                 self.assertEqual(0, result["errors"])
 

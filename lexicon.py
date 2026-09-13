@@ -628,6 +628,15 @@ _GENERIC_PROCESS_AXES = frozenset({
     # dont une annonçant explicitement du "continuous-wave polishing". Le régime retenu étant
     # femto + ultra-rapide, l'axe ne peut plus admettre un contenu à lui seul.
     "Burst GHz/MHz", "Bulk", "DLIP", "Interaction laser-matière",
+    # « Haute puissance / hauts taux » rejoint la liste le 10/09/2026, et c'est la collecte qui
+    # l'a démontré : son vocabulaire ("high average power", "high repetition rate") décrit
+    # d'abord une SOURCE, et comme l'axe n'était pas générique il ouvrait is_on_topic à lui
+    # seul. Trois publications d'Amplitude sont entrées par cette porte -- un amplificateur
+    # Yb, un module Nd:verre pour la fusion, le pétawatt d'ELI ALPS -- aucune ne portant de
+    # terme femto ni d'autre axe. Mesuré : 13 projets Horizon portent cet axe, 5 n'entraient
+    # que par lui ; côté corpus, il ne fait perdre aucune publication, celles qui parlent de
+    # cadence pour un procédé nomment aussi le procédé.
+    "Haute puissance / hauts taux",
 })
 
 def is_on_topic(text: str) -> bool:
@@ -665,6 +674,14 @@ LASER_AS_INSTRUMENT_CUES = (
     "transient absorption spectroscopy", "transient absorption", "pump-probe spectroscopy",
     "pump probe spectroscopy", "time-resolved photoluminescence", "ultrafast spectroscopy",
     "femtosecond spectroscopy", "two-photon absorption spectroscopy",
+    # Ajouts du 10/09/2026, mesurés sur une reconnaissance OpenAlex des 65 acteurs suivis :
+    # l'imagerie ultra-rapide est l'autre grande famille d'instruments, et elle passait
+    # entièrement à travers. « Advanced evaluation of single-shot ultrafast imaging
+    # interferometry for increased resolution » (Fraunhofer IWS) avait été retirée à la main
+    # le matin même et serait revenue à la collecte suivante. Sans danger pour les travaux
+    # de diagnostic DE procédé -- « Pump-probe shadography of glass drilling » nomme le
+    # perçage, la seconde moitié de la règle le garde.
+    "imaging interferometry", "interferometry", "ultrafast imaging", "single-shot imaging",
 )
 
 
@@ -674,6 +691,27 @@ LASER_AS_INSTRUMENT_CUES = (
 LASER_AS_SOURCE_CUES = (
     "laser platform", "laser source", "light source", "driver platform", "laser oscillator",
     "fiber laser", "fibre laser", "thin-disk oscillator", "laser amplifier", "frequency comb",
+    # Ajouts du 10/09/2026. La première liste ne connaissait que le mot « laser » accolé à un
+    # type de source ; elle laissait donc passer tout ce qui décrit une source par sa
+    # PERFORMANCE ou son ARCHITECTURE INTERNE -- « energy scalable CPA front-end platform »,
+    # « Power-scaled femtosecond lasers for industrial productivity », « kW femtosecond laser
+    # with beam steering functionality ». Trois annonces de source d'ALPHANOV et Amplitude,
+    # trouvées par la reconnaissance OpenAlex du 10/09/2026.
+    "cpa", "front-end", "front end", "oscillator", "beam steering",
+    "power-scaled", "power scaling", "power scalable", "energy scalable", "energy-scalable",
+    # L'optique de la source, même raisonnement : un empilement diélectrique pour laser
+    # ultra-rapide est un composant, pas un procédé (« Physics-Informed Inverse Design of
+    # Ultrafast Coatings », LZH). Volontairement précis : « coating » seul ferait sortir les
+    # cinq publications Sirris de texturation de revêtements nanocellulose et bois.
+    "optical coating", "optical coatings", "dielectric coating", "dielectric coatings",
+    "ultrafast coating", "ultrafast coatings",
+    # Deuxième passe, le soir même : la collecte a ramené huit annonces de source de plus, et
+    # cinq sont passées à travers la liste ci-dessus pour une raison bête -- _term_pattern pose
+    # une frontière de mot, donc « oscillator » ne matche PAS « oscillators ». Le piège est
+    # connu et il a encore mordu ; tout terme de source s'écrit donc aux deux nombres.
+    "oscillators", "amplifier", "amplifiers", "parametric oscillator", "parametric oscillators",
+    "mopa", "multi-pass cell", "multipass cell", "petawatt", "peak power",
+    "thin film coating", "thin film coatings", "mirror", "mirrors",
 )
 
 
@@ -686,7 +724,14 @@ def is_laser_the_source(text: str) -> bool:
     c'est une machine de fabrication, elle reste. « Additive-manufactured monolithic femtosecond
     laser platform » ne nomme rien d'autre que la source : elle sort.
 
-    Vérifié sur les 90 publications du corpus : rejette exactement les deux qui doivent l'être.
+    « beam steering » mérite un mot : c'est ce qui fait sortir « Ultrafast solid-state laser
+    beam steering system for productivity increase in PBF-LB/M of 316L » (LZH), où « ultrafast »
+    qualifie le SCANNER et non les impulsions, et où le procédé est de la fusion sur lit de
+    poudre. Un vrai travail de procédé qui emploie du beam steering nomme son opération et
+    reste -- c'est encore la seconde moitié de la règle qui tranche, pas une exception listée.
+
+    Mesuré le 10/09/2026 sur les 79 publications en base et les 32 candidates d'une
+    reconnaissance OpenAlex : rejette les 7 titres de source visés, aucun autre.
     """
     if not any(_contains_term(text, cue) for cue in LASER_AS_SOURCE_CUES):
         return False
@@ -709,9 +754,12 @@ def is_laser_the_instrument(text: str) -> bool:
     électronique attoseconde, physique ultra-rapide des pérovskites, simulations de matière
     quantique, transfert de proton dans les protéines). La règle de périmètre qui le justifie
     est explicite : la veille suit les DÉVELOPPEMENTS de la technologie laser ultra-rapide,
-    pas les travaux qui s'en servent comme d'un instrument pour observer autre chose. Un
-    projet de source ultra-rapide à haute cadence reste donc dans le sujet, une étude de
-    photocatalyse sondée au femtoseconde n'y est pas.
+    pas les travaux qui s'en servent comme d'un instrument pour observer autre chose. Une étude
+    de photocatalyse sondée au femtoseconde n'y est donc pas.
+
+    Ce docstring disait aussi, jusqu'au 10/09/2026, qu'« un projet de source ultra-rapide à
+    haute cadence reste dans le sujet ». Ce n'est plus vrai : le périmètre tranché ce jour-là
+    met les travaux de source hors sujet, et c'est is_laser_the_source() qui s'en charge.
     """
     if not any(_contains_term(text, cue) for cue in LASER_AS_INSTRUMENT_CUES):
         return False

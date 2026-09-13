@@ -30,6 +30,7 @@ scrapers.scrape_technology() le fait déjà pour Crossref -- voir audit v8 §2.1
 from __future__ import annotations
 
 import os
+import re
 from datetime import date, timedelta
 from urllib.parse import urlparse
 
@@ -44,7 +45,34 @@ OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "").strip()
 OPENALEX_API = "https://api.openalex.org"
 
 OPENALEX_LOOKBACK_DAYS_DEFAULT = 365
-OPENALEX_WORKS_PER_ACTOR = 25
+# Taille de page, plus un plafond de sécurité -- ce n'était qu'un plafond de 25 jusqu'au
+# 10/09/2026, et c'est ce qui rendait les gros instituts invisibles. _fetch_recent_works trie
+# par DATE sur toute leur production, tous sujets confondus, puis coupait : mesuré sur 365
+# jours, CEIT publie 119 travaux dont 3 sur le laser, et AUCUN des 3 n'était dans les 25 plus
+# récents ; Fraunhofer ILT 95 dont 3, aucun ; IWS 4 dont 1 seul visible ; LZH 4 dont 2. Onze
+# publications laser sur 35 perdues par le seul effet de la coupe.
+#
+# 100 aurait suffi sur ces mesures-là, mais c'est un coup de chance : Fraunhofer IPT publie
+# 176 travaux par an, et une publication laser en 150e position serait manquée pareil. La
+# lecture se pagine donc jusqu'au plafond de sécurité, qui ne sert qu'à borner un institut
+# hors norme.
+OPENALEX_WORKS_PER_PAGE = 100
+OPENALEX_WORKS_PER_ACTOR = 600
+
+# Ce qui compte comme une production de recherche. Le pendant de
+# scrapers.CROSSREF_PUBLICATION_TYPES, qui existait depuis l'audit du 09/09/2026 -- ce chemin-ci
+# n'avait aucun filtre de type, et la collecte du 10/09 l'a fait voir : un erratum de Tekniker,
+# un dépôt de données d'IREPA et les « Supplementary Data » d'un article Fraunhofer ILT déjà
+# présent sont entrés comme des publications à part entière, la dernière en doublon de son
+# propre article.
+#
+# Liste d'autorisation et non d'exclusion : un type inconnu ne doit pas entrer par défaut. Elle
+# est plus large que celle de Crossref parce qu'OpenAlex nomme les actes de conférence à part,
+# et qu'ils portent 45 publications du corpus -- les écarter viderait le fond industriel
+# (Amplitude, Oxford Lasers et IREPA publient surtout en conférence).
+OPENALEX_PUBLICATION_TYPES = frozenset({
+    "article", "conference-paper", "conference-abstract", "preprint", "review", "book-chapter",
+})
 # §4.D/§10.8 audit veille (30/08/2026, Lot 3 §3.2/§3.3) : recherche globale, indépendante de
 # tout acteur suivi -- complète le passage actor-scoped ci-dessous (qui ne trouve que les
 # co-institutions des travaux d'un acteur DÉJÀ tracké, donc jamais une institution 100% hors du
@@ -70,44 +98,94 @@ def _mailto_params() -> dict[str, str]:
     return params
 
 
+def _search_terms(actor_name: str, official_url: str) -> list[str]:
+    """Les façons de NOMMER l'institution, de la plus fidèle à la plus large.
+
+    `actors.name` est un nom d'usage choisi pour la lecture humaine, pas un nom d'institution :
+    « AIMEN Technology Centre », « Sirris Laser Innovation Lab », « JOANNEUM RESEARCH MATERIALS »
+    ne renvoient RIEN sur /institutions, alors qu'OpenAlex connaît parfaitement Sirris (997
+    travaux), Joanneum Research (4 404) et l'Asociación de Investigación Metalúrgica (928).
+    Le radical du domaine (`sirris`, `joanneum`, `aimen`) les retrouve tous les trois.
+
+    Ce qui ne change pas : l'égalité de domaine reste la SEULE preuve d'identité acceptée, et
+    l'ambiguïté reste un refus. Élargir la recherche ne relâche donc aucune garde -- ça donne
+    seulement plus d'occasions de tomber sur la bonne fiche. Mesuré le 10/09/2026 sur les 65
+    acteurs actifs : 16 résolus avant, 20 après, aucune résolution changée parmi les 16.
+    """
+    stem = _domain(official_url).split(".")[0]
+    words = re.findall(r"[^\W_]+", actor_name, flags=re.UNICODE)
+    seen: set[str] = set()
+    terms: list[str] = []
+    for candidate in (actor_name, stem, " ".join(words[:2]), *words[:1]):
+        candidate = candidate.strip()
+        if len(candidate) > 2 and candidate.casefold() not in seen:
+            seen.add(candidate.casefold())
+            terms.append(candidate)
+    return terms
+
+
 def _find_institution(client: httpx.Client, actor_name: str, official_url: str) -> dict | None:
     """Cherche l'institution OpenAlex correspondant à cet acteur, et ne l'accepte QUE si son
     homepage_url partage le même domaine que le site officiel déjà vérifié de l'acteur --
     voir le docstring du module. Ambiguïté (0 ou plusieurs domaines correspondants) => None,
     jamais un choix arbitraire.
+
+    Plusieurs formulations sont essayées (voir _search_terms) parce qu'OpenAlex indexe des noms
+    d'institutions, pas les noms d'usage de notre roster. La première qui produit UNE seule
+    fiche au bon domaine gagne ; plusieurs fiches au bon domaine (TRUMPF Germany / TRUMPF UK,
+    Coherent US / Coherent DE) restent un refus, comme avant.
     """
     target_domain = _domain(official_url)
     if not target_domain:
         return None
-    try:
-        response = client.get(
-            f"{OPENALEX_API}/institutions",
-            params={"search": actor_name, "per_page": 5, **_mailto_params()},
-        )
-        response.raise_for_status()
-        results = response.json().get("results", [])
-    except Exception:
-        return None
-    matches = [row for row in results if row.get("homepage_url") and _domain(row["homepage_url"]) == target_domain]
-    return matches[0] if len(matches) == 1 else None
+    for term in _search_terms(actor_name, official_url):
+        try:
+            response = client.get(
+                f"{OPENALEX_API}/institutions",
+                params={"search": term, "per_page": 10, **_mailto_params()},
+            )
+            response.raise_for_status()
+            results = response.json().get("results", [])
+        except Exception:
+            return None
+        matches = [row for row in results if row.get("homepage_url") and _domain(row["homepage_url"]) == target_domain]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            return None
+    return None
 
 
 def _fetch_recent_works(client: httpx.Client, institution_id: str, from_date: str) -> list[dict]:
-    try:
-        response = client.get(
-            f"{OPENALEX_API}/works",
-            params={
-                "filter": f"authorships.institutions.id:{institution_id},from_publication_date:{from_date}",
-                "sort": "publication_date:desc",
-                "per-page": OPENALEX_WORKS_PER_ACTOR,
-                "select": "id,doi,title,publication_date,primary_location,authorships",
-                **_mailto_params(),
-            },
-        )
-        response.raise_for_status()
-        return response.json().get("results", [])
-    except Exception:
-        return []
+    """Toute la production de l'institution depuis `from_date`, paginée par curseur.
+
+    Une page tronquée n'est pas un échantillon : le tri par date porte sur TOUS les sujets, donc
+    couper à N travaux revient à ne voir le laser que chez les acteurs qui ne publient que ça.
+    Voir OPENALEX_WORKS_PER_ACTOR pour la mesure. Une page en erreur interrompt la pagination et
+    renvoie ce qui a déjà été lu -- perdre la suite vaut mieux que perdre le début.
+    """
+    works: list[dict] = []
+    cursor: str | None = "*"
+    while cursor and len(works) < OPENALEX_WORKS_PER_ACTOR:
+        try:
+            response = client.get(
+                f"{OPENALEX_API}/works",
+                params={
+                    "filter": f"authorships.institutions.id:{institution_id},from_publication_date:{from_date}",
+                    "sort": "publication_date:desc",
+                    "per-page": OPENALEX_WORKS_PER_PAGE,
+                    "cursor": cursor,
+                    "select": "id,doi,title,type,publication_date,primary_location,authorships",
+                    **_mailto_params(),
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            break
+        works += payload.get("results", [])
+        cursor = (payload.get("meta") or {}).get("next_cursor")
+    return works[:OPENALEX_WORKS_PER_ACTOR]
 
 
 def _fetch_global_on_topic_works(client: httpx.Client, query: str, from_date: str) -> list[dict]:
@@ -125,7 +203,7 @@ def _fetch_global_on_topic_works(client: httpx.Client, query: str, from_date: st
                 "filter": f"from_publication_date:{from_date}",
                 "sort": "publication_date:desc",
                 "per-page": GLOBAL_SEARCH_WORKS_PER_QUERY,
-                "select": "id,doi,title,publication_date,primary_location,authorships",
+                "select": "id,doi,title,type,publication_date,primary_location,authorships",
                 **_mailto_params(),
             },
         )
@@ -221,6 +299,12 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                     for work in works:
                         item = _parse_work(work)
                         if not item:
+                            continue
+                        # Le type se teste AVANT le filtre lexical : un erratum sur un article
+                        # pertinent est lexicalement pertinent, et c'est bien pour ça qu'il
+                        # entrait. Même ordre que scrape_technology pour Crossref.
+                        if work.get("type") not in OPENALEX_PUBLICATION_TYPES:
+                            off_topic += 1
                             continue
                         if not _work_is_on_topic(item["title"]):
                             off_topic += 1

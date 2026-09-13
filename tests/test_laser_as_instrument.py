@@ -77,9 +77,18 @@ class LaserAsInstrumentTests(unittest.TestCase):
             with self.subTest(text=text[:60]):
                 self.assertFalse(is_on_topic(text))
 
-    def test_a_source_development_project_stays_on_topic(self):
-        # Le pendant du test ci-dessus : développer une source ultra-rapide à haute cadence
-        # EST un développement de la technologie, même sans procédé de fabrication nommé.
+    def test_a_source_described_in_prose_is_a_known_limit(self):
+        """Ce test disait l'inverse jusqu'au 10/09/2026 : « développer une source ultra-rapide
+        EST un développement de la technologie ». Lucas a tranché le contraire ce jour-là — les
+        informations uniquement liées aux sources sont hors sujet — et c'est
+        lexicon.is_laser_the_source qui s'en charge (voir tests/test_laser_as_source.py).
+
+        Ce qu'on fixe ici est la LIMITE de cette garde, pour qu'elle soit connue plutôt que
+        découverte : elle lit un vocabulaire de source (« laser platform », « CPA front-end »,
+        « power-scaled »...), et un objectif CORDIS qui décrit la même chose en prose n'en
+        emploie aucun. Les trois projets concernés — PACRI, THRILL, VISUAL — ont donc été
+        retirés à la main. Le jour où un collecteur les ramène, c'est ici qu'il faut regarder.
+        """
         for text in (
             "Technology for High-Repetition-rate Intense Laser Laboratories: high-energy ultrafast laser technology",
             "This high-average-power platform will deliver ultrashort optical pulses at very high repetition rates",

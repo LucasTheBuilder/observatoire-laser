@@ -1998,6 +1998,25 @@ def _init_tech_db() -> None:
                 fingerprint TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL
             );
+            -- Ce qu'une lecture humaine a écarté, et qui ne doit pas revenir.
+            --
+            -- Le manque s'est vu le 10/09/2026 : onze publications retirées à la main le matin,
+            -- et la collecte de l'après-midi en a ramené une (« Selective laser-induced etching
+            -- enabled study on [...] liquid ammonia flash-boiling », écartée parce que son sujet
+            -- est la mécanique des fluides). Aucune règle lexicale ne peut trancher ce cas : le
+            -- titre nomme bien un procédé ultra-rapide, c'est le SUJET de l'article qui est
+            -- ailleurs. Sans trace de la décision, chaque collecte défait l'audit précédent.
+            --
+            -- L'empreinte est celle de `documents.fingerprint`, donc la clé survit à la
+            -- suppression de la ligne -- c'est tout l'intérêt. `title` n'est là que pour rendre
+            -- la table lisible ; rien ne s'y appuie.
+            CREATE TABLE IF NOT EXISTS document_exclusions (
+                fingerprint TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                excluded_by TEXT NOT NULL,
+                excluded_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS collection_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT NOT NULL,
@@ -2506,6 +2525,12 @@ def upsert_document(
     rester orphelin, sans être dupliqué pour autant.
     """
     fingerprint = hashlib.sha256(fingerprint_source.casefold().encode()).hexdigest()
+    # Une décision humaine passe avant tout filtre automatique -- voir document_exclusions.
+    # Testé ici plutôt que chez chaque collecteur : openalex.py, patent.py, scrapers.py et
+    # curated_sources.py écrivent tous par cette porte, et une garde par appelant finit
+    # toujours par en oublier un.
+    if db.execute("SELECT 1 FROM document_exclusions WHERE fingerprint=?", (fingerprint,)).fetchone():
+        return 0, 0
     stamp = utc_now()
     # published_at vient toujours d'un champ structuré de l'API amont, jamais d'un repli
     # fabriqué : 'published' vs 'observed_only' se décide donc sans ambiguïté dès l'écriture,
@@ -2534,6 +2559,37 @@ def upsert_document(
         db.execute("UPDATE documents SET actor_name=? WHERE fingerprint=?", (actor_name, fingerprint))
         return 0, 1
     return 0, 0
+
+
+def exclude_document(
+    db: sqlite3.Connection, *, fingerprint_source: str, title: str, reason: str, excluded_by: str,
+) -> int:
+    """Écarte définitivement un document et retire ce qu'il a laissé en base.
+
+    `fingerprint_source` est la MÊME chaîne qu'à l'insertion (le DOI, sinon l'URL) : c'est elle
+    qui donne l'empreinte, et donc ce qui permet à l'exclusion de reconnaître le document quand
+    un collecteur le représentera. Idempotent.
+
+    Ne s'utilise que pour une décision de LECTURE -- un sujet hors périmètre, un doublon
+    éditorial. Ce qu'une règle sait trancher appartient au lexique, pas à cette table.
+    """
+    fingerprint = hashlib.sha256(fingerprint_source.casefold().encode()).hexdigest()
+    db.execute(
+        """INSERT INTO document_exclusions(fingerprint,title,reason,excluded_by,excluded_at)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(fingerprint) DO UPDATE SET reason=excluded.reason,excluded_by=excluded.excluded_by""",
+        (fingerprint, title, reason, excluded_by, utc_now()),
+    )
+    row = db.execute("SELECT source_url FROM documents WHERE fingerprint=?", (fingerprint,)).fetchone()
+    if row is None:
+        return 0
+    # Les signaux technologiques du document partent avec lui : ils n'ont pas d'autre porteur,
+    # et leurs citations suivent par ON DELETE CASCADE.
+    db.execute(
+        "DELETE FROM technology_signals WHERE source_url=? AND project_name IS NULL", (row["source_url"],)
+    )
+    db.execute("DELETE FROM documents WHERE fingerprint=?", (fingerprint,))
+    return 1
 
 
 def upsert_technology_signal(
