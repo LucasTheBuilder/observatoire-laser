@@ -37,7 +37,7 @@ from urllib.parse import urlparse
 import httpx
 
 from actor_discovery import _known_actor_names_and_domains, _normalize_name, upsert_actor_candidate
-from db import ACTORS_DB, TECH_DB, connect, upsert_document, utc_now
+from db import ACTORS_DB, TECH_DB, connect, resolve_unlinked_document, rows, upsert_document, utc_now
 from http_client import CRAWLER_CONTACT, connector_client
 from scrapers import TECHNOLOGY_QUERIES, is_on_topic, upsert_document_technology_signal
 
@@ -275,6 +275,92 @@ def _upsert_document(db, actor_name: str, item: dict) -> tuple[int, int]:
         doi=item["doi"],
     )
 
+# Combien de DOI par appel à /works. OpenAlex accepte un filtre `doi:a|b|c` ; 25 tient
+# largement sous la limite de longueur d'URL et évite de tout redemander si un seul DOI est
+# malformé.
+UNLINKED_DOIS_PER_CALL = 25
+
+
+def _work_institutions(work: dict) -> tuple[list[str], list[str]]:
+    """Noms d'institutions et codes pays d'un travail, dédoublonnés, dans l'ordre des auteurs."""
+    noms: list[str] = []
+    pays: list[str] = []
+    for authorship in work.get("authorships") or []:
+        for institution in authorship.get("institutions") or []:
+            nom = str(institution.get("display_name") or "").strip()
+            if nom and nom not in noms:
+                noms.append(nom)
+            code = institution.get("country_code")
+            if code and code not in pays:
+                pays.append(code)
+    return noms, pays
+
+
+def resolve_unlinked_documents(client: httpx.Client, actor_by_institution: dict[str, str]) -> dict:
+    """Demande à OpenAlex qui signe les publications en file, et rend au corpus celles d'un acteur.
+
+    La file est alimentée par la passe thématique Crossref, qui cherche par sujet et n'attribue
+    jamais d'acteur (voir db.unlinked_documents). Une publication d'un acteur suivi y arrive donc
+    orpheline, et seule cette résolution peut la reconnaître : `actor_by_institution` est indexé
+    par ID d'institution OpenAlex, pas par nom, parce que le roster écrit « Fraunhofer ILT » là où
+    OpenAlex écrit « Fraunhofer Institute for Laser Technology » -- un rapprochement par nom
+    raterait précisément les acteurs qu'on veut récupérer. Le cas est réel : une publication CNRS
+    a dû être rattrapée à la main le 13/09/2026, avant que cette fonction n'existe.
+
+    Ce qui n'est pas promu garde ses institutions en base : c'est ce qu'affiche la page « Hors
+    roster », et ce qui permet de voir quels laboratoires reviennent assez souvent pour mériter
+    d'entrer dans le roster.
+
+    Ne résout que les lignes à DOI jamais résolues -- une publication sans DOI n'est pas
+    interrogeable, et une déjà résolue ne change plus de signataires.
+    """
+    en_attente = rows(
+        TECH_DB,
+        "SELECT fingerprint,doi FROM unlinked_documents WHERE doi IS NOT NULL AND resolved_at IS NULL",
+    )
+    promus = resolus = 0
+    for start in range(0, len(en_attente), UNLINKED_DOIS_PER_CALL):
+        lot = en_attente[start : start + UNLINKED_DOIS_PER_CALL]
+        try:
+            response = client.get(
+                f"{OPENALEX_API}/works",
+                params={
+                    "filter": "doi:" + "|".join(f"https://doi.org/{row['doi']}" for row in lot),
+                    "per-page": UNLINKED_DOIS_PER_CALL,
+                    "select": "doi,authorships",
+                    **_mailto_params(),
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            continue
+        par_doi = {
+            str(work.get("doi") or "").removeprefix("https://doi.org/").casefold(): work
+            for work in payload.get("results", [])
+        }
+        with connect(TECH_DB) as db:
+            for row in lot:
+                work = par_doi.get((row["doi"] or "").casefold())
+                if work is None:
+                    continue
+                noms, pays = _work_institutions(work)
+                identifiants = {
+                    str(institution.get("id") or "").rsplit("/", 1)[-1]
+                    for authorship in work.get("authorships") or []
+                    for institution in authorship.get("institutions") or []
+                }
+                acteur = next(
+                    (actor_by_institution[i] for i in identifiants if i in actor_by_institution), None
+                )
+                resolus += 1
+                promus += int(resolve_unlinked_document(
+                    db, fingerprint=row["fingerprint"], institutions=noms, countries=pays,
+                    actor_name=acteur,
+                ))
+    return {"unlinked_resolved": resolus, "unlinked_promoted": promus}
+
+
 def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DEFAULT) -> dict:
     """Point d'entrée (voir app.py: collectors["openalex"])."""
     with connect(ACTORS_DB) as db:
@@ -286,6 +372,9 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
         run_id = db.execute("INSERT INTO collection_runs(started_at,status) VALUES(?,?)", (utc_now(), "running")).lastrowid
 
     matched_actors = added = attributed = off_topic = candidates_added = technology_signals_added = errors = 0
+    # Construite au fil de la boucle plutôt que dans une seconde passe : chaque institution y est
+    # déjà résolue, et la redemander coûterait un appel par acteur pour rien.
+    actor_by_institution: dict[str, str] = {}
     with connector_client("api") as client:
         for actor in actors:
             try:
@@ -294,6 +383,7 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                     continue
                 matched_actors += 1
                 institution_id = str(institution["id"]).rsplit("/", 1)[-1]
+                actor_by_institution[institution_id] = actor["name"]
                 works = _fetch_recent_works(client, institution_id, from_date)
                 with connect(TECH_DB) as db, connect(ACTORS_DB) as adb:
                     for work in works:
@@ -335,6 +425,15 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
             except Exception:
                 errors += 1
 
+        # Après la boucle, avec la carte complète : la file alimentée par la passe thématique
+        # Crossref (qui tourne toujours AVANT celle-ci, voir app._collect_monthly) est résolue
+        # ici, et ce qui appartient à un acteur suivi rejoint le corpus.
+        try:
+            unlinked = resolve_unlinked_documents(client, actor_by_institution)
+        except Exception:
+            errors += 1
+            unlinked = {"unlinked_resolved": 0, "unlinked_promoted": 0}
+
     with connect(TECH_DB) as db:
         db.execute(
             "UPDATE collection_runs SET finished_at=?,status=?,scanned=?,added=?,errors=?,message=? WHERE id=?",
@@ -342,7 +441,8 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                 utc_now(), "completed", matched_actors, added, errors,
                 f"OpenAlex : {matched_actors} institutions vérifiées par domaine, {added} nouvelles publications, "
                 f"{attributed} déjà connues ré-attribuées à un acteur, {off_topic} hors sujet filtrées, "
-                f"{candidates_added} candidats acteurs (co-institutions), {technology_signals_added} signaux technologiques",
+                f"{candidates_added} candidats acteurs (co-institutions), {technology_signals_added} signaux technologiques, "
+                f"{unlinked['unlinked_resolved']} publications en file résolues dont {unlinked['unlinked_promoted']} rendues au corpus",
                 run_id,
             ),
         )
@@ -353,6 +453,7 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
         "documents_off_topic": off_topic,
         "actor_candidates_added": candidates_added,
         "technology_signals_added": technology_signals_added,
+        **unlinked,
         "errors": errors,
     }
 

@@ -59,9 +59,9 @@ from db import (
     purge_stale_backlog,
     technology_signal_key,
     upsert_actor_event,
-    upsert_document,
     upsert_fact_source,
     upsert_technology_signal,
+    upsert_unlinked_document,
     utc_now,
 )
 from http_client import CRAWLER_CONTACT, HEADERS, TIMEOUTS
@@ -2990,7 +2990,7 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
     from_date = (date.today() - timedelta(days=effective_lookback)).isoformat()
     per_query = max(5, min(40, (max(1, limit) + len(TECHNOLOGY_QUERIES) - 1) // len(TECHNOLOGY_QUERIES)))
 
-    scanned = relevant = added = errors = technology_signals_added = 0
+    scanned = relevant = added = errors = 0
     pooled: dict[str, dict] = {}
     messages: list[str] = []
 
@@ -3076,28 +3076,25 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
         with connect(TECH_DB) as db:
             for item in list(pooled.values())[: max(1, limit)]:
                 try:
-                    # Ecriture deleguee a db.upsert_document, partagee avec openalex.py et
-                    # patent.py : meme dedoublonnage sur empreinte, meme rafraichissement de
-                    # last_seen_at, meme calcul date_confidence/is_backfill. Crossref est la
-                    # seule des trois sources a ne pas attribuer d'acteur (collecte generique) :
-                    # actor_name reste NULL, et openalex.py le renseignera plus tard sur la
-                    # meme ligne s'il retrouve la publication.
-                    inserted, _ = upsert_document(
+                    # Cette passe cherche par SUJET, pas par institution : elle ne sait pas qui
+                    # signe, et ne peut donc rien affirmer sur l'acteur. Jusqu'au 13/09/2026 elle
+                    # ecrivait quand meme dans `documents`, ou ses lignes restaient a
+                    # actor_name NULL -- 48 publications sur 144, soit un tiers du corpus, dont
+                    # 27 de laboratoires chinois sans aucun lien avec le roster.
+                    #
+                    # Regle de perimetre de Lucas : le corpus ne contient que ce qu'un acteur
+                    # suivi signe. La recolte thematique va donc en FILE DE LECTURE, d'ou
+                    # openalex.resolve_unlinked_documents() la promeut dans `documents` si l'un
+                    # de ses signataires se revele suivi. Pas de classement technologique ici :
+                    # un document hors corpus n'a pas d'axe, il a un titre et un DOI.
+                    added += upsert_unlinked_document(
                         db,
-                        document_type="publication",
                         title=item["title"],
                         source_url=item["url"],
                         fingerprint_source=item["doi"] or item["url"],
                         published_at=item["published"],
                         doi=item["doi"],
                         abstract=item["abstract"],
-                    )
-                    added += inserted
-                    # §4.C.2 audit veille (Lot 3 §3.5) : appelé pour chaque document, nouveau ou
-                    # déjà connu -- idempotent (fact_key dédoublonne), donc sans coût à reclasser
-                    # un document déjà vu qui n'avait pas encore de signal.
-                    technology_signals_added += upsert_document_technology_signal(
-                        db, item["title"], item["abstract"], item["url"],
                     )
                 except Exception as exc:
                     errors += 1
@@ -3106,7 +3103,7 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
         status = "completed" if not errors or relevant else "failed"
         message = (
             f"Crossref: {len(TECHNOLOGY_QUERIES)} requêtes, fenêtre {effective_lookback} j, "
-            f"{relevant} documents pertinents"
+            f"{relevant} documents pertinents, {added} nouveaux en file (sans acteur rattaché)"
         )
         if messages:
             message += f"; {errors} requête(s) en erreur"
@@ -3125,8 +3122,9 @@ def scrape_technology(limit: int = 80, lookback_days: int = 60) -> dict:
     return {
         "scanned": scanned,
         "relevant": relevant,
+        # `added` compte desormais des entrees en FILE, pas des documents du corpus : le nom
+        # reste, c'est celui que collection_runs.added et l'UI lisent depuis l'origine.
         "added": added,
-        "technology_signals_added": technology_signals_added,
         "errors": errors,
         "queries": len(TECHNOLOGY_QUERIES),
         "lookback_days": effective_lookback,

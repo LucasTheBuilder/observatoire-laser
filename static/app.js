@@ -62,6 +62,11 @@ const state = {
   techFacets: {operation: [], material: [], actor: [], market: [], component: [], axis: [], machine_capability: [], architecture: []},
   // Groupes de facettes dépliés (voir explorer.js) -- purement d'affichage.
   techExpanded: [],
+  // File des publications trouvées par sujet qu'aucun acteur suivi ne signe (voir
+  // db.unlinked_documents). Chargée à la demande comme les autres tranches.
+  unlinked: [],
+  unlinkedQuery: "",
+  unlinkedCountry: "",
   techMoreFilters: false,
   techLimit: 10,
 };
@@ -2292,6 +2297,110 @@ function buildReviewJumpBar() {
   });
 }
 
+// --- Hors roster : ce que la veille thématique trouve et qu'aucun acteur suivi ne signe -----
+//
+// Règle de périmètre de Lucas (13/09/2026) : « supprime tous les documents où il n'y a pas
+// minimum 1 acteur de notre base ; si tu en trouves un, dis-le-moi via une interface autre. »
+// Cette page EST l'interface autre. Elle ne sert pas à valider quelque chose -- rien à accepter
+// ni à rejeter ici -- mais à répondre à une seule question : un de ces laboratoires revient-il
+// assez souvent pour mériter d'entrer dans le roster ?
+//
+// La colonne « vues » porte cette question : c'est le nombre de collectes successives qui ont
+// ramené le même travail, donc le tri par défaut.
+const UNLINKED_COUNTRY_NAMES = {
+  CN: "Chine", RU: "Russie", US: "États-Unis", PL: "Pologne", KR: "Corée du Sud", JP: "Japon",
+  AT: "Autriche", HK: "Hong Kong", GB: "Royaume-Uni", GR: "Grèce", CH: "Suisse", BG: "Bulgarie",
+  RO: "Roumanie", IE: "Irlande", DE: "Allemagne", FR: "France", ES: "Espagne", IT: "Italie",
+  BE: "Belgique", NL: "Pays-Bas", SE: "Suède", CA: "Canada", IN: "Inde", TW: "Taïwan",
+};
+
+function unlinkedCountryLabel(code) { return UNLINKED_COUNTRY_NAMES[code] || code; }
+
+// Un laboratoire par ligne, compté en DOCUMENTS et non en signatures : une publication à
+// quarante co-auteurs d'un même institut ne vaut pas quarante fois une autre.
+function unlinkedLabs(items) {
+  const counts = new Map();
+  for (const item of items) {
+    for (const lab of new Set(item.institutions || [])) counts.set(lab, (counts.get(lab) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+// Même règle de date que le corpus : Crossref dépose des dates partielles ("2027-04"), et les
+// rendre via Intl invente un jour et une heure. tcDateLabel les rend brutes -- on lui passe
+// `first_seen_at` comme date d'observation, faute de date de publication.
+function unlinkedRow(item) {
+  const labs = item.institutions || [];
+  const affiliation = labs.length
+    ? `<p class="unlinked-labs">${labs.map(esc).join(" · ")}</p>`
+    : item.resolved_at
+      ? `<p class="unlinked-labs is-none">Aucune affiliation déposée sur ce DOI</p>`
+      : `<p class="unlinked-labs is-none">Signataires non encore résolus</p>`;
+  const countries = (item.countries || []).map(c => `<span class="unlinked-tag">${esc(unlinkedCountryLabel(c))}</span>`).join("");
+  const seen = item.times_seen > 1 ? `<span class="unlinked-seen">vue ${item.times_seen}×</span>` : "";
+  return `<article class="unlinked-row">
+    <div>
+      <p class="unlinked-title">${esc(item.title)}</p>
+      ${affiliation}
+      <div class="unlinked-meta">${countries}${seen}</div>
+    </div>
+    <div class="unlinked-ref">
+      ${item.doi ? `<a href="https://doi.org/${esc(item.doi)}" target="_blank" rel="noopener">${esc(item.doi)}</a>` : `<span class="unlinked-tag">sans DOI</span>`}
+      <span>${esc(tcDateLabel({published_at: item.published_at, observed_at: item.first_seen_at}))}</span>
+    </div>
+  </article>`;
+}
+
+function renderUnlinked() {
+  const items = state.unlinked || [];
+  const labs = unlinkedLabs(items);
+  const recurring = labs.filter(([, n]) => n > 1);
+  const countries = [...new Set(items.flatMap(i => i.countries || []))].sort();
+  const query = state.unlinkedQuery.trim().toLowerCase();
+  const shown = items.filter(item => {
+    if (state.unlinkedCountry && !(item.countries || []).includes(state.unlinkedCountry)) return false;
+    if (!query) return true;
+    return `${item.title} ${(item.institutions || []).join(" ")} ${item.doi || ""}`.toLowerCase().includes(query);
+  });
+
+  content.innerHTML = header(
+    "Administration",
+    "Hors roster",
+    "Publications trouvées par la veille thématique Crossref, qu'aucun acteur suivi ne signe : " +
+    "elles n'entrent pas dans le corpus Technologie laser, et restent ici. La question à leur " +
+    "poser est celle du roster, pas celle du corpus — un laboratoire qui revient mérite d'être ajouté."
+  ) + (items.length ? `
+    <div class="unlinked-summary">
+      <div><b>${items.length}</b><span>publications en file</span></div>
+      <div><b>${labs.length}</b><span>laboratoires signataires</span></div>
+      <div><b>${recurring.length}</b><span>reviennent plus d'une fois</span></div>
+    </div>
+    ${recurring.length ? `<div class="unlinked-labs-panel">
+      <p class="block-label">Laboratoires cités par plusieurs publications</p>
+      <ul>${recurring.slice(0, 12).map(([lab, n]) => `<li><span>${esc(lab)}</span><b>${n}</b></li>`).join("")}</ul>
+    </div>` : `<p class="unlinked-note">Aucun laboratoire ne signe plus d'une de ces publications : rien à ajouter au roster pour l'instant.</p>`}
+    <div class="unlinked-filters">
+      <input id="unlinked-q" type="search" value="${esc(state.unlinkedQuery)}" placeholder="Chercher un titre, un laboratoire, un DOI…" aria-label="Chercher dans les publications hors roster">
+      <select id="unlinked-country" aria-label="Filtrer par pays">
+        <option value="">Tous les pays</option>
+        ${countries.map(c => `<option value="${esc(c)}"${c === state.unlinkedCountry ? " selected" : ""}>${esc(unlinkedCountryLabel(c))}</option>`).join("")}
+      </select>
+      <span class="unlinked-count">${shown.length === items.length ? `${items.length} publications` : `${shown.length} sur ${items.length}`}</span>
+    </div>
+    <div class="unlinked-list">${shown.length ? shown.map(unlinkedRow).join("") : `<div class="empty">Aucune publication ne correspond à ce filtre.</div>`}</div>
+  ` : `<div class="empty">Aucune publication en attente. La veille thématique n'a rien ramené qui ne soit déjà rattaché à un acteur suivi.</div>`);
+
+  const search = document.querySelector("#unlinked-q");
+  if (search) {
+    search.addEventListener("input", debounce(e => { state.unlinkedQuery = e.target.value; renderUnlinked(); }, 180));
+  }
+  const select = document.querySelector("#unlinked-country");
+  if (select) {
+    select.addEventListener("change", e => { state.unlinkedCountry = e.target.value; renderUnlinked(); });
+  }
+  wireActions();
+}
+
 function renderMarketReview() {
   const items = state.marketReview || [];
   const visible = items.filter(marketReviewMatchesFilters);
@@ -2586,6 +2695,7 @@ function render(){
   if(state.view==="techcorpus") renderTechCorpus();
   if(state.view==="actors") renderActors();
   if(state.view==="market-review") renderMarketReview();
+  if(state.view==="unlinked") renderUnlinked();
   if(state.view==="data-quality") renderDataQuality();
   if(state.view==="collections") renderCollections();
   if(state.view==="settings") renderSettings();
@@ -2829,6 +2939,7 @@ const LOADERS = {
   actors:            () => api("/api/actors"),
   profiles:          () => api("/api/profiles"),
   marketReview:      () => api("/api/market/review"),
+  unlinked:          () => api("/api/unlinked-documents"),
   network:           () => api("/api/network"),
   duplicates:        () => api("/api/actors/duplicates"),
   pipelineFunnel:    () => api("/api/pipeline-funnel"),
@@ -2859,6 +2970,7 @@ const VIEW_DEPS = {
   // s'afficherait sans capacités, marchés ni publications.
   actors:            ["overview", "actors", "network", "market", "offers", "documents", "rejectReasons"],
   "market-review":   ["overview", "marketReview", "reviewOffers", "reviewEvents", "rejectReasons"],
+  unlinked:          ["overview", "unlinked"],
   "data-quality":    ["overview", "dataQuality", "goldenFacts"],
   collections:       ["overview", "collectionHealth", "profiles", "duplicates", "pipelineFunnel", "veilleMetrics"],
   settings:          ["overview", "schedulerStatus"],

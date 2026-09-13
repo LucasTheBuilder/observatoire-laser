@@ -100,3 +100,53 @@
   border-radius:999px;font-size:.82rem;color:var(--ink);text-decoration:none;background:var(--paper)}
 .review-jump .jump-link:hover{border-color:var(--teal);color:var(--teal)}
 .review-jump .jump-link b{font-variant-numeric:tabular-nums;color:var(--muted)}
+
+/* --- Hors roster : ce que la veille thematique trouve sans acteur rattache -----------------
+   Une page de LECTURE, pas une file de validation : aucune action par ligne, donc aucune carte
+   -- des rangees separees par un filet, ou l'oeil descend vite sur 300 titres. Le seul endroit
+   qui porte du poids visuel est le panneau des laboratoires recurrents, parce que c'est la
+   seule question que cette page pose. */
+.unlinked-summary{display:flex;flex-wrap:wrap;gap:0;border-top:1px solid var(--line);
+  border-bottom:1px solid var(--line);margin:18px 0}
+.unlinked-summary div{flex:1 1 160px;padding:14px 20px 14px 0;display:flex;flex-direction:column;gap:2px}
+.unlinked-summary div+div{padding-left:20px;border-left:1px solid var(--line)}
+.unlinked-summary b{font-size:1.55rem;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.unlinked-summary span{font-size:.78rem;color:var(--muted)}
+
+.unlinked-labs-panel{border:1px solid var(--line);border-radius:13px;background:var(--paper);
+  padding:16px 20px;margin-bottom:18px}
+.unlinked-labs-panel ul{list-style:none;margin:10px 0 0;padding:0;display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px 24px}
+.unlinked-labs-panel li{display:flex;justify-content:space-between;gap:12px;font-size:.86rem;
+  padding:4px 0;border-bottom:1px solid var(--line)}
+.unlinked-labs-panel li b{font-variant-numeric:tabular-nums;color:var(--teal)}
+.unlinked-note{margin:0 0 18px;color:var(--muted);font-size:.88rem}
+
+.unlinked-filters{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px}
+.unlinked-filters input[type=search]{flex:1 1 280px;min-width:0;padding:9px 12px;
+  border:1px solid var(--line);border-radius:9px;font:inherit;font-size:.9rem;color:var(--ink)}
+.unlinked-filters select{padding:9px 12px;border:1px solid var(--line);border-radius:9px;
+  font:inherit;font-size:.9rem;color:var(--ink);background:var(--paper)}
+.unlinked-count{margin-left:auto;font-size:.8rem;color:var(--muted);font-variant-numeric:tabular-nums}
+
+.unlinked-list{display:flex;flex-direction:column}
+.unlinked-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 24px;align-items:start;
+  padding:15px 0;border-top:1px solid var(--line)}
+.unlinked-row:last-child{border-bottom:1px solid var(--line)}
+.unlinked-title{margin:0;font-size:.95rem;line-height:1.45;font-weight:500}
+.unlinked-labs{margin:4px 0 0;font-size:.83rem;color:var(--muted)}
+.unlinked-labs.is-none{color:var(--coral)}
+.unlinked-meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:7px}
+.unlinked-tag{font-size:.72rem;padding:2px 8px;border-radius:999px;border:1px solid var(--line);
+  color:var(--muted)}
+.unlinked-seen{font-size:.72rem;padding:2px 8px;border-radius:999px;background:#e6f4f2;color:var(--teal)}
+.unlinked-ref{display:flex;flex-direction:column;align-items:flex-end;gap:3px;text-align:right;
+  font-size:.76rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.unlinked-ref a{color:var(--teal);text-decoration:none;word-break:break-all;max-width:26ch}
+.unlinked-ref a:hover{text-decoration:underline}
+
+@media (max-width:760px){
+  .unlinked-row{grid-template-columns:minmax(0,1fr)}
+  .unlinked-ref{align-items:flex-start;text-align:left}
+  .unlinked-ref a{max-width:none}
+}

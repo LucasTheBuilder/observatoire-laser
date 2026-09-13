@@ -1995,6 +1995,37 @@ def _init_tech_db() -> None:
                 excluded_by TEXT NOT NULL,
                 excluded_at TEXT NOT NULL
             );
+            -- Ce que la veille THÉMATIQUE trouve et qu'aucun acteur suivi ne signe.
+            --
+            -- Deux collecteurs, deux destinations, et c'est la règle de périmètre de Lucas
+            -- (13/09/2026) qui les sépare : « supprime tous les documents où il n'y a pas
+            -- minimum 1 acteur de notre base ; si tu en trouves un, dis-le-moi ailleurs ».
+            -- openalex.py cherche PAR INSTITUTION, donc ce qu'il ramène porte un acteur et va
+            -- dans `documents` ; scrapers.scrape_technology cherche PAR SUJET sur Crossref et
+            -- n'attribue rien -- sa récolte atterrit ici, en file de lecture.
+            --
+            -- `institutions`/`countries` sont remplis après coup par
+            -- openalex.resolve_unlinked_documents(), qui interroge OpenAlex sur le DOI : c'est
+            -- ce qui permet de PROMOUVOIR une ligne dans `documents` quand un signataire se
+            -- révèle être un acteur suivi (arrivé le 13/09 pour une publication CNRS), et, pour
+            -- le reste, de montrer quels laboratoires reviennent. Tant que la résolution n'a pas
+            -- eu lieu, les deux colonnes sont NULL -- jamais une liste vide qui ferait croire à
+            -- une absence d'affiliation constatée.
+            CREATE TABLE IF NOT EXISTS unlinked_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fingerprint TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                doi TEXT,
+                published_at TEXT,
+                abstract TEXT,
+                institutions TEXT,
+                countries TEXT,
+                resolved_at TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                times_seen INTEGER NOT NULL DEFAULT 1
+            );
             CREATE TABLE IF NOT EXISTS collection_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT NOT NULL,
@@ -2568,6 +2599,95 @@ def exclude_document(
     )
     db.execute("DELETE FROM documents WHERE fingerprint=?", (fingerprint,))
     return 1
+
+
+def upsert_unlinked_document(
+    db: sqlite3.Connection,
+    *,
+    title: str,
+    source_url: str,
+    fingerprint_source: str,
+    doi: str | None = None,
+    published_at: str | None = None,
+    abstract: str | None = None,
+) -> int:
+    """Range une publication trouvée par sujet, qu'aucun acteur suivi ne signe (encore).
+
+    Renvoie 1 si la ligne est nouvelle, 0 sinon -- un revoir rafraîchit `last_seen_at` et
+    incrémente `times_seen`, qui dit combien de collectes successives ont ramené le même
+    travail : une publication qui revient six fois mérite plus d'attention qu'une passante.
+
+    Trois cas ne rentrent jamais dans la file, et l'ordre importe peu car ils sont exclusifs :
+    un document DÉJÀ dans le corpus (il a un acteur, la file n'a rien à en dire), un document
+    déjà écarté à la lecture (voir document_exclusions -- l'erratum, la source, le hors-sujet),
+    et un document déjà en file. Même empreinte que `documents` dans les trois cas, donc les
+    deux tables se répondent sans jamais se doubler.
+    """
+    fingerprint = hashlib.sha256(fingerprint_source.casefold().encode()).hexdigest()
+    if db.execute("SELECT 1 FROM documents WHERE fingerprint=?", (fingerprint,)).fetchone():
+        return 0
+    if db.execute("SELECT 1 FROM document_exclusions WHERE fingerprint=?", (fingerprint,)).fetchone():
+        return 0
+    stamp = utc_now()
+    before = db.total_changes
+    db.execute(
+        """INSERT OR IGNORE INTO unlinked_documents(
+               fingerprint,title,source_url,doi,published_at,abstract,first_seen_at,last_seen_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (fingerprint, title, source_url, doi, published_at, abstract, stamp, stamp),
+    )
+    if db.total_changes > before:
+        return 1
+    db.execute(
+        "UPDATE unlinked_documents SET last_seen_at=?,times_seen=times_seen+1 WHERE fingerprint=?",
+        (stamp, fingerprint),
+    )
+    return 0
+
+
+def resolve_unlinked_document(
+    db: sqlite3.Connection,
+    *,
+    fingerprint: str,
+    institutions: list[str],
+    countries: list[str],
+    actor_name: str | None = None,
+) -> bool:
+    """Écrit ce qu'OpenAlex sait des signataires, et PROMEUT la ligne si l'un d'eux est suivi.
+
+    Renvoie True quand la ligne a rejoint `documents`. C'est la règle « attribuer avant de
+    supprimer » rendue permanente : la passe thématique n'attribue jamais, donc une publication
+    d'un acteur suivi arrive ici sans son acteur, et seule la résolution par institution peut la
+    rendre au corpus. Sans elle, la règle de périmètre supprimerait précisément ce qu'elle veut
+    garder -- c'est arrivé le 13/09/2026, une publication CNRS rattrapée à la main.
+    """
+    stamp = utc_now()
+    row = db.execute(
+        "SELECT title,source_url,doi,published_at,abstract FROM unlinked_documents WHERE fingerprint=?",
+        (fingerprint,),
+    ).fetchone()
+    if row is None:
+        return False
+    if not actor_name:
+        db.execute(
+            "UPDATE unlinked_documents SET institutions=?,countries=?,resolved_at=? WHERE fingerprint=?",
+            (json.dumps(institutions, ensure_ascii=False), json.dumps(countries, ensure_ascii=False),
+             stamp, fingerprint),
+        )
+        return False
+    upsert_document(
+        db,
+        document_type="publication",
+        title=row["title"],
+        source_url=row["source_url"],
+        fingerprint_source=row["doi"] or row["source_url"],
+        actor_name=actor_name,
+        published_at=row["published_at"],
+        doi=row["doi"],
+        abstract=row["abstract"],
+    )
+    db.execute("DELETE FROM unlinked_documents WHERE fingerprint=?", (fingerprint,))
+    return True
 
 
 def upsert_technology_signal(

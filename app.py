@@ -1742,6 +1742,38 @@ def technology_signal_proofs(signal_id: int):
     return proofs
 
 
+@app.get("/api/unlinked-documents")
+def unlinked_documents(limit: int = Query(default=300, ge=1, le=1000)):
+    """Les publications trouvées par SUJET qu'aucun acteur suivi ne signe (db.unlinked_documents).
+
+    Règle de périmètre de Lucas (13/09/2026) : le corpus Technologie laser ne contient que ce
+    qu'un acteur du roster signe, et ce que la veille thématique trouve par ailleurs doit rester
+    visible ailleurs plutôt que disparaître. C'est cette file-là.
+
+    `institutions`/`countries` sont stockés en JSON et renvoyés en listes -- le front n'a pas à
+    savoir comment la colonne est écrite. Une ligne jamais résolue (pas de DOI, ou résolution pas
+    encore passée) renvoie des listes vides ET `resolved_at: null` : le front distingue les deux.
+    Les plus revues d'abord : une publication que six collectes ramènent pèse plus qu'une
+    passante.
+    """
+    return [
+        {
+            **row,
+            "institutions": json.loads(row["institutions"]) if row["institutions"] else [],
+            "countries": json.loads(row["countries"]) if row["countries"] else [],
+        }
+        for row in rows(
+            TECH_DB,
+            """SELECT id,title,source_url,doi,published_at,institutions,countries,resolved_at,
+                      first_seen_at,last_seen_at,times_seen
+                 FROM unlinked_documents
+                ORDER BY times_seen DESC, COALESCE(published_at,first_seen_at) DESC
+                LIMIT ?""",
+            (limit,),
+        )
+    ]
+
+
 @app.get("/api/documents")
 def documents(document_type: Literal["publication", "patent", "project", "other"] | None = None, limit: int = Query(default=200, ge=1, le=500)):
     """Documents collectés récemment (publications OpenAlex/Crossref aujourd'hui ; brevets et
