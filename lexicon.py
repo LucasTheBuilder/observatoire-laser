@@ -611,13 +611,42 @@ DOCUMENT_OPERATIONS: Lexicon = {
     label: rule for label, rule in OPERATIONS.items() if label not in _NON_DOCUMENT_OPERATIONS
 }
 
+# Trois libellés de COMPONENTS ne disent pas la PIÈCE quand on les lit sur un titre de
+# publication, et les garder ferait de la dimension « pièce » un doublon bruyant :
+#
+#   - "Composants en verre" matche `fused silica` / `borosilicate glass`, c'est-à-dire la
+#     matière et non l'objet. Mesuré : les 11 publications concernées portent DÉJÀ
+#     Matériau = Verre, donc le libellé n'apporte rien, il répète la même chose ailleurs ;
+#   - "Substrats" matche `substrate`, qui dans un titre est presque toujours un paramètre de
+#     procédé (« Effect of substrate temperature on surface roughness... ») ;
+#   - "Capteurs" matche `sensor`, y compris le capteur qui SURVEILLE le procédé (« Real-time
+#     analysis of inline sensor data during USP-laser machining ») -- l'inverse d'une pièce
+#     fabriquée.
+#
+# Même mécanique que _NON_DOCUMENT_OPERATIONS : ces libellés restent intacts pour Marché et
+# Offres, où ils se lisent sur une page d'acteur et non sur un titre de douze mots.
+_NON_DOCUMENT_COMPONENTS = frozenset({"Composants en verre", "Substrats", "Capteurs"})
+DOCUMENT_COMPONENTS: Lexicon = {
+    label: rule for label, rule in COMPONENTS.items() if label not in _NON_DOCUMENT_COMPONENTS
+}
+
+# Les sept vocabulaires sur lesquels un document est classé. L'ordre n'a aucun effet ici -- les
+# libellés sont disjoints, voir db._reconcile_technology_signal_dimensions -- mais il est écrit
+# dans l'ordre de lecture décidé par Lucas le 13/09/2026 (« matériau / acteur / opération laser /
+# si possible le marché ou le nom de la pièce ; procédé et capacité machine sont des P2 »), pour
+# que ce fichier et la page racontent la même hiérarchie.
 DOCUMENT_LEXICONS: dict[str, Lexicon] = {
-    "process_technology": PROCESS_TECHNOLOGIES,
-    "machine_capability": MACHINE_CAPABILITIES,
     "operation": DOCUMENT_OPERATIONS,
     "material": MATERIALS,
     "market": MARKETS,
+    # Ajoutée le 13/09/2026. Sans effet sur ce qui ENTRE dans le corpus : is_on_topic ne lit que
+    # TECHNOLOGY_AXES, jamais ce dictionnaire -- cette dimension ne fait qu'étiqueter ce qui est
+    # déjà admis. Mesurée sur les 144 publications : 12 nomment une pièce (micro-canaux, guides
+    # d'onde, buses, électrodes de batteries, micro-aiguilles, fibres, interposeurs).
+    "component": DOCUMENT_COMPONENTS,
     "architecture": APPLICATION_ARCHITECTURES,
+    "process_technology": PROCESS_TECHNOLOGIES,
+    "machine_capability": MACHINE_CAPABILITIES,
 }
 
 _GENERIC_PROCESS_AXES = frozenset({

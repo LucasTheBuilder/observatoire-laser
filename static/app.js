@@ -67,7 +67,7 @@ const state = {
   // Les clés doivent couvrir TC_FACET_GROUPS : une dimension ajoutée au lexique sans clé ici
   // faisait passer `undefined` à facetGroupHtml, qui plantait le rendu de toute la page.
   // Le `|| []` aux points d'appel est la vraie garde ; cette liste reste la valeur de départ.
-  techFacets: {axis: [], machine_capability: [], operation: [], material: [], market: [], architecture: [], actor: []},
+  techFacets: {operation: [], material: [], actor: [], market: [], component: [], axis: [], machine_capability: [], architecture: []},
   // Groupes de facettes dépliés (voir explorer.js) -- purement d'affichage.
   techExpanded: [],
   techMoreFilters: false,
@@ -1002,7 +1002,7 @@ function tcHaystack(row) {
 // atteignable ("Non qualifié"), sinon elle disparaît sans explication dès qu'on touche au
 // groupe -- et sur ce corpus, la majorité des publications sont dans ce cas.
 //
-// Les cinq dimensions autres que l'axe technologique viennent de `families` (voir
+// Les dimensions autres que l'axe technologique viennent de `families` (voir
 // /api/tech-corpus) : ce sont les vocabulaires fermés qui ne servaient jusqu'au 09/09/2026
 // qu'à l'extraction de faits marché. Chacune a son propre groupe plutôt qu'une liste unique --
 // croiser "ablation" (opération) et "verre" (matériau) n'a de sens que si l'utilisateur voit
@@ -1010,10 +1010,11 @@ function tcHaystack(row) {
 // (voir facetGroupHtml), donc rien n'encombre la colonne tant qu'une dimension n'est pas
 // alimentée.
 const TC_FAMILY_GROUPS = [
-  {key: "machine_capability", label: "CAPACITÉ MACHINE"},
   {key: "operation", label: "OPÉRATION"},
   {key: "material", label: "MATÉRIAU"},
   {key: "market", label: "MARCHÉ"},
+  {key: "component", label: "PIÈCE"},
+  {key: "machine_capability", label: "CAPACITÉ MACHINE"},
   {key: "architecture", label: "ARCHITECTURE"},
 ];
 
@@ -1021,14 +1022,23 @@ function tcRowFamily(row, dimension) {
   return (row.families && row.families[dimension]) || [];
 }
 
-// L'ordre se lit comme une phrase : quel procédé, avec quelle machine, pour quelle opération,
-// sur quel matériau, par qui. C'est l'ordre demandé par Lucas le 10/09/2026, et il prime sur
-// tout classement par taux de remplissage -- une colonne dont l'ordre change avec les données
-// ne s'apprend jamais.
+// La colonne se lit dans l’ordre de ce qui compte, décidé par Lucas le 13/09/2026 :
+// « matériau / acteur / opération laser / si possible le marché ou le nom de la pièce. Procédé
+// technologique & capacité machine sont des P2. »
+//
+// C’est donc une DÉCISION, pas un classement par taux de remplissage, et elle prime sur la
+// règle de couverture plus bas : procédé technologique classe 22 % du corpus, plus que marché
+// (10 %) ou pièce (8 %), et reste pourtant derrière le bouton « autres filtres ». Une colonne
+// dont l’ordre change avec les données ne s’apprend jamais.
 const TC_FACET_GROUPS = [
-  {key: "axis", label: "PROCÉDÉ TECHNOLOGIQUE", valuesOf: tcRowAxes},
-  ...TC_FAMILY_GROUPS.map(({key, label}) => ({key, label, valuesOf: row => tcRowFamily(row, key)})),
+  {key: "operation", label: "OPÉRATION", valuesOf: row => tcRowFamily(row, "operation")},
+  {key: "material", label: "MATÉRIAU", valuesOf: row => tcRowFamily(row, "material")},
   {key: "actor", label: "ACTEUR", valuesOf: tcRowActors},
+  {key: "market", label: "MARCHÉ", valuesOf: row => tcRowFamily(row, "market")},
+  {key: "component", label: "PIÈCE", valuesOf: row => tcRowFamily(row, "component")},
+  {key: "axis", label: "PROCÉDÉ TECHNOLOGIQUE", valuesOf: tcRowAxes},
+  {key: "machine_capability", label: "CAPACITÉ MACHINE", valuesOf: row => tcRowFamily(row, "machine_capability")},
+  {key: "architecture", label: "ARCHITECTURE", valuesOf: row => tcRowFamily(row, "architecture")},
 ];
 
 // Bloc de lecture, en bas de page : ce que la répartition des familles dit du corpus.
@@ -1120,48 +1130,64 @@ function tcEmptyFacets() {
 // Marché couvrait 11 documents sur 98, Bénéfice visé 7 et Architecture 3 -- trois groupes pour
 // 21 documents, quand Opération et Matériau en classaient 43 et 44.
 //
-// Le seuil est appliqué aux DONNÉES plutôt qu'à une liste écrite en dur : le corpus a triplé en
-// une collecte, et toute liste figée aujourd'hui serait fausse dans un mois. Une dimension qui
-// se remplit remonte d'elle-même. Type, axe et acteur restent toujours visibles : ce sont les
-// trois entrées par lesquelles on aborde le corpus, indépendamment de leur taux de remplissage.
+// Cette règle ne gouverne plus que ce que Lucas n’a pas classé lui-même, c’est-à-dire
+// Architecture. Les deux listes ci-dessous priment sur elle, dans les deux sens.
 const TC_PRIMARY_COVERAGE = 0.2;
-// Les cinq dimensions de lecture retenues par Lucas le 10/09/2026 : procédé, capacité machine,
-// opération, matériau, acteur. Elles restent visibles quel que soit leur remplissage -- procédé
-// (10 %) et capacité machine (18 %) passeraient sous le seuil, et la première dimension de la
-// grille de lecture derrière un bouton n'aurait aucun sens. La règle de couverture ne gouverne
-// donc plus que le reste : marché, architecture, bénéfice visé.
-const TC_ALWAYS_PRIMARY = ["axis", "machine_capability", "operation", "material", "actor"];
+// Les cinq dimensions nommées par Lucas le 13/09/2026 : matériau, acteur, opération, puis « si
+// possible le marché ou le nom de la pièce ». Marché (10 %) et Pièce (8 %) passeraient sous le
+// seuil de couverture, et c’est précisément pour ça qu’elles sont listées : leur place vient
+// de leur valeur de lecture, pas de leur remplissage du moment.
+const TC_ALWAYS_PRIMARY = ["operation", "material", "actor", "market", "component"];
+// Et le pendant, qui manquait : des dimensions que le taux de remplissage ne doit PAS faire
+// remonter. Procédé technologique et capacité machine sont des P2 -- ils classent 22 % et 15 %
+// du corpus, donc la règle de couverture les mettrait en tête de colonne alors qu’ils ne sont
+// pas ce qu’on vient chercher ici.
+const TC_ALWAYS_SECONDARY = ["axis", "machine_capability"];
 
 function tcSplitFacetGroups(corpus) {
   const primary = [];
   const secondary = [];
   for (const group of TC_FACET_GROUPS) {
     const covered = corpus.filter(row => group.valuesOf(row).length).length;
-    const isPrimary = TC_ALWAYS_PRIMARY.includes(group.key)
-      || !corpus.length
-      || covered / corpus.length >= TC_PRIMARY_COVERAGE;
+    const isPrimary = TC_ALWAYS_SECONDARY.includes(group.key)
+      ? false
+      : TC_ALWAYS_PRIMARY.includes(group.key)
+        || !corpus.length
+        || covered / corpus.length >= TC_PRIMARY_COVERAGE;
     (isPrimary ? primary : secondary).push(group);
   }
   return {primary, secondary};
 }
 
+// Les dimensions mises en avant sur une ligne, et dans quel ordre. Mêmes P1 que la colonne de
+// facettes, moins l’acteur qui a déjà son propre segment plus loin dans la ligne.
+//
+// C’était le procédé technologique qui occupait cette place jusqu’au 13/09/2026, avec un
+// « Axe non qualifié » sur 118 lignes du corpus sur 144 : la dimension la moins remplie, en
+// tête de chaque ligne, à dire qu’elle est vide.
+const TC_ROW_PRIMARY = ["operation", "material", "market", "component"];
+
 function tcCorpusRow(row) {
-  // L'axe technologique garde sa place ; les autres familles suivent en gris. Une ligne sans
-  // AUCUNE famille reste explicitement dite non qualifiée -- c'est le signal de travail pour
-  // la file de validation, il ne doit pas se diluer parce qu'un matériau a été reconnu.
-  const families = Object.values(row.families || {}).flat();
-  const others = families.filter(label => !row.axes.includes(label));
-  const axes = row.axes.length
-    ? `<span class="ex-axis">${row.axes.map(esc).join(" · ")}</span>`
-    : families.length
-      ? `<span class="ex-axis ex-none">Axe non qualifié</span>`
+  // Ce qu’on vient lire d’abord passe en accent ; procédé, capacité machine et architecture
+  // suivent en gris. Deux manques distincts, et la distinction compte pour la file de
+  // validation : « Non qualifié » = on sait quelque chose de cette ligne, mais rien de ce
+  // qu’on vient y chercher ; « Non classé » = le lexique n’a rien reconnu du tout.
+  const lead = TC_ROW_PRIMARY.flatMap(dimension => tcRowFamily(row, dimension));
+  const rest = Object.entries(row.families || {})
+    .filter(([dimension]) => !TC_ROW_PRIMARY.includes(dimension))
+    .flatMap(([, labels]) => labels)
+    .filter(label => !lead.includes(label));
+  const head = lead.length
+    ? `<span class="ex-axis">${lead.map(esc).join(" · ")}</span>`
+    : rest.length
+      ? `<span class="ex-axis ex-none">Non qualifié</span>`
       : `<span class="ex-axis ex-none">Non classé</span>`;
-  const extra = others.length ? `<span class="ex-family">${others.map(esc).join(" · ")}</span>` : "";
+  const extra = rest.length ? `<span class="ex-family">${rest.map(esc).join(" · ")}</span>` : "";
   return `<button type="button" class="ex-row" data-ex-open="${esc(row.uid)}">
     <span class="ex-kind ${esc(row.kind)}">${esc(TC_KIND_LABELS[row.kind] || row.kind)}</span>
     <span class="ex-doc">
       <span class="ex-doc-title">${esc(row.title)}</span>
-      <span class="ex-doc-meta">${axes}${extra ? `<span class="ex-sep">·</span>${extra}` : ""}<span class="ex-sep">·</span><span class="ex-actor">${esc(tcActorLabel(row))}</span><span class="ex-sep">·</span><span class="ex-ref">${esc(row.reference)}</span></span>
+      <span class="ex-doc-meta">${head}${extra ? `<span class="ex-sep">·</span>${extra}` : ""}<span class="ex-sep">·</span><span class="ex-actor">${esc(tcActorLabel(row))}</span><span class="ex-sep">·</span><span class="ex-ref">${esc(row.reference)}</span></span>
     </span>
     <span class="ex-date">${esc(tcDateLabel(row))}</span>
   </button>`;
@@ -1223,7 +1249,7 @@ function renderTechCorpus() {
       <div>
         <p class="ex-eyebrow">INTELLIGENCE</p>
         <h1>Technologie laser</h1>
-        <p class="ex-lede">Le corpus technique complet : publications, brevets et projets européens. Les facettes se lisent dans l’ordre : procédé technologique, capacité machine, opération, matériau, acteur. Marché, architecture et bénéfice s’ajoutent d’un clic.</p>
+        <p class="ex-lede">Le corpus technique complet : publications, brevets et projets européens. Les facettes se lisent dans l’ordre : opération, matériau, acteur, puis marché et pièce. Procédé technologique et capacité machine s’ajoutent d’un clic.</p>
       </div>
       <div class="ex-head-actions">
         <button type="button" class="ex-btn" data-ex-export>↓ Exporter CSV</button>
@@ -1272,7 +1298,7 @@ function renderTechCorpus() {
         </div>
 
         <div class="ex-table">
-          <div class="ex-row ex-thead"><div>TYPE</div><div>DOCUMENT · FAMILLES · ACTEUR</div><div>DATE</div></div>
+          <div class="ex-row ex-thead"><div>TYPE</div><div>DOCUMENT · OPÉRATION · MATÉRIAU · ACTEUR</div><div>DATE</div></div>
           ${shown.length ? shown.map(tcCorpusRow).join("") : `<div class="ex-empty"><strong>Aucun document ne correspond à cette recherche.</strong><p>Essayez un mot-clé plus court, ou <button type="button" data-ex-reset-all>réinitialisez la recherche</button>.</p></div>`}
         </div>
         <div class="ex-foot">Affichage de ${shown.length} document(s) sur ${filtered.length}${filtered.length === corpus.length ? "" : ` (corpus complet : ${corpus.length})`}. ${shown.length < filtered.length ? `<button type="button" class="ex-more" data-ex-more>Charger la suite →</button>` : ""}</div>
