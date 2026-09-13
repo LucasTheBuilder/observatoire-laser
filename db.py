@@ -116,6 +116,15 @@ ACTORS = [
     # SCHOTT Primoceler : régime picoseconde (pas femtoseconde) -- dans le périmètre USP au même
     # titre que laserKRAFTwerk ou ACunity. Premier acteur nordique du roster.
     ("SCHOTT Primoceler", "Finlande", "CDMO de scellement hermétique verre-verre par laser USP (picoseconde)", 0, "https://primoceler.com"),
+    # Deuxième passe de complétude (13/09/2026) : trois prestataires trouvés par balayage
+    # systématique -- annuaire AILU des job-shops et recherches en langue locale -- et non par
+    # connaissance préalable. C'est la méthode qui compte : la recherche en anglais les avait
+    # tous les trois manqués. Trois autres pistes (Hofmeister CZ, Micrometric RU, Laser Nova SE)
+    # restent en 'candidate' faute de preuve d'impulsions ultra-courtes.
+    ("Lasertec BV", "Pays-Bas", "Sous-traitance de micro-usinage laser USP (horlogerie, médical, semi-conducteur)", 0, "https://www.lasertec.nl"),
+    # photonicfab : picoseconde revendiquée, pas femtoseconde -- périmètre USP, comme laserKRAFTwerk.
+    ("photonicfab", "Allemagne", "Laser-Lohnfertigung en micro-usinage (nano/picoseconde)", 0, "https://photonicfab.de"),
+    ("Scitech Precision", "Royaume-Uni", "Micro-usinage laser femtoseconde/excimer & micro-cibles pour laser de puissance", 0, "https://scitechprecision.com"),
 ]
 
 # Quelques URLs de pages connues, injectées d'office dans actor_sources au démarrage (avant
