@@ -13,16 +13,13 @@ const state = {
   documents: [],
   actors: [],
   profiles: [],
-  vocabulary: [],
   marketReview: [],
   rejectReasons: null,
-  actorDiscovery: [],
   reviewOffers: [],
   reviewEvents: [],
   collectionHealth: null,
   schedulerStatus: null,
   veilleMetrics: null,
-  digest: null,
   demandSignals: [],
   marketSizing: [],
   referenceMatrix: [],
@@ -32,7 +29,7 @@ const state = {
   duplicates: [],
   pipelineFunnel: {discovered: 0, fetched: 0, parsed: 0, evidence: 0, validated: 0},
   // Score d'attractivité par marché (audit Horizon 2 #14, voir scoring.py) -- chargé en bloc
-  // avec le reste (petite liste, un par marché connu), contrairement aux séries temporelles.
+  // avec le reste : petite liste, un par marché connu.
   marketScores: [],
   query: "",
   offerQuery: "",
@@ -45,16 +42,11 @@ const state = {
   marketDrill: null,
   actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
   marketReviewFilters: {origin: "", factStatus: "", actor: ""},
-  // Échantillon d'audit : chargé à la demande (comme state.trends), parce qu'il dépend d'une
+  // Échantillon d'audit : chargé à la demande, parce qu'il dépend d'une
   // configuration -- file auditée et taille du tirage -- et non d'un simple GET fixe.
   auditSample: null,
   auditLoading: false,
   auditConfig: {queue: "offers", size: 30},
-  // Séries temporelles (audit Horizon 2 #12) : chargées à la demande (pas dans refresh()) --
-  // 85+ clés possibles (acteurs+marchés+axes), un fetch par clé au clic évite un chargement
-  // initial disproportionné. keys/points restent en cache tant que la dimension/clé ne change
-  // pas, et sont resynchronisés après toute collecte terminée (voir poll()).
-  trends: {dimension: "signal", key: "__global__", keys: [], points: [], loading: false},
   // Corpus technique unifié (page "Technologie laser") : publications + brevets + projets EU
   // en une seule liste, servie par /api/tech-corpus. Le filtrage est entièrement client --
   // le corpus se compte en dizaines de lignes, pas en milliers.
@@ -492,22 +484,6 @@ function nextBestActions() {
   // Auparavant la Synthese telechargeait les files completes -- ~500 Ko de charge utile pour
   // en deriver cinq entiers, sur un onglet qui n'affiche aucune de ces listes.
   const pending = state.overview?.pending || {};
-  const pendingVocab = pending.vocabulary || 0;
-  if (pendingVocab > 0) {
-    actions.push({
-      label: `Valider ${pendingVocab} terme${pendingVocab > 1 ? "s" : ""} en attente`,
-      detail: "File de validation du vocabulaire.",
-      view: "vocabulary",
-    });
-  }
-  const pendingCandidates = pending.actor_candidates || 0;
-  if (pendingCandidates > 0) {
-    actions.push({
-      label: `Trier ${pendingCandidates} acteur${pendingCandidates > 1 ? "s" : ""} candidat${pendingCandidates > 1 ? "s" : ""}`,
-      detail: "Organisations repérées automatiquement, à promouvoir ou rejeter.",
-      view: "actor-discovery",
-    });
-  }
   const pendingMarketReview = pending.market_review || 0;
   if (pendingMarketReview > 0) {
     actions.push({
@@ -950,6 +926,7 @@ function renderOffers() {
 
 // Toujours utilisé par la fiche acteur et la page séries temporelles.
 const DOC_TYPE_LABELS = {publication: "Publication", patent: "Brevet", project: "Projet", other: "Autre"};
+const DOC_TYPE_ORDER = ["publication", "patent", "project", "other"];
 
 const TC_KIND_LABELS = {pub: "Publication", brevet: "Brevet", projet: "Projet EU", autre: "Autre"};
 const TC_TYPE_TABS = ["Tous", "Publications", "Brevets", "Projets européens"];
@@ -1468,55 +1445,11 @@ function cardSummaryLine(a) {
   return text.length > 300 ? `${text.slice(0, 299)}…` : text;
 }
 
-// Chantier 6 : "score de complétude par acteur ... c'est ce qui pilote l'effort de collecte,
-// aujourd'hui rien ne signale qu'un acteur priority avec des dizaines d'URLs découvertes a
-// zéro fait marché" -- ce badge est délibérément sur la CARTE (pas seulement dans la fiche),
-// pour être visible d'un coup d'oeil sur la liste complète des acteurs.
-function completenessLevel(score) {
-  if (score >= 0.6) return "good";
-  if (score >= 0.3) return "partial";
-  return "weak";
-}
-
-// Scores séparés confiance/menace (audit Horizon 2 #14, voir scoring.py) : distincts de la
-// complétude ci-dessus (qui ne mesure que la PRÉSENCE de données). confidence_score est None
-// tant qu'aucun fait n'a été collecté sur l'acteur -- pas de badge dans ce cas plutôt qu'un 0
-// qui dirait à tort "confiance nulle" au lieu de "rien à évaluer encore".
-function confidenceBadge(a) {
-  if (a.confidence_score == null) return "";
-  const level = completenessLevel(a.confidence_score / 100);
-  return `<span class="completeness-badge lvl-${level}" title="Fiabilité des données collectées : faits validés, citations verbatim, dates de publication confirmées.">${Math.round(a.confidence_score)} confiance</span>`;
-}
-
-function threatLevel(score) {
-  if (score >= 55) return "weak"; // reuses completeness-badge's red tone for "high threat"
-  if (score >= 25) return "partial";
-  return "good"; // reuses the green tone for "low threat" -- inverted semantics vs confidence
-}
-
-function threatBadge(a) {
-  if (a.is_reference) return "";
-  const level = threatLevel(a.threat_score || 0);
-  return `<span class="completeness-badge lvl-${level}" title="Classe concurrentielle, ampleur des faits démontrés, vélocité récente (60 derniers jours).">${Math.round(a.threat_score || 0)} menace</span>`;
-}
-
-function completenessBadge(a) {
-  const pct = Math.round((a.completeness_score || 0) * 100);
-  const level = completenessLevel(a.completeness_score || 0);
-  const title = (a.completeness_missing || []).length
-    ? `Manque : ${a.completeness_missing.join(", ")}`
-    : "Complet sur toutes les dimensions suivies";
-  return `<span class="completeness-badge lvl-${level}" title="${esc(title)}">${pct}% complet</span>`;
-}
-
 function actorCard(a) {
   const paused = !a.active;
-  const classBadge = a.competitive_class
-    ? `<span class="class-badge ${esc(a.competitive_class)}">${esc(a.competitive_class)}${COMPETITIVE_CLASS_SHORT[a.competitive_class] ? ` · ${esc(COMPETITIVE_CLASS_SHORT[a.competitive_class])}` : ""}</span>`
-    : "";
   const typeLabel = ACTOR_TYPE_LABELS[a.actor_type] ? `<p class="actor-type-label">${esc(ACTOR_TYPE_LABELS[a.actor_type])}</p>` : "";
   return `<article class="actor-card ${a.priority?'priority':''}" ${paused?'style="opacity:.55"':''}>
-    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div><div class="actor-top-tags">${classBadge}${a.priority?'<span>★ Prioritaire</span>':''}${completenessBadge(a)}${confidenceBadge(a)}${threatBadge(a)}</div></div>
+    <div class="actor-top"><div class="initial">${esc(a.name.slice(0,2))}</div></div>
     <h3 class="actor-name-link" data-actor-detail="${a.id}">${esc(a.name)}</h3>${typeLabel}<p class="actor-summary-line">${esc(cardSummaryLine(a))}</p>
     <div class="actor-card-actions">
       <button class="actor-detail-link" data-actor-detail="${a.id}">Voir la fiche →</button>
@@ -2031,37 +1964,6 @@ function showActorAdd() {
   document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
 }
 
-function dimensionLabel(dimension) {
-  return {market: "Marché", component: "Composant", operation: "Opération"}[dimension] || dimension;
-}
-
-function vocabCard(item) {
-  const dims = Object.entries(item.proposed_labels || {});
-  const context = Object.entries(item.resolved_labels || {}).map(([k, v]) => `${dimensionLabel(k)} : ${v}`).join(" · ");
-  return `<article class="vocab-card">
-    <header><span>${esc(item.actor_name)} · ${dateLabel(item.last_seen_at)}</span>${context ? `<span>${esc(context)}</span>` : ""}</header>
-    <blockquote>${esc(item.quote)}</blockquote>
-    <div class="vocab-dims">
-      ${dims.map(([dimension, label]) => `<div class="vocab-dim"><small>${esc(dimensionLabel(dimension))}</small><b>${esc(label)}</b><button class="vocab-accept" data-accept-vocab="${item.id}" data-dimension="${esc(dimension)}">Accepter</button></div>`).join("")}
-      <button class="vocab-reject" data-reject-vocab="${item.id}">Rejeter</button>
-    </div>
-    <a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>
-  </article>`;
-}
-
-function renderVocabulary() {
-  const items = state.vocabulary || [];
-  content.innerHTML = header(
-    "Validation",
-    "Détections IA à valider",
-    "Libellés marché/composant/opération proposés par le modèle mais absents du lexique connu. Accepter un libellé l’ajoute au lexique vivant, utilisable dès la prochaine collecte marché — sans déploiement de code."
-  ) +
-  (items.length
-    ? `<div class="vocab-list">${items.map(vocabCard).join("")}</div>`
-    : `<div class="empty">Aucune proposition en attente de revue.</div>`);
-  wireActions();
-}
-
 // --- Faits marché en attente de revue humaine (fact_status='partial'/'review') --------------
 // Contrairement à /api/market (qui exige les 3 dimensions market+component+operation reliées
 // ET bucket in existing/radar), ces faits n'apparaissent nulle part ailleurs dans l'app tant
@@ -2410,7 +2312,7 @@ function renderMarketReview() {
   + reviewQueueSection("⚑", "Événements à valider", "Événements datés (M&A, financement, mentions presse) détectés mais pas encore vérifiés — jamais visibles ailleurs dans l'app tant qu'ils restent ici.", state.reviewEvents || [])
   + auditSampleSection();
   buildReviewJumpBar();
-  // Chargement paresseux, même principe que state.trends : le premier passage sur la page
+  // Chargement paresseux : le premier passage sur la page
   // déclenche le tirage, les suivants réutilisent l'échantillon déjà en mémoire (sans quoi il
   // changerait à chaque re-render, donc à chaque décision).
   if (!state.auditSample && !state.auditLoading) loadAuditSample();
@@ -2457,149 +2359,6 @@ async function decideReviewItem(queue, itemId, decision, rejectReason) {
   } catch (error) { toast(error.message); }
 }
 
-// --- Découverte d'acteurs (Lot 3 §3.2/§3.4) : rubrique unique regroupant les candidats
-// accumulés par toutes les sources -- CORDIS, OpenAlex, brevets EPO OPS, liens sortants
-// récurrents (voir actor_discovery.py/cordis.py/openalex.py/patent.py) -- avant qu'un humain
-// ne décide de les promouvoir. Un candidat promu devient un acteur réel review_status='candidate'
-// et rejoint alors la file « En attente de validation » déjà présente sur la page Acteurs
-// (reviewActorCard plus haut) pour la décision finale -- deux étapes distinctes, jamais
-// fusionnées : un nom candidat n'est pas encore un acteur.
-const CANDIDATE_SOURCE_LABELS = {cordis: "CORDIS", openalex: "OpenAlex", outbound_link: "Lien sortant", patent: "Brevet EPO OPS"};
-
-const CANDIDATE_MAX_VISIBLE_OCCURRENCES = 4;
-
-function actorCandidateCard(item) {
-  const sources = item.sources || [];
-  const distinctTypes = [...new Set(sources.map(s => s.source_type))];
-  const sourceLine = distinctTypes.map(t => CANDIDATE_SOURCE_LABELS[t] || t).join(" · ");
-  const visible = sources.slice(0, CANDIDATE_MAX_VISIBLE_OCCURRENCES);
-  const hiddenCount = sources.length - visible.length;
-  return `<article class="vocab-card">
-    <header><span>${esc(item.name)}${item.country ? ` · ${esc(item.country)}` : ""}</span><span>${item.score} source${item.score > 1 ? "s" : ""} indépendante${item.score > 1 ? "s" : ""}</span></header>
-    ${sourceLine ? `<small class="block-label">${esc(sourceLine)}</small>` : ""}
-    ${visible.map(s => `<blockquote>${esc(s.context || "Occurrence sans contexte capturé.")}${s.source_url ? ` <a class="signal-link" href="${esc(s.source_url)}" target="_blank" rel="noopener">↗</a>` : ""}</blockquote>`).join("")}
-    ${hiddenCount > 0 ? `<small class="block-label">+ ${hiddenCount} autre${hiddenCount > 1 ? "s" : ""} occurrence${hiddenCount > 1 ? "s" : ""}</small>` : ""}
-    <div class="vocab-dims" style="margin-top:12px">
-      <button class="vocab-accept" data-promote-candidate="${item.id}">✓ Promouvoir</button>
-      ${rejectReasonSelect("candidates", `candidate:${item.id}`)}
-      <button class="vocab-reject" data-reject-candidate="${item.id}">✕ Rejeter</button>
-    </div>
-  </article>`;
-}
-
-function renderActorDiscovery() {
-  const items = state.actorDiscovery || [];
-  content.innerHTML = header(
-    "Administration",
-    "Découverte d'acteurs",
-    "Organisations repérées automatiquement -- consortiums CORDIS, co-auteurs OpenAlex, déposants de brevets EPO OPS, liens sortants revenant sur plusieurs sites d'acteurs -- mais jamais ajoutées comme acteur tant qu'un humain ne l'a pas validé. Le score compte les sources indépendantes qui citent le même nom. Promouvoir crée un acteur réel, qui rejoint ensuite la file « En attente de validation » de la page Acteurs pour la décision finale."
-  ) +
-  (items.length
-    ? `<div class="vocab-list">${items.map(actorCandidateCard).join("")}</div>`
-    : `<div class="empty">Aucun candidat en attente de revue.</div>`);
-  wireActions();
-}
-
-function showCandidatePromote(candidateId) {
-  const item = (state.actorDiscovery || []).find(c => c.id === candidateId);
-  if (!item) return;
-  document.querySelector("#proof-content").innerHTML = `<p class="eyebrow">Promouvoir en acteur</p>
-    <h2>${esc(item.name)}</h2>
-    <form id="candidate-promote-form" class="detail-form">
-      <label>Rôle<input type="text" name="role" placeholder="Rôle" required></label>
-      <label>Pays<input type="text" name="country" value="${esc(item.country || "")}" placeholder="Pays" required></label>
-      <label>Site officiel<input type="url" name="official_url" value="${esc(item.suggested_official_url || "")}" placeholder="https://site-officiel.example" required></label>
-      <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Promouvoir</button></div>
-    </form>`;
-  dialog.classList.remove("wide");
-  dialog.showModal();
-  document.querySelector("#candidate-promote-form").addEventListener("submit", async e => {
-    e.preventDefault();
-    const data = new FormData(e.target);
-    try {
-      await api(`/api/actor-candidates/${candidateId}/promote`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({role: data.get("role"), country: data.get("country"), official_url: data.get("official_url")}),
-      });
-      toast("Candidat promu en acteur.");
-      dialog.close();
-      [state.actorDiscovery, state.actors] = await Promise.all([api("/api/actor-candidates"), api("/api/actors")]);
-      renderActorDiscovery();
-    } catch (error) { toast(error.message); }
-  });
-  document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
-}
-
-// Le motif TYPÉ est envoyé ici comme pour les sept autres files (decideReviewItem ci-dessus).
-// Sans lui, un rejet de candidat acteur n'apprend rien : il dit qu'on n'en veut pas, jamais
-// pourquoi -- donc rien ne peut remonter à la source de découverte qui l'a proposé.
-async function rejectCandidate(candidateId, rejectReason) {
-  try {
-    await api(`/api/actor-candidates/${candidateId}/reject`, {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({reject_reason: rejectReason}),
-    });
-    toast("Candidat rejeté.");
-    state.actorDiscovery = await api("/api/actor-candidates");
-    renderActorDiscovery();
-  } catch (error) { toast(error.message); }
-}
-
-// --- Digest (§5.F audit veille, 30/08/2026) : "ce digest ne doit contenir QUE du changement
-// depuis `since`, jamais un état" -- 4 règles évaluées après chaque collecte (voir alerts.py) :
-// transition radar->existing, nouveau fait chez un acteur C1/C2, incident de collecte, signal
-// M&A/financement. GET /api/digest existait déjà, mais rien dans l'app ne l'appelait -- 60
-// alertes réelles accumulées en silence au 31/08/2026, dont une vraie acquisition (Blueacre
-// Technology).
-const ALERT_TYPE_LABELS = {
-  bucket_transition_existing: "Passage radar → existant",
-  new_fact_high_value_actor: "Nouveau fait chez un acteur prioritaire",
-  collection_incident: "Incident de collecte",
-  ma_funding_event: "M&A / financement",
-};
-
-function digestAlertCard(item) {
-  return `<article class="vocab-card">
-    <header><span>${esc(item.actor_name || "—")} · ${dateLabel(item.event_at)}</span></header>
-    <p class="dialog-operation">${esc(item.summary)}</p>
-    ${item.detail ? `<blockquote>${esc(item.detail)}</blockquote>` : ""}
-    ${item.source_url ? `<a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>` : ""}
-  </article>`;
-}
-
-function renderDigest() {
-  const digest = state.digest || {since: null, total: 0, by_type: {}};
-  const sections = Object.entries(ALERT_TYPE_LABELS).map(([type, label]) => {
-    const items = digest.by_type[type] || [];
-    if (!items.length) return "";
-    return `<section><div class="section-title"><div><span>⚑</span><div><h2>${esc(label)}</h2></div></div><b>${items.length}</b></div>
-      <div class="vocab-list">${items.map(digestAlertCard).join("")}</div>
-    </section>`;
-  }).join("");
-  content.innerHTML = header(
-    "Intelligence",
-    "Digest",
-    "Ce qui a changé depuis la fenêtre choisie -- transition radar → existant, nouveau fait chez un acteur prioritaire, incident de collecte, ou signal M&A/financement. Jamais un état, seulement du changement.",
-    `<div class="header-actions">
-      <button class="export-btn" data-digest-window="7">7 j</button>
-      <button class="export-btn" data-digest-window="30">30 j</button>
-      <button class="export-btn" data-digest-window="90">90 j</button>
-    </div>`
-  ) +
-  (digest.total
-    ? `<p class="actor-summary-counts">${digest.total} alerte${digest.total > 1 ? "s" : ""} depuis ${dateLabel(digest.since)}</p>${sections}`
-    : `<div class="empty">Aucune alerte sur cette fenêtre.</div>`);
-  wireActions();
-}
-
-async function setDigestWindow(days) {
-  try {
-    const since = new Date(Date.now() - days * 86400000).toISOString();
-    state.digest = await api(`/api/digest?since=${encodeURIComponent(since)}`);
-    renderDigest();
-  } catch (error) { toast(error.message); }
-}
 
 function dbCard(kind,label,file,count,detail,paused=false) {
   const last=state.overview?.[kind]?.last_run;
@@ -2813,230 +2572,6 @@ async function deleteGoldenFact(factId) {
   } catch (error) { toast(error.message); }
 }
 
-// --- Séries temporelles (audit Horizon 2 #12 : "Construire séries temporelles par acteur,
-// marché, technologie, maturité et signal") -- voir timeseries.py côté serveur pour le calcul.
-// Chaque instantané reflète l'état constaté au moment de la capture (jamais un point
-// rétroactif fabriqué) : avec un seul mois de recul pour l'instant, les graphiques ci-dessous
-// sont volontairement conçus pour rester lisibles à 1 point (voir tsSparseNote/svgSeriesChart)
-// plutôt que de paraître cassés en attendant les prochains cycles de collecte.
-const TIMESERIES_DIMENSION_LABELS = {actor: "Acteur", market: "Marché", technology: "Technologie", maturity: "Maturité", signal: "Signal"};
-const TIMESERIES_DIMENSION_HINTS = {
-  actor: "Trajectoire documentaire d’un acteur : faits marché validés par bucket, offres, sources actives.",
-  market: "Distribution par bucket (existant/radar) et par stade industriel d’un marché, et nombre d’acteurs actifs dessus.",
-  technology: "Signaux technologiques par axe (existant/radar) ; « Toutes / global » regroupe les publications/brevets/projets.",
-  maturity: "Distribution des stades industriels (R&D → Production) et des buckets, globale ou par marché — la mesure « passage prototype → production » que l’audit réclamait.",
-  signal: "Vélocité : faits marché validés, offres, documents et signaux technologiques nouveaux chaque mois — la mesure la plus proche d’un « marché qui monte ».",
-};
-const STAGE_ORDER = ["R&D", "Prototype", "Pré-industrialisation", "Industrialisation", "Production", "Maturité industrielle non déterminée"];
-const STAGE_COLORS = {
-  "R&D": "#8b79c9", "Prototype": "#d8a13d", "Pré-industrialisation": "#4f8fd8",
-  "Industrialisation": "var(--chart-teal)", "Production": "var(--chart-coral)",
-  "Maturité industrielle non déterminée": "#b7c0c4",
-};
-const DOC_TYPE_ORDER = ["publication", "patent", "project", "other"];
-const DOC_TYPE_COLORS = {publication: "var(--chart-teal)", patent: "#a8790b", project: "#6b4fb3", other: "#5c7986"};
-// DOC_TYPE_LABELS (Publication/Brevet/Projet/Autre) est déjà déclaré plus haut pour la page
-// "Technologies futures" -- réutilisé tel quel ici, pas de doublon.
-const BUCKET_ORDER = ["existing", "radar"];
-const BUCKET_COLORS = {existing: "var(--chart-teal)", radar: "var(--chart-coral)"};
-const BUCKET_LABELS = {existing: "Existant", radar: "Radar"};
-
-function periodLabel(period) {
-  const [y, m] = String(period || "").split("-").map(Number);
-  if (!y || !m) return esc(period);
-  return new Intl.DateTimeFormat("fr-FR", {month: "short", year: "2-digit"}).format(new Date(y, m - 1, 1));
-}
-
-function tsLegend(series) {
-  if (!series.length) return "";
-  return `<div class="chart-legend">${series.map(s => `<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join("")}</div>`;
-}
-
-// Une ligne + points par série ; en-dessous de 2 points le tracé disparaît (rien à relier) mais
-// les points restent affichés avec leur valeur en infobulle -- jamais un graphique vide alors
-// que la donnée existe.
-function svgSeriesChart(points, series) {
-  const width = 760, height = 220, padL = 44, padR = 16, padT = 16, padB = 30;
-  const innerW = width - padL - padR, innerH = height - padT - padB;
-  const maxVal = Math.max(1, ...points.flatMap(p => series.map(s => Number(p[s.key]) || 0)));
-  const x = i => points.length > 1 ? padL + (innerW * i) / (points.length - 1) : padL + innerW / 2;
-  const y = v => padT + innerH - (innerH * v) / maxVal;
-  const gridLines = [0, 0.5, 1].map(f => `<line x1="${padL}" y1="${(padT + innerH * (1 - f)).toFixed(1)}" x2="${width - padR}" y2="${(padT + innerH * (1 - f)).toFixed(1)}" class="ts-grid"/><text x="${padL - 8}" y="${(padT + innerH * (1 - f) + 3).toFixed(1)}" text-anchor="end" class="ts-axis-label">${Math.round(maxVal * f)}</text>`).join("");
-  const xLabels = points.map((p, i) => `<text x="${x(i).toFixed(1)}" y="${height - 8}" text-anchor="middle" class="ts-axis-label">${esc(periodLabel(p.period))}</text>`).join("");
-  const lines = series.map(s => {
-    const path = points.length > 1 ? points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(Number(p[s.key]) || 0).toFixed(1)}`).join(" ") : "";
-    const dots = points.map((p, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(Number(p[s.key]) || 0).toFixed(1)}" r="3.5" fill="${s.color}"><title>${esc(s.label)} · ${esc(periodLabel(p.period))} : ${esc(String(p[s.key] ?? 0))}</title></circle>`).join("");
-    return (path ? `<path d="${path}" fill="none" stroke="${s.color}" stroke-width="2"/>` : "") + dots;
-  }).join("");
-  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" class="ts-chart" role="img" aria-label="Évolution dans le temps">${gridLines}${lines}${xLabels}</svg>`;
-}
-
-// Une barre empilée par période pour une distribution imbriquée (stage_distribution,
-// bucket_distribution, documents_by_type) -- fonctionne dès 1 seule période, contrairement à
-// svgSeriesChart qui a besoin d'un tracé.
-function svgStackedBarChart(points, field, order, colors) {
-  const width = 760, height = 220, padL = 16, padR = 16, padT = 16, padB = 30;
-  const innerW = width - padL - padR, innerH = height - padT - padB;
-  const totals = points.map(p => order.reduce((sum, k) => sum + (Number((p[field] || {})[k]) || 0), 0));
-  const maxTotal = Math.max(1, ...totals);
-  const barW = Math.min(56, (innerW / points.length) * 0.55);
-  const bars = points.map((p, i) => {
-    const cx = padL + (innerW * (i + 0.5)) / points.length;
-    let yCursor = padT + innerH;
-    const dist = p[field] || {};
-    const segments = order.filter(key => dist[key]).map(key => {
-      const value = Number(dist[key]) || 0;
-      const segH = maxTotal ? (innerH * value) / maxTotal : 0;
-      yCursor -= segH;
-      return `<rect x="${(cx - barW / 2).toFixed(1)}" y="${yCursor.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0, segH).toFixed(1)}" fill="${colors[key] || "#ccd6d9"}"><title>${esc(key)} · ${esc(periodLabel(p.period))} : ${value}</title></rect>`;
-    }).join("");
-    const label = `<text x="${cx.toFixed(1)}" y="${height - 8}" text-anchor="middle" class="ts-axis-label">${esc(periodLabel(p.period))}</text>`;
-    return segments + label;
-  }).join("");
-  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" class="ts-chart" role="img" aria-label="Distribution par période">${bars}</svg>`;
-}
-
-function tsKpiGrid(entries) {
-  return `<div class="ts-kpi-grid">${entries.map(([label, value]) => `<div class="ts-kpi"><strong>${esc(String(value))}</strong><span>${esc(label)}</span></div>`).join("")}</div>`;
-}
-
-function tsSparseNote(points) {
-  if (points.length >= 2) return "";
-  return `<p class="ts-note">Historique en construction (${points.length} point${points.length > 1 ? "s" : ""} pour l’instant) — un point réel s’ajoute à chaque cycle de collecte, jamais reconstruit rétroactivement.</p>`;
-}
-
-function renderTrendsBody(points) {
-  const dimension = state.trends.dimension, key = state.trends.key;
-  const latest = points[points.length - 1] || {};
-  if (dimension === "actor") {
-    const series = [
-      {key: "evidence_existing", label: "Faits existants", color: BUCKET_COLORS.existing},
-      {key: "evidence_radar", label: "Faits radar", color: BUCKET_COLORS.radar},
-      {key: "offers_count", label: "Offres", color: "#6b4fb3"},
-      {key: "sources_active", label: "Sources actives", color: "var(--lime)"},
-    ];
-    return tsSparseNote(points) + tsLegend(series) + svgSeriesChart(points, series) +
-      tsKpiGrid([
-        ["Classe concurrentielle", latest.competitive_class || "Non classé"],
-        ["Faits existants", latest.evidence_existing ?? 0], ["Faits radar", latest.evidence_radar ?? 0],
-        ["Offres", latest.offers_count ?? 0], ["Sources actives", latest.sources_active ?? 0],
-      ]);
-  }
-  if (dimension === "market") {
-    const series = [
-      {key: "existing", label: "Faits existants", color: BUCKET_COLORS.existing},
-      {key: "radar", label: "Faits radar", color: BUCKET_COLORS.radar},
-    ];
-    const stageOrder = STAGE_ORDER.filter(s => points.some(p => (p.stage_distribution || {})[s]));
-    return tsSparseNote(points) + tsLegend(series) + svgSeriesChart(points, series) +
-      tsKpiGrid([["Total faits validés", latest.total ?? 0], ["Acteurs actifs sur ce marché", latest.actors_count ?? 0]]) +
-      (stageOrder.length ? `<h3 class="ts-subheading">Stade industriel</h3>${tsLegend(stageOrder.map(s => ({label: s, color: STAGE_COLORS[s]})))}${svgStackedBarChart(points, "stage_distribution", stageOrder, STAGE_COLORS)}` : "");
-  }
-  if (dimension === "technology" && key === "__global__") {
-    const typeOrder = DOC_TYPE_ORDER.filter(t => points.some(p => (p.documents_by_type || {})[t]));
-    return tsSparseNote(points) +
-      tsKpiGrid([["Documents (tous types)", latest.documents_total ?? 0]]) +
-      (typeOrder.length ? `${tsLegend(typeOrder.map(t => ({label: DOC_TYPE_LABELS[t] || t, color: DOC_TYPE_COLORS[t] || "#ccd6d9"})))}${svgStackedBarChart(points, "documents_by_type", typeOrder, DOC_TYPE_COLORS)}` : `<div class="empty">Aucun document collecté pour l’instant.</div>`);
-  }
-  if (dimension === "technology") {
-    const series = [
-      {key: "signals_existing", label: "Signaux existants", color: BUCKET_COLORS.existing},
-      {key: "signals_radar", label: "Signaux radar", color: BUCKET_COLORS.radar},
-    ];
-    return tsSparseNote(points) + tsLegend(series) + svgSeriesChart(points, series) +
-      tsKpiGrid([["Signaux existants", latest.signals_existing ?? 0], ["Signaux radar", latest.signals_radar ?? 0]]);
-  }
-  if (dimension === "maturity") {
-    const stageOrder = STAGE_ORDER.filter(s => points.some(p => (p.stage_distribution || {})[s]));
-    return tsSparseNote(points) +
-      tsKpiGrid([["Total faits validés", latest.total ?? 0]]) +
-      (stageOrder.length ? `<h3 class="ts-subheading">Stade industriel (R&D → Production)</h3>${tsLegend(stageOrder.map(s => ({label: s, color: STAGE_COLORS[s]})))}${svgStackedBarChart(points, "stage_distribution", stageOrder, STAGE_COLORS)}` : "") +
-      `<h3 class="ts-subheading">Bucket (existant / radar)</h3>${tsLegend(BUCKET_ORDER.map(b => ({label: BUCKET_LABELS[b], color: BUCKET_COLORS[b]})))}${svgStackedBarChart(points, "bucket_distribution", BUCKET_ORDER, BUCKET_COLORS)}`;
-  }
-  // signal
-  const series = [
-    {key: "new_evidence", label: "Nouveaux faits marché", color: BUCKET_COLORS.existing},
-    {key: "new_offers", label: "Nouvelles offres", color: BUCKET_COLORS.radar},
-    {key: "new_documents", label: "Nouveaux documents", color: "#6b4fb3"},
-    {key: "new_technology_signals", label: "Nouveaux signaux techno", color: "var(--lime)"},
-  ];
-  return tsSparseNote(points) + tsLegend(series) + svgSeriesChart(points, series) +
-    tsKpiGrid([
-      ["Nouveaux faits marché ce mois", latest.new_evidence ?? 0], ["Nouvelles offres", latest.new_offers ?? 0],
-      ["Nouveaux documents", latest.new_documents ?? 0], ["Nouveaux signaux techno", latest.new_technology_signals ?? 0],
-    ]);
-}
-
-async function loadTrendsKeys(dimension) {
-  const {keys} = await api(`/api/timeseries/keys?dimension=${encodeURIComponent(dimension)}`);
-  return keys;
-}
-
-async function loadTrendsPoints(dimension, key) {
-  if (!key) return [];
-  try {
-    const data = await api(`/api/timeseries?dimension=${encodeURIComponent(dimension)}&key=${encodeURIComponent(key)}`);
-    return data.points;
-  } catch (_) {
-    return [];
-  }
-}
-
-async function setTrendsDimension(dimension) {
-  state.trends.dimension = dimension;
-  state.trends.loading = true;
-  renderTrends();
-  const keys = await loadTrendsKeys(dimension);
-  const preferred = keys.includes("__global__") ? "__global__" : keys[0];
-  state.trends.keys = keys;
-  state.trends.key = preferred || "";
-  state.trends.points = await loadTrendsPoints(dimension, preferred);
-  state.trends.loading = false;
-  renderTrends();
-}
-
-async function setTrendsKey(key) {
-  state.trends.key = key;
-  state.trends.loading = true;
-  renderTrends();
-  state.trends.points = await loadTrendsPoints(state.trends.dimension, key);
-  state.trends.loading = false;
-  renderTrends();
-}
-
-function renderTrends() {
-  const t = state.trends;
-  const dimensionOptions = Object.entries(TIMESERIES_DIMENSION_LABELS).map(([value, label]) => `<option value="${value}" ${t.dimension === value ? "selected" : ""}>${esc(label)}</option>`).join("");
-  const keyOptions = t.keys.map(k => `<option value="${esc(k)}" ${t.key === k ? "selected" : ""}>${k === "__global__" ? "Toutes / global" : esc(k)}</option>`).join("");
-  const body = t.loading
-    ? `<div class="empty"><span class="spinner"></span>Chargement…</div>`
-    : (!t.keys.length
-        ? `<div class="empty">Aucun instantané pour l’instant — lancez une collecte (Bases & collectes) ou cliquez « Capturer un instantané » pour en générer un.</div>`
-        : renderTrendsBody(t.points));
-  content.innerHTML = header(
-    "Historique",
-    "Séries temporelles",
-    "Un instantané réel par cycle de collecte — acteur, marché, technologie, maturité, signal. Jamais de point rétroactif fabriqué : l’historique se construit mois après mois.",
-    `<div class="header-actions"><button class="primary" data-run-trends-capture>↻ Capturer un instantané</button></div>`
-  ) +
-  `<section><div class="section-title"><div><span>∿</span><div><h2>${esc(TIMESERIES_DIMENSION_LABELS[t.dimension])}</h2><p>${esc(TIMESERIES_DIMENSION_HINTS[t.dimension])}</p></div></div></div>
-    <div class="ts-controls">
-      <div class="filter-group"><label>Dimension</label><select id="ts-dimension">${dimensionOptions}</select></div>
-      <div class="filter-group"><label>Clé</label><select id="ts-key" ${!t.keys.length ? "disabled" : ""}>${keyOptions}</select></div>
-    </div>
-    ${body}
-  </section>`;
-  document.querySelector("#ts-dimension")?.addEventListener("change", e => setTrendsDimension(e.target.value));
-  document.querySelector("#ts-key")?.addEventListener("change", e => setTrendsKey(e.target.value));
-  document.querySelector("[data-run-trends-capture]")?.addEventListener("click", async () => {
-    try {
-      await api("/api/timeseries/capture", {method: "POST"});
-      toast("Instantané capturé.");
-      await setTrendsDimension(state.trends.dimension);
-    } catch (error) { toast(error.message); }
-  });
-}
-
 // Les vues bâties sur explorer.js / explorer.css (voir le commentaire dans render()).
 const EXPLORER_VIEWS = new Set(["techcorpus", "offers"]);
 
@@ -3050,11 +2585,7 @@ function render(){
   if(state.view==="offers") renderOffers();
   if(state.view==="techcorpus") renderTechCorpus();
   if(state.view==="actors") renderActors();
-  if(state.view==="trends") renderTrends();
-  if(state.view==="vocabulary") renderVocabulary();
   if(state.view==="market-review") renderMarketReview();
-  if(state.view==="actor-discovery") renderActorDiscovery();
-  if(state.view==="digest") renderDigest();
   if(state.view==="data-quality") renderDataQuality();
   if(state.view==="collections") renderCollections();
   if(state.view==="settings") renderSettings();
@@ -3073,23 +2604,6 @@ async function toggleActorActive(id, nextActive) {
   } catch (error) { toast(error.message); }
 }
 
-async function decideVocabulary(id, action, dimension) {
-  try {
-    if (action === "accept") {
-      await api(`/api/vocabulary-candidates/${id}/accept`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({dimension}),
-      });
-      toast("Libellé ajouté au lexique.");
-    } else {
-      await api(`/api/vocabulary-candidates/${id}/reject`, {method: "POST"});
-      toast("Proposition rejetée.");
-    }
-    state.vocabulary = await api("/api/vocabulary-candidates");
-    renderVocabulary();
-  } catch (error) { toast(error.message); }
-}
 
 // Un rejet porte un motif typé, une validation n'en a pas besoin -- d'où le corps de requête
 // seulement pour "reject" : l'endpoint /accept, lui, n'attend aucun payload.
@@ -3230,10 +2744,6 @@ async function poll(kind) {
       }
 
       await refresh();
-      // Un instantané réel a été capturé côté serveur à la fin de cette collecte (voir
-      // app._run_job) -- si la vue séries temporelles a déjà été visitée, la resynchroniser
-      // silencieusement plutôt que de laisser son cache devenir périmé jusqu'au prochain clic.
-      if (job.status === "completed" && state.trends.keys.length) await setTrendsDimension(state.trends.dimension);
       if (kind === "monthly" && job.status === "completed") {
         document.querySelectorAll(".nav").forEach(n => n.classList.toggle("active", n.dataset.view === "monthly"));
         await showView("monthly");
@@ -3255,8 +2765,6 @@ function wireActions(){
   document.querySelectorAll("[data-offer-proof]").forEach(button=>button.addEventListener("click",()=>showOfferProofs(Number(button.dataset.offerProof))));
   document.querySelectorAll("[data-tech-signal-proof]").forEach(button=>button.addEventListener("click",()=>showTechnologySignalProofs(Number(button.dataset.techSignalProof))));
   document.querySelectorAll("[data-toggle-actor]").forEach(button=>button.addEventListener("click",()=>toggleActorActive(Number(button.dataset.toggleActor), button.dataset.nextActive==="1")));
-  document.querySelectorAll("[data-accept-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.acceptVocab),"accept",button.dataset.dimension)));
-  document.querySelectorAll("[data-reject-vocab]").forEach(button=>button.addEventListener("click",()=>decideVocabulary(Number(button.dataset.rejectVocab),"reject")));
   document.querySelectorAll("[data-accept-market-review]").forEach(button=>button.addEventListener("click",()=>decideMarketReview(Number(button.dataset.acceptMarketReview),"accept")));
   document.querySelectorAll("[data-reject-market-review]").forEach(button=>button.addEventListener("click",()=>{
     const select = button.closest("article").querySelector(".reject-reason-select");
@@ -3284,17 +2792,10 @@ function wireActions(){
     if (!select.value) { toast("Choisis un motif de rejet d'abord."); return; }
     rejectActorReview(Number(button.dataset.rejectActor), select.value);
   }));
-  document.querySelectorAll("[data-promote-candidate]").forEach(button=>button.addEventListener("click",()=>showCandidatePromote(Number(button.dataset.promoteCandidate))));
-  document.querySelectorAll("[data-reject-candidate]").forEach(button=>button.addEventListener("click",()=>{
-    const select = button.closest("article").querySelector(".reject-reason-select");
-    if (!select.value) { toast("Choisis un motif de rejet d'abord."); return; }
-    rejectCandidate(Number(button.dataset.rejectCandidate), select.value);
-  }));
   document.querySelectorAll("[data-actor-detail]").forEach(el=>el.addEventListener("click",()=>showActorDetail(Number(el.dataset.actorDetail))));
   document.querySelectorAll("[data-actor-edit]").forEach(el=>el.addEventListener("click",()=>showActorEdit(Number(el.dataset.actorEdit))));
   document.querySelectorAll("[data-actor-toggle-priority]").forEach(el=>el.addEventListener("click",()=>toggleActorPriority(Number(el.dataset.actorTogglePriority), el.dataset.nextPriority==="1")));
   document.querySelectorAll("[data-actor-delete]").forEach(el=>el.addEventListener("click",()=>deleteActorWithConfirm(Number(el.dataset.actorDelete), el.dataset.actorName)));
-  document.querySelectorAll("[data-digest-window]").forEach(button=>button.addEventListener("click",()=>setDigestWindow(Number(button.dataset.digestWindow))));
   document.querySelector("[data-open-market-sizing-add]")?.addEventListener("click", showMarketSizingAdd);
   document.querySelectorAll("[data-delete-market-sizing]").forEach(button=>button.addEventListener("click",()=>deleteMarketSizing(Number(button.dataset.deleteMarketSizing))));
   document.querySelector("[data-open-reference-cell-add]")?.addEventListener("click", showReferenceCellAdd);
@@ -3306,16 +2807,7 @@ function wireActions(){
 document.querySelectorAll(".nav").forEach(button=>button.addEventListener("click",()=>{
   document.querySelectorAll(".nav").forEach(n=>n.classList.remove("active"));
   button.classList.add("active");
-  const view=button.dataset.view;
-  // Séries temporelles : chargées à la demande (voir déclaration de state.trends), donc le
-  // premier passage sur cette vue déclenche le fetch au lieu d'un simple render() sur un
-  // cache encore vide -- les visites suivantes réutilisent ce qui est déjà chargé.
-  if(view==="trends" && !state.trends.keys.length && !state.trends.loading){
-    state.view=view;
-    setTrendsDimension(state.trends.dimension);
-  } else {
-    showView(view);
-  }
+  showView(button.dataset.view);
 }));
 
 document.querySelector(".dialog-close").addEventListener("click",()=>dialog.close());
@@ -3336,19 +2828,16 @@ const LOADERS = {
   techCorpus:        () => api("/api/tech-corpus"),
   actors:            () => api("/api/actors"),
   profiles:          () => api("/api/profiles"),
-  vocabulary:        () => api("/api/vocabulary-candidates"),
   marketReview:      () => api("/api/market/review"),
   network:           () => api("/api/network"),
   duplicates:        () => api("/api/actors/duplicates"),
   pipelineFunnel:    () => api("/api/pipeline-funnel"),
   marketScores:      () => api("/api/market-scores"),
-  actorDiscovery:    () => api("/api/actor-candidates"),
   reviewOffers:      () => api("/api/review?queue=offers").then(r => r.items),
   reviewEvents:      () => api("/api/review?queue=events").then(r => r.items),
   collectionHealth:  () => api("/api/collection-health"),
   schedulerStatus:   () => api("/api/scheduler"),
   veilleMetrics:     () => apiOrNull("/api/veille-metrics"),
-  digest:            () => api("/api/digest"),
   demandSignals:     () => api("/api/demand-signals"),
   marketSizing:      () => api("/api/market-sizing"),
   referenceMatrix:   () => api("/api/reference-matrix"),
@@ -3369,11 +2858,7 @@ const VIEW_DEPS = {
   // (showActorDetail -> actorDetailContent), ouverte depuis cette grille : sans eux la fiche
   // s'afficherait sans capacités, marchés ni publications.
   actors:            ["overview", "actors", "network", "market", "offers", "documents", "rejectReasons"],
-  trends:            ["overview"],
-  vocabulary:        ["overview", "vocabulary"],
   "market-review":   ["overview", "marketReview", "reviewOffers", "reviewEvents", "rejectReasons"],
-  "actor-discovery": ["overview", "actorDiscovery", "rejectReasons"],
-  digest:            ["overview", "digest"],
   "data-quality":    ["overview", "dataQuality", "goldenFacts"],
   collections:       ["overview", "collectionHealth", "profiles", "duplicates", "pipelineFunnel", "veilleMetrics"],
   settings:          ["overview", "schedulerStatus"],

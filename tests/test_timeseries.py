@@ -3,13 +3,18 @@ acteur, marché, technologie, maturité et signal").
 
 Vérifie : (1) une capture calcule bien les 5 dimensions à partir de données réelles insérées
 dans les 3 bases, (2) une capture répétée dans le même mois RAFFINE (upsert) sans dupliquer,
-(3) read_timeseries/list_timeseries_keys renvoient un historique trié, décompressé et vide
-(jamais une erreur) pour une clé inconnue, (4) la maturité canonicalise un industrial_stage
-composite ou non reconnu plutôt que de créer une catégorie fantôme.
+(3) la maturité canonicalise un industrial_stage composite ou non reconnu plutôt que de créer
+une catégorie fantôme.
+
+La page "Séries temporelles" et ses endpoints ont été supprimés le 13/09/2026 ; la capture, elle,
+reste en service (scoring._single_collection_window en dépend), donc ces tests aussi. Les
+lecteurs read_timeseries/list_timeseries_keys ayant disparu avec les endpoints, la relecture
+passe maintenant par _read_snapshots ci-dessous -- une requête directe sur metric_snapshots.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -49,6 +54,20 @@ class TimeseriesTestCase(unittest.TestCase):
         for p in self._patches:
             self.addCleanup(p.stop)
         dbmod.init_databases()
+
+    def _read_snapshots(self, dimension, dimension_key):
+        """Historique d'une clé, du plus ancien au plus récent, metrics_json décompressé --
+        remplace l'ancien ts.read_timeseries, supprimé avec /api/timeseries."""
+        with dbmod.connect(self.market_db) as db:
+            found = db.execute(
+                """SELECT period,captured_at,metrics_json FROM metric_snapshots
+                   WHERE dimension=? AND dimension_key=? ORDER BY period ASC""",
+                (dimension, dimension_key),
+            ).fetchall()
+        return [
+            {"period": row["period"], "captured_at": row["captured_at"], **json.loads(row["metrics_json"])}
+            for row in found
+        ]
 
     def _insert_evidence(self, actor_name, bucket, market, industrial_stage, fact_key):
         stamp = dbmod.utc_now()
@@ -91,16 +110,16 @@ class CaptureTests(TimeseriesTestCase):
         # 'technology' always has at least the '__global__' documents key even with 0 documents.
         self.assertGreaterEqual(summary["technology"], 1)
 
-        actor_points = ts.read_timeseries("actor", "ACunity")
+        actor_points = self._read_snapshots("actor", "ACunity")
         self.assertEqual(1, len(actor_points))
         self.assertEqual(1, actor_points[0]["evidence_existing"])
         self.assertEqual(1, actor_points[0]["offers_count"])
 
-        market_points = ts.read_timeseries("market", "Medtech")
+        market_points = self._read_snapshots("market", "Medtech")
         self.assertEqual(1, market_points[0]["existing"])
         self.assertEqual(1, market_points[0]["actors_count"])
 
-        signal_points = ts.read_timeseries("signal", "__global__")
+        signal_points = self._read_snapshots("signal", "__global__")
         self.assertEqual(1, signal_points[0]["new_evidence"])
         self.assertEqual(1, signal_points[0]["new_offers"])
 
@@ -117,7 +136,7 @@ class CaptureTests(TimeseriesTestCase):
                  "test", "fk-unreviewed", "accepted", "market_application", stamp, stamp),
             )
         ts.capture_metric_snapshot()
-        actor_points = ts.read_timeseries("actor", "ACunity")
+        actor_points = self._read_snapshots("actor", "ACunity")
         self.assertEqual(0, actor_points[0]["evidence_existing"])
         self.assertEqual(0, actor_points[0]["evidence_pending"])  # not 'validated' -> excluded entirely
 
@@ -136,14 +155,14 @@ class CaptureTests(TimeseriesTestCase):
         self._insert_evidence("ACunity", "existing", "Medtech", "Production", "fk1")
         ts.capture_metric_snapshot(period="2026-06")
         ts.capture_metric_snapshot(period="2026-07")
-        points = ts.read_timeseries("signal", "__global__")
+        points = self._read_snapshots("signal", "__global__")
         self.assertEqual(["2026-06", "2026-07"], [p["period"] for p in points])
 
     def test_maturity_canonicalizes_composite_and_unknown_stage_labels(self):
         self._insert_evidence("ACunity", "existing", "Medtech", "Prototype | Matériau: Verre", "fk1")
         self._insert_evidence("HAILTEC", "radar", "Medtech", "un-libelle-invente", "fk2")
         ts.capture_metric_snapshot()
-        points = ts.read_timeseries("maturity", "__global__")
+        points = self._read_snapshots("maturity", "__global__")
         stages = points[0]["stage_distribution"]
         self.assertEqual(1, stages.get("Prototype"))
         self.assertEqual(1, stages.get("Maturité industrielle non déterminée"))
@@ -165,22 +184,11 @@ class CaptureTests(TimeseriesTestCase):
                 ("ACunity", "patent", "titre brevet", "https://example.test/doc", "fp-doc", stamp),
             )
         ts.capture_metric_snapshot()
-        axis_points = ts.read_timeseries("technology", "SLE")
+        axis_points = self._read_snapshots("technology", "SLE")
         self.assertEqual(1, axis_points[0]["signals_existing"])
-        global_points = ts.read_timeseries("technology", "__global__")
+        global_points = self._read_snapshots("technology", "__global__")
         self.assertEqual(1, global_points[0]["documents_total"])
         self.assertEqual({"patent": 1}, global_points[0]["documents_by_type"])
-
-
-class ReadTests(TimeseriesTestCase):
-    def test_read_timeseries_for_unknown_key_returns_empty_list_not_an_error(self):
-        self.assertEqual([], ts.read_timeseries("actor", "Acteur Inexistant"))
-
-    def test_list_timeseries_keys_reflects_captured_dimension_keys(self):
-        self._insert_evidence("ACunity", "existing", "Medtech", "Production", "fk1")
-        ts.capture_metric_snapshot()
-        self.assertIn("Medtech", ts.list_timeseries_keys("market"))
-        self.assertIn("__global__", ts.list_timeseries_keys("technology"))
 
 
 if __name__ == "__main__":

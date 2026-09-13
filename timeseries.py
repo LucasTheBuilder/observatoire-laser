@@ -7,12 +7,17 @@ prototype -> production" (§12, Audit du modèle marché, 27/08/2026).
 Principe : un instantané (snapshot) mensuel de l'état agrégé de chaque dimension, calculé à la
 volée à partir des données déjà en base -- jamais un flux d'événements séparé à tenir à jour en
 parallèle -- et persisté dans metric_snapshots (une seule table, dans MARKET_DB : les 3 bases
-sont des fichiers SQLite distincts, donc regrouper l'historique croisé acteur/marché/
-technologie/maturité/signal dans un seul endroit est ce qui rend `/api/timeseries` capable de
-répondre sans ouvrir les 3 fichiers à chaque lecture). Un instantané par
+sont des fichiers SQLite distincts, donc l'historique croisé acteur/marché/technologie/maturité/
+signal est regroupé dans un seul endroit plutôt que réparti). Un instantané par
 (dimension, dimension_key, période) : relancer capture_metric_snapshot() plusieurs fois dans le
 même mois RAFFINE ce mois (upsert sur la période courante), ne duplique jamais et n'invente
 jamais de point rétroactif pour un mois passé.
+
+La page "Séries temporelles" qui traçait ces courbes a été supprimée le 13/09/2026, avec ses
+endpoints /api/timeseries* et les lecteurs read_timeseries/list_timeseries_keys. La capture
+reste : scoring._single_collection_window lit metric_snapshots pour savoir s'il existe plus
+d'une période, et neutralise le bonus de vélocité de compute_threat_scores tant que ce n'est pas
+le cas -- sans capture, ce bonus serait éteint pour toujours.
 
 Cinq dimensions, au sens de l'audit :
 - 'actor'      : par acteur actif -- faits marché validés par bucket, offres, sources actives.
@@ -212,31 +217,3 @@ def capture_metric_snapshot(period: str | None = None) -> dict[str, int]:
         counts["signal"] = 1
 
     return counts
-
-
-def read_timeseries(dimension: str, dimension_key: str) -> list[dict[str, Any]]:
-    """Historique complet d'une clé donnée, trié du plus ancien au plus récent -- ce que le
-    front consomme pour tracer une courbe. metrics_json est décompressé pour que l'appelant
-    n'ait jamais à faire son propre json.loads()."""
-    with connect(MARKET_DB) as mdb:
-        found = mdb.execute(
-            """SELECT period,captured_at,metrics_json FROM metric_snapshots
-               WHERE dimension=? AND dimension_key=? ORDER BY period ASC""",
-            (dimension, dimension_key),
-        ).fetchall()
-    return [
-        {"period": row["period"], "captured_at": row["captured_at"], **json.loads(row["metrics_json"])}
-        for row in found
-    ]
-
-
-def list_timeseries_keys(dimension: str) -> list[str]:
-    """Toutes les dimension_key connues pour une dimension donnée (pour peupler un sélecteur
-    dans le front), les plus récemment capturées en premier."""
-    with connect(MARKET_DB) as mdb:
-        found = mdb.execute(
-            """SELECT dimension_key, MAX(period) AS last_period FROM metric_snapshots
-               WHERE dimension=? GROUP BY dimension_key ORDER BY last_period DESC, dimension_key ASC""",
-            (dimension,),
-        ).fetchall()
-    return [row["dimension_key"] for row in found]

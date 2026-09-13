@@ -62,7 +62,6 @@ from pydantic import BaseModel, Field
 
 import review_journal
 from actor_discovery import discover_actor_candidates, promote_candidate, reject_candidate
-from alerts import capture_alerts
 from capabilities import collect_capability_specs
 from cordis import collect_cordis
 from data_quality import (
@@ -114,7 +113,7 @@ from review_queue import (
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 from sources import list_sources
-from timeseries import capture_metric_snapshot, list_timeseries_keys, read_timeseries
+from timeseries import capture_metric_snapshot
 from veille_metrics import VEILLE_METRICS_THRESHOLDS, capture_veille_metrics
 from wayback_retrodating import retrodate_evidence_sources
 
@@ -843,30 +842,6 @@ def pipeline_funnel():
     }
 
 
-@app.get("/api/timeseries/keys")
-def timeseries_keys(dimension: Literal["actor", "market", "technology", "maturity", "signal"] = Query(...)):
-    """Toutes les clés connues d'une dimension (noms d'acteurs, libellés de marché, axes
-    technologiques...), pour peupler un sélecteur côté front avant de choisir quelle courbe
-    tracer avec /api/timeseries. 'maturity' et 'signal' n'exposent en pratique que
-    '__global__' (+ un libellé de marché par marché pour 'maturity')."""
-    return {"dimension": dimension, "keys": list_timeseries_keys(dimension)}
-
-
-@app.get("/api/timeseries")
-def timeseries(
-    dimension: Literal["actor", "market", "technology", "maturity", "signal"] = Query(...),
-    key: str = Query(..., description="Nom d'acteur / libellé de marché / axe technologique, ou '__global__' pour maturity/signal/technology."),
-):
-    """Séries temporelles (audit Horizon 2 #12, voir timeseries.py) : historique mensuel d'une
-    clé, du plus ancien au plus récent -- ce que le front trace en courbe. Un instantané est
-    capturé après chaque collecte terminée (voir _run_job) ; POST /api/timeseries/capture en
-    déclenche un manuellement sans attendre la prochaine collecte."""
-    points = read_timeseries(dimension, key)
-    if not points:
-        raise HTTPException(status_code=404, detail=f"Aucun instantané pour {dimension}={key!r} -- lancez une collecte ou POST /api/timeseries/capture.")
-    return {"dimension": dimension, "key": key, "points": points}
-
-
 @app.get("/api/market-scores")
 def market_scores():
     """Score d'intensité concurrentielle par marché (audit Horizon 2 #14, voir scoring.py ;
@@ -875,14 +850,6 @@ def market_scores():
     Trié du plus disputé au moins disputé -- ce n'est PAS une mesure d'attractivité business,
     seulement de l'offre concurrente déjà présente."""
     return compute_competitive_intensity_scores()
-
-
-@app.post("/api/timeseries/capture")
-def timeseries_capture():
-    """Déclenche un instantané immédiat sans attendre la prochaine collecte (ex: après une
-    correction manuelle en base) -- même fonction que celle appelée automatiquement par
-    _run_job."""
-    return capture_metric_snapshot()
 
 
 @app.get("/api/veille-metrics")
@@ -921,32 +888,6 @@ def veille_metrics_capture():
     """Déclenche un calcul immédiat des 8 indicateurs -- même fonction que celle appelée
     automatiquement par _run_job après chaque collecte."""
     return capture_veille_metrics()
-
-
-@app.get("/api/digest")
-def digest(since: str | None = Query(None, description="Horodatage ISO 8601 ; par défaut les 7 derniers jours.")):
-    """Restitution des alertes (§5.F audit veille, 30/08/2026) : la règle que pose l'audit est
-    que ce digest ne doit contenir QUE du changement depuis `since`, jamais un état -- voir
-    alerts.py pour les 4 règles évaluées (transition radar->existing, nouveau fait chez un
-    acteur C1/C2, incident de collecte, événement M&A/financement). Groupé par type d'alerte,
-    trié du plus récent au plus ancien."""
-    since_value = since or (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    alert_rows = rows(
-        MARKET_DB,
-        "SELECT alert_type,actor_name,summary,detail,source_url,event_at FROM alerts WHERE event_at>=? ORDER BY event_at DESC",
-        (since_value,),
-    )
-    by_type: dict[str, list[dict]] = defaultdict(list)
-    for row in alert_rows:
-        by_type[row["alert_type"]].append(row)
-    return {"since": since_value, "total": len(alert_rows), "by_type": by_type}
-
-
-@app.post("/api/digest/capture")
-def digest_capture():
-    """Déclenche une évaluation immédiate des 4 règles d'alerte -- même fonction que celle
-    appelée automatiquement par _run_job après chaque collecte."""
-    return capture_alerts()
 
 
 @app.get("/api/review")
@@ -2018,10 +1959,12 @@ def _run_job(kind: str) -> None:
             pass  # a backup failure (e.g. disk full) must never block the collection itself
         result = collectors[kind]()
         try:
-            # Séries temporelles (audit Horizon 2 #12, voir timeseries.py) : un instantané réel
-            # par cycle de collecte, quel que soit le type -- une capture ratée ne doit jamais
-            # faire échouer la collecte elle-même (même logique de tolérance que backup_all_databases
-            # ci-dessus).
+            # Instantané mensuel des dimensions métier (voir timeseries.py) : un par cycle de
+            # collecte, quel que soit le type -- une capture ratée ne doit jamais faire échouer
+            # la collecte elle-même (même logique de tolérance que backup_all_databases
+            # ci-dessus). La page "Séries temporelles" qui les traçait a été supprimée le
+            # 13/09/2026, mais la capture reste indispensable : scoring._single_collection_window
+            # neutralise le bonus de vélocité tant que metric_snapshots ne couvre qu'une période.
             capture_metric_snapshot()
         except Exception:
             pass
@@ -2029,11 +1972,6 @@ def _run_job(kind: str) -> None:
             # Tableau de bord de la veille (§10.11 audit veille, 30/08/2026) : même tolérance
             # qu'au-dessus, une capture ratée ne doit jamais faire échouer la collecte.
             capture_veille_metrics()
-        except Exception:
-            pass
-        try:
-            # Alertes (§5.F audit veille, 30/08/2026) : même tolérance.
-            capture_alerts()
         except Exception:
             pass
         with job_lock:

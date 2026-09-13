@@ -1238,7 +1238,7 @@ def _init_actors_db() -> None:
             -- (created_at) en "quand ils l'ont écrit" (detected_at, borné par la fréquence de
             -- crawl). Voir scrapers._diff_page_blocks. Pas de purge par rétention ici,
             -- contrairement à page_versions/source_metrics : c'est un journal d'événements
-            -- datés destiné au digest et aux séries temporelles, pas un instantané à remplacer.
+            -- datés, pas un instantané à remplacer.
             CREATE TABLE IF NOT EXISTS page_changes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_id INTEGER NOT NULL REFERENCES actor_sources(id) ON DELETE CASCADE,
@@ -1702,11 +1702,12 @@ def _init_market_db() -> None:
             -- Séries temporelles (audit Horizon 2 #12 : "Construire séries temporelles par
             -- acteur, marché, technologie, maturité et signal") -- voir timeseries.py pour le
             -- calcul (capture_metric_snapshot, appelée après chaque collecte, voir
-            -- app._run_job) et la lecture (read_timeseries/list_timeseries_keys). Une ligne =
-            -- un instantané mensuel agrégé pour une clé donnée d'une dimension ; regroupée ici
-            -- (MARKET_DB) plutôt que répartie dans les 3 bases, y compris pour la dimension
-            -- 'technology' dont les compteurs sources viennent de TECH_DB, pour que
-            -- /api/timeseries n'ait jamais à ouvrir plus d'un fichier SQLite en lecture.
+            -- app._run_job). Une ligne = un instantané mensuel agrégé pour une clé donnée d'une
+            -- dimension ; regroupée ici (MARKET_DB) plutôt que répartie dans les 3 bases, y
+            -- compris pour la dimension 'technology' dont les compteurs sources viennent de
+            -- TECH_DB. La page qui traçait ces séries a été supprimée le 13/09/2026 : la table
+            -- reste alimentée parce que scoring._single_collection_window l'interroge pour
+            -- savoir si le bonus de vélocité a plus d'une période à comparer.
             CREATE TABLE IF NOT EXISTS metric_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 dimension TEXT NOT NULL CHECK(dimension IN ('actor','market','technology','maturity','signal')),
@@ -1737,29 +1738,6 @@ def _init_market_db() -> None:
             );
             CREATE UNIQUE INDEX IF NOT EXISTS veille_metrics_uq ON veille_metrics(period, indicator);
 
-            -- Alertes (§5.F audit veille, 30/08/2026, Lot 1 §1.4) : règles explicites évaluées
-            -- après chaque collecte (voir alerts.capture_alerts, appelée comme
-            -- capture_metric_snapshot/capture_veille_metrics) plutôt que des requêtes ad hoc au
-            -- moment de la lecture -- l'historique des alertes doit rester consultable même
-            -- après que l'état sous-jacent a changé. fingerprint rend la capture idempotente
-            -- (INSERT OR IGNORE), comme evidence_sources/offer_sources/vocabulary_candidates.
-            -- event_at est l'horodatage de l'ÉVÉNEMENT métier (changed_at/created_at/
-            -- last_profiled_at de la ligne source), jamais celui de la capture -- c'est lui que
-            -- /api/digest?since= filtre, pour que le digest ne contienne que du changement.
-            CREATE TABLE IF NOT EXISTS alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                alert_type TEXT NOT NULL CHECK(alert_type IN (
-                    'bucket_transition_existing', 'new_fact_high_value_actor', 'collection_incident', 'ma_funding_event'
-                )),
-                actor_name TEXT,
-                summary TEXT NOT NULL,
-                detail TEXT,
-                source_url TEXT,
-                fingerprint TEXT NOT NULL UNIQUE,
-                event_at TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS alerts_event_at_idx ON alerts(event_at);
             -- Signal de demande (§4.B.3 audit veille, 30/08/2026, Lot 4 §15) : un appel d'offres
             -- public mentionnant du micro-usinage laser ultra-rapide, vu par demand_signals.py
             -- (TED pour l'UE, BOAMP pour la France -- toutes deux vérifiées en direct avant
