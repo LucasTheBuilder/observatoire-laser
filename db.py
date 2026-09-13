@@ -105,6 +105,17 @@ ACTORS = [
     # "Zur Anwendung kommen dabei gepulste Femtosekunden-, Pikosekunden- und Nanosekunden-Laser
     # sowie CW-Laser" (bias.de/laserbearbeitung), pour la microstructuration/ablation.
     ("BIAS", "Allemagne", "Institut de recherche appliquée - laser USP (structuration, ablation) & métrologie optique", 0, "https://www.bias.de/en-gb/"),
+    # Audit roster (13/09/2026) : quatre prestataires européens confirmés sur source primaire,
+    # absents du suivi alors qu'ils vendent des pièces ou du procédé (et pas seulement une
+    # machine ou une source). Reportés ici pour qu'une installation neuve les inclue aussi.
+    # Deux autres signaux (Akoneer ex-ELAS en LT, Femto Systems en EE) restent volontairement
+    # hors de cette liste : ils sont en review_status='candidate', preuve de prestation absente.
+    ("LaserMicronics", "Allemagne", "Contract manufacturing en micro-usinage laser USP (picoseconde)", 0, "https://lasermicronics.lpkf.com/en/"),
+    ("QiOVA", "France", "Mise en forme de faisceau femtoseconde multipoints & prestations de marquage/micro-usinage", 0, "https://www.qiova.com"),
+    ("Laser Cheval", "France", "Machines laser femtoseconde & sous-traitance de marquage/micro-usinage", 0, "https://www.lasercheval.fr"),
+    # SCHOTT Primoceler : régime picoseconde (pas femtoseconde) -- dans le périmètre USP au même
+    # titre que laserKRAFTwerk ou ACunity. Premier acteur nordique du roster.
+    ("SCHOTT Primoceler", "Finlande", "CDMO de scellement hermétique verre-verre par laser USP (picoseconde)", 0, "https://primoceler.com"),
 ]
 
 # Quelques URLs de pages connues, injectées d'office dans actor_sources au démarrage (avant
