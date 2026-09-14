@@ -13,6 +13,7 @@ réseau du tout : elle relit `actor_sources.blocks_json`, que ces tests rempliss
 
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import tempfile
@@ -27,66 +28,69 @@ import db as dbmod
 import national_projects as npmod
 
 # --- Fixtures ANR ----------------------------------------------------------------------------
-# Forme relevée sur le jeu "fr-esr-aap-anr-projets-retenus-participants-identifies".
-ANR_ON_TOPIC = {
-    "code_du_projet": "ANR-14-CE16-0008",
-    "titre": "Découpe et surfacing femtoseconde de supports pour le bioengineering cellulaire",
-    "acronyme": "SupCo",
-    "resume": (
-        "Le projet développe un procédé de texturation de surface par impulsions ultracourtes "
-        "pour la préparation de supports de culture cellulaire. Les structures périodiques "
-        "obtenues relèvent du régime LIPSS."
-    ),
-    "programme": "Appel à projets générique 2014",
-    "lien_projet": "http://www.agence-nationale-recherche.fr/?Projet=ANR-14-CE16-0008",
-    "date_de_debut": 2015,
-    "libelle_de_partenaire": ["MANUTECH USD", "Laboratoire Hubert Curien", ""],
-    "sigle_de_partenaire": ["MANUTECH-USD", "LabHC", ""],
-    "coordinateur_du_projet": "MANUTECH USD",
-}
-ANR_OFF_TOPIC = {
-    "code_du_projet": "ANR-12-SEED-0003",
-    "titre": "Optimisation des performances thermiques des échangeurs diphasiques",
-    "acronyme": "NUCLEI",
-    "resume": "Étude des transferts thermiques en ébullition nucléée, sans procédé laser.",
-    "programme": "SEED 2012",
-    "lien_projet": "",
-    "date_de_debut": 2013,
-    "libelle_de_partenaire": ["MANUTECH USD"],
-    "sigle_de_partenaire": [""],
-    "coordinateur_du_projet": "MANUTECH USD",
-}
-# Ramené par le `search()` tolérant de l'API, mais aucun partenaire ne porte réellement l'alias.
-ANR_FUZZY_NOISE = {
-    "code_du_projet": "ANR-18-CE08-0042",
-    "titre": "Micro-usinage femtoseconde de verres optiques",
-    "acronyme": "VERROPT",
-    "resume": "Procédé d'ablation par impulsions femtosecondes appliqué aux verres optiques.",
-    "programme": "Appel à projets générique 2018",
-    "lien_projet": "",
-    "date_de_debut": 2019,
-    "libelle_de_partenaire": ["Institut de Chimie de Clermont-Ferrand"],
-    "sigle_de_partenaire": ["ICCF"],
-    "coordinateur_du_projet": "Institut de Chimie de Clermont-Ferrand",
-}
+#
+# Colonnes relevées le 14/09/2026 sur les CSV que l'ANR publie sur data.gouv.fr (ANR_01
+# DOS/DGDS et ANR_02 DGPIE) : deux fichiers par jeu, l'un décrivant les projets, l'autre leurs
+# partenaires, joints sur `Projet.Code_Decision`.
+ANR_PROJECT_COLUMNS = [
+    "Projet.Code_Decision", "AAP.Edition", "Projet.Acronyme", "Projet.Titre.Francais",
+    "Projet.Titre.Anglais", "Projet.Resume.Francais", "Projet.Resume.Anglais",
+    "Programme.Acronyme", "Projet.Montant.AF.Aide_allouee.ANR", "Projet.T0 scientifique",
+]
+ANR_PARTNER_COLUMNS = [
+    "Projet.Code_Decision", "Projet.Acronyme", "Projet.Partenaire.Code_Decision",
+    "Projet.Partenaire.Est_coordinateur", "Projet.Partenaire.Nom_organisme",
+    "Projet.Partenaire.Categorie_organisme", "Projet.Partenaire.Adresse.Ville",
+    "Projet.Partenaire.Adresse.Pays", "Projet.Partenaire.Aide_allouee.ANR",
+]
 
-# Le cas IREIS, trouvé en production le 14/09/2026 : l'ANR inscrit l'acteur sous sa raison
-# sociale complète, et le nom que la base suit ne vit que dans `sigle_de_partenaire`.
-ANR_ACRONYM_ONLY = {
-    "code_du_projet": "ANR-13-RMNP-0010",
-    "titre": "Texturation topographique multiéchelles de pièces polymères par structuration laser",
-    "acronyme": "TOPOINJECTION",
-    "resume": (
-        "Structuration par impulsions ultracourtes de moules d'injection pour texturer des "
-        "pièces polymères. Les structures périodiques visées relèvent du régime LIPSS."
-    ),
-    "programme": "RMNP 2013",
-    "lien_projet": "",
-    "date_de_debut": 2014,
-    "libelle_de_partenaire": ["INSTITUT DE RECHERCHES EN INGENIERIE DES SURFACES", "Laboratoire Hubert Curien"],
-    "sigle_de_partenaire": ["IREIS", "LabHC"],
-    "coordinateur_du_projet": "Monsieur Stéphane BENAYOUN (LABORATOIRE DE TRIBOLOGIE)",
-}
+ANR_PROJECTS = [
+    {
+        "Projet.Code_Decision": "ANR-14-CE16-0008", "AAP.Edition": "2014", "Projet.Acronyme": "SupCo",
+        "Projet.Titre.Francais": "Découpe et surfacing femtoseconde de supports pour le bioengineering cellulaire",
+        "Projet.Titre.Anglais": "Femtosecond cutting and surfacing of cell bioengineering substrates",
+        "Projet.Resume.Francais": (
+            "Le projet développe un procédé de texturation de surface par impulsions "
+            "ultracourtes. Les structures périodiques obtenues relèvent du régime LIPSS."
+        ),
+        "Programme.Acronyme": "CE16", "Projet.T0 scientifique": "2015-03-01",
+    },
+    {
+        # Hors sujet : matche un acteur suivi, ne doit produire aucune ligne.
+        "Projet.Code_Decision": "ANR-12-SEED-0003", "AAP.Edition": "2012", "Projet.Acronyme": "NUCLEI",
+        "Projet.Titre.Francais": "Optimisation des performances thermiques des échangeurs diphasiques",
+        "Projet.Resume.Francais": "Étude des transferts thermiques en ébullition nucléée, sans procédé laser.",
+        "Programme.Acronyme": "SEED", "Projet.T0 scientifique": "2013-01-01",
+    },
+    {
+        # Sur le sujet, mais aucun acteur suivi au consortium : invisible pour l'observatoire.
+        "Projet.Code_Decision": "ANR-18-CE08-0042", "AAP.Edition": "2018", "Projet.Acronyme": "VERROPT",
+        "Projet.Titre.Francais": "Micro-usinage femtoseconde de verres optiques",
+        "Projet.Resume.Francais": "Procédé d'ablation par impulsions femtosecondes, régime LIPSS.",
+        "Programme.Acronyme": "CE08", "Projet.T0 scientifique": "2019-01-01",
+    },
+]
+
+ANR_PARTNERS = [
+    {"Projet.Code_Decision": "ANR-14-CE16-0008", "Projet.Acronyme": "SupCo",
+     "Projet.Partenaire.Est_coordinateur": "True", "Projet.Partenaire.Nom_organisme": "MANUTECH-USD"},
+    {"Projet.Code_Decision": "ANR-14-CE16-0008", "Projet.Acronyme": "SupCo",
+     "Projet.Partenaire.Est_coordinateur": "False", "Projet.Partenaire.Nom_organisme": "Laboratoire Hubert Curien"},
+    {"Projet.Code_Decision": "ANR-12-SEED-0003", "Projet.Acronyme": "NUCLEI",
+     "Projet.Partenaire.Est_coordinateur": "False", "Projet.Partenaire.Nom_organisme": "MANUTECH-USD"},
+    {"Projet.Code_Decision": "ANR-18-CE08-0042", "Projet.Acronyme": "VERROPT",
+     "Projet.Partenaire.Est_coordinateur": "True", "Projet.Partenaire.Nom_organisme": "Institut de Chimie de Clermont-Ferrand"},
+]
+
+
+def _write_anr_csv(path: Path, columns: list[str], rows: list[dict]) -> Path:
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, delimiter=";")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
+    return path
+
 
 # --- Fixtures UKRI Gateway to Research --------------------------------------------------------
 GTR_ON_TOPIC = {
@@ -187,9 +191,21 @@ class NationalProjectsTests(unittest.TestCase):
                 (actor_id, url, "page", json.dumps(blocks, ensure_ascii=False)),
             )
 
-    def _run(self, actors_db: Path, tech_db: Path, *, include_sources=("anr", "gtr", "mentions")) -> dict:
-        def fake_anr(client, alias):
-            return [ANR_ON_TOPIC, ANR_OFF_TOPIC, ANR_FUZZY_NOISE] if alias == "MANUTECH USD" else []
+    def _anr_fixture_files(self, tmp: str, *, projects=None, partners=None) -> tuple[list[Path], list[Path]]:
+        """Les deux listes de fichiers que `anr_cached_files` rendrait après téléchargement."""
+        return (
+            [_write_anr_csv(Path(tmp) / "projets.csv", ANR_PROJECT_COLUMNS,
+                            ANR_PROJECTS if projects is None else projects)],
+            [_write_anr_csv(Path(tmp) / "partenaires.csv", ANR_PARTNER_COLUMNS,
+                            ANR_PARTNERS if partners is None else partners)],
+        )
+
+    def _run(self, actors_db: Path, tech_db: Path, *, include_sources=("anr", "gtr", "mentions"),
+             anr_files=None) -> dict:
+        files = anr_files if anr_files is not None else self._anr_fixture_files(str(actors_db.parent))
+
+        def fake_anr_files(client):
+            return files
 
         def fake_org_ids(client, actor_name, alias):
             return ["7BD02E7C"] if alias == "OXFORD LASERS" else []
@@ -200,7 +216,7 @@ class NationalProjectsTests(unittest.TestCase):
         with (
             patch.object(npmod, "ACTORS_DB", actors_db),
             patch.object(npmod, "TECH_DB", tech_db),
-            patch.object(npmod, "anr_records_for_alias", fake_anr),
+            patch.object(npmod, "anr_cached_files", fake_anr_files),
             patch.object(npmod, "gtr_organisation_ids", fake_org_ids),
             patch.object(npmod, "gtr_projects_for_organisation", fake_projects),
         ):
@@ -225,14 +241,15 @@ class NationalProjectsTests(unittest.TestCase):
             self.assertEqual("anr_project", event["event_type"])
             self.assertEqual("verified", event["review_status"])
             self.assertIn("SupCo", event["description"])
-            # La date de l'ANR est une année, écrite telle quelle et jamais complétée.
-            self.assertEqual("2015", event["event_date"])
-            self.assertEqual(ANR_ON_TOPIC["lien_projet"], event["source_url"])
+            # `Projet.T0 scientifique` est une vraie date, un des gains du passage du jeu
+            # archivé (qui ne donnait qu'une année) aux jeux vivants de l'ANR.
+            self.assertEqual("2015-03-01", event["event_date"])
+            self.assertEqual("https://anr.fr/Projet-ANR-14-CE16-0008", event["source_url"])
 
             # Le partenaire non suivi entre comme relation ; l'acteur lui-même, non.
             related = {row["related_name"] for row in relations}
             self.assertIn("Laboratoire Hubert Curien", related)
-            self.assertNotIn("MANUTECH USD", related)
+            self.assertNotIn("MANUTECH-USD", related)
 
             with dbmod.connect(tech_db) as db:
                 signal = db.execute(
@@ -244,9 +261,9 @@ class NationalProjectsTests(unittest.TestCase):
             self.assertEqual("national", signal["funding_scope"])
             self.assertTrue(signal["funding_program"].startswith("ANR"))
 
-    def test_anr_ignores_a_fuzzy_match_no_partner_actually_carries(self):
-        """VERROPT est sur le sujet et revient de l'API, mais aucun de ses partenaires n'est
-        l'acteur suivi : le filtre strict local doit l'écarter malgré la réponse du serveur."""
+    def test_a_project_without_a_tracked_partner_stays_out(self):
+        """VERROPT est parfaitement sur le sujet, mais aucun acteur suivi n'est à son
+        consortium : l'observatoire suit des acteurs, pas un domaine."""
         with tempfile.TemporaryDirectory() as tmp:
             actors_db, tech_db = self._databases(tmp)
             self._run(actors_db, tech_db, include_sources=("anr",))
@@ -254,11 +271,22 @@ class NationalProjectsTests(unittest.TestCase):
                 descriptions = [row["description"] for row in db.execute("SELECT description FROM actor_events")]
             self.assertFalse(any("VERROPT" in text for text in descriptions))
 
-    def test_anr_falls_back_to_the_canonical_page_when_the_link_is_empty(self):
-        self.assertEqual(
-            "https://anr.fr/Projet-ANR-12-SEED-0003",
-            npmod._anr_project_url(ANR_OFF_TOPIC),
-        )
+    def test_the_source_url_is_the_canonical_anr_page(self):
+        """Les CSV de l'ANR ne portent aucune colonne de lien : l'URL vient du gabarit du
+        site, vérifié sur un code valide et un code invalide (voir ANR_PROJECT_URL_TEMPLATE)."""
+        self.assertEqual("https://anr.fr/Projet-ANR-12-SEED-0003",
+                         npmod._anr_project_url("ANR-12-SEED-0003"))
+
+    def test_both_languages_feed_the_topic_filter(self):
+        """Beaucoup de projets ne remplissent qu'un des deux résumés ; le lexique est plus
+        riche en anglais. Les quatre champs comptent."""
+        anglais_seul = {
+            "Projet.Code_Decision": "ANR-20-TEST-0001", "Projet.Titre.Anglais":
+                "Ultrashort pulse laser structuring of battery electrodes, LIPSS regime",
+        }
+        self.assertIn("Ultrashort", npmod._anr_text(anglais_seul))
+        francais_seul = {"Projet.Resume.Francais": "Structuration par impulsions ultracourtes."}
+        self.assertIn("ultracourtes", npmod._anr_text(francais_seul))
 
     # --- UKRI --------------------------------------------------------------------------------
 
@@ -393,32 +421,74 @@ class AliasRecallTests(unittest.TestCase):
         """Une raison sociale qui n'est QUE sa forme juridique ne doit pas devenir vide."""
         self.assertEqual("AG", npmod.match_alias("AG"))
 
-    def test_an_actor_named_only_by_its_acronym_in_anr_is_matched(self):
-        """Le cas IREIS : la requête serveur interroge `sigle_de_partenaire`, la vérification
-        locale doit interroger le même champ -- sinon on refuse ce qu'on est allé chercher."""
-        with tempfile.TemporaryDirectory() as tmp:
-            actors_db, tech_db = self._databases(tmp)
-            with dbmod.connect(actors_db) as db:
-                db.execute("DELETE FROM actors")
-            with patch.object(dbmod, "ACTORS_DB", actors_db):
-                dbmod.create_actor("IREIS", "France", "Test", "https://www.ireis.fr")
-
-            def fake_anr(client, alias):
-                return [ANR_ACRONYM_ONLY] if alias == "IREIS" else []
-
-            with (
-                patch.object(npmod, "ACTORS_DB", actors_db),
-                patch.object(npmod, "TECH_DB", tech_db),
-                patch.object(npmod, "anr_records_for_alias", fake_anr),
-            ):
-                result = npmod.collect_national_projects(include_sources=("anr",))
-            self.assertEqual(1, result["projects_matched"])
-
-            with dbmod.connect(actors_db) as db:
-                event = db.execute("SELECT description FROM actor_events").fetchone()
-            self.assertIn("TOPOINJECTION", event["description"])
+    def test_the_live_anr_files_name_the_organisation_directly(self):
+        """Le jeu ANR vivant n'a PAS de colonne de sigle -- contrairement au jeu archivé, où
+        IREIS ne vivait que là. Il nomme l'organisation telle qu'elle signe ("IREIS",
+        "HEF R&D - IREIS", "MANUTECH-USD", "IREPA LASER" : relevé du 14/09/2026), donc
+        l'appariement se joue entièrement sur le nom d'organisation."""
+        for spelling, actor in (
+            ("IREIS", "IREIS"), ("HEF R&D - IREIS", "IREIS"),
+            ("MANUTECH-USD", "MANUTECH USD"), ("GIE Manutech-USD", "MANUTECH USD"),
+            ("IREPA LASER", "IREPA LASER"),
+        ):
+            with self.subTest(spelling=spelling):
+                self.assertTrue(npmod._contains_whole_phrase(
+                    npmod._normalize_org_text(spelling), npmod.match_alias(actor)))
 
     _databases = NationalProjectsTests._databases
+
+
+class AnrSourceFreshnessTests(unittest.TestCase):
+    """Deux pannes SILENCIEUSES du 14/09/2026, toutes deux « 200 OK, données incomplètes ».
+
+    La première : le module interrogeait un jeu archivé, figé en 2016. La seconde : le
+    resolveur de ressources ne gardait qu'un fichier CSV par jeu, alors que l'ANR découpe
+    chaque jeu en ères (2005-2009 / depuis-2010) -- il ne lisait donc qu'une ère. Aucune des
+    deux ne levait d'erreur ; toutes deux se voyaient uniquement en comptant les résultats.
+    """
+
+    class _FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class _FakeClient:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def get(self, *args, **kwargs):
+            return AnrSourceFreshnessTests._FakeResponse(self._payload)
+
+    # Forme relevée le 14/09/2026 sur data.gouv.fr : les deux ères, dans l'ordre réel de
+    # publication (2010+ d'abord), plus des formats que la collecte doit ignorer.
+    CATALOGUE = {"resources": [
+        {"format": "pdf", "title": "notice.pdf", "url": "https://x/notice.pdf"},
+        {"format": "xlsx", "title": "anr-dgds-depuis-2010-projets.xlsx", "url": "https://x/a.xlsx"},
+        {"format": "csv", "title": "anr-dgds-depuis-2010-projets.csv", "url": "https://x/2010-projets.csv"},
+        {"format": "csv", "title": "anr-dgds-depuis-2010-partenaires.csv", "url": "https://x/2010-partenaires.csv"},
+        {"format": "csv", "title": "anr-dgds-2005-2009-projets.csv", "url": "https://x/2005-projets.csv"},
+        {"format": "csv", "title": "anr-dgds-2005-2009-partenaires.csv", "url": "https://x/2005-partenaires.csv"},
+    ]}
+
+    def test_every_era_is_collected_not_just_the_last_one(self):
+        projects, partners = npmod._anr_resource_urls(self._FakeClient(self.CATALOGUE), "peu-importe")
+        self.assertEqual(["https://x/2010-projets.csv", "https://x/2005-projets.csv"], projects)
+        self.assertEqual(["https://x/2010-partenaires.csv", "https://x/2005-partenaires.csv"], partners)
+
+    def test_non_csv_resources_are_ignored(self):
+        projects, partners = npmod._anr_resource_urls(self._FakeClient(self.CATALOGUE), "peu-importe")
+        self.assertFalse([url for url in projects + partners if not url.endswith(".csv")])
+
+    def test_the_archived_dataset_is_no_longer_referenced(self):
+        """Garde-fou de régression : le jeu archivé du portail MESR s'arrête en 2016 et son
+        API de requêtage est tentante. Rien dans le module ne doit y renvoyer."""
+        source = (ROOT / "national_projects.py").read_text(encoding="utf-8")
+        self.assertNotIn("fr-esr-aap-anr-projets-retenus-participants-identifies", source.split('"""', 2)[2])
 
 
 class GtrScopeTests(unittest.TestCase):

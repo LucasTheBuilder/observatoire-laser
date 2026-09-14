@@ -3,7 +3,7 @@
 ``cordis.py`` ne connaît qu'un seul guichet, Horizon Europe. Or un acteur de l'observatoire
 travaille aussi -- et souvent d'abord -- sur des projets financés chez lui : ANR et France 2030
 en France, RAPID à l'Agence de l'innovation de défense, Innovate UK et EPSRC au Royaume-Uni,
-BMBF en Allemagne, FEDER et appels à projets régionaux à l'échelle d'une région. Ces
+BMFTR et BMWE en Allemagne, FEDER et appels à projets régionaux à l'échelle d'une région. Ces
 participations n'apparaissaient nulle part : la page "Technologie laser" annonçait "projets
 européens" et disait vrai, faute de mieux.
 
@@ -19,11 +19,14 @@ Ce module remplit le même contrat que cordis.py, avec les mêmes garanties :
 Trois sources, de nature différente -- et c'est volontaire, parce que les guichets nationaux
 ne publient pas tous leurs lauréats de la même façon :
 
-1. ANR (France) -- le jeu de données ouvert "Appels à projets ANR : projets retenus et
-   participants identifiés" (13 450 projets depuis 2005, partenaires nommés), servi par l'API
-   Opendatasoft du portail data.enseignementsup-recherche.gouv.fr. Couvre aussi, sous le même
-   toit, les programmes que l'ANR opère pour d'autres : ASTRID et ASTRID Maturation (financés
-   par la DGA/AID), les appels du PIA et de France 2030.
+1. ANR (France) -- les deux jeux que l'ANR publie elle-même sur data.gouv.fr : ANR_01 pour
+   les appels de sa direction scientifique et ANR_02 pour ceux qu'elle opère au titre des
+   investissements d'avenir (PIA, France 2030). Couvre aussi, sous le même toit, les
+   programmes qu'elle opère pour d'autres, dont ASTRID et ASTRID Maturation, financés par la
+   DGA. Deux fichiers par jeu -- les projets, leurs partenaires -- joints sur le code de
+   décision, téléchargés et mis en cache comme le dump CORDIS. Voir ANR_DATASETS pour
+   pourquoi ce module ne tape PAS l'API de requêtage bien plus commode du portail du
+   ministère : elle sert une archive figée en 2016.
 
 2. UKRI Gateway to Research (Royaume-Uni) -- l'API publique de UKRI (pas de clé), qui couvre
    Innovate UK, EPSRC, STFC, ISCF et les autres conseils : le guichet national britannique,
@@ -37,24 +40,31 @@ ne publient pas tous leurs lauréats de la même façon :
    13/09/2026, ni le ministère des Armées ni data.gouv.fr ne publient la liste des projets
    RAPID financés ; la seule trace publique d'un projet RAPID est la page de l'entreprise qui
    l'annonce. Même chose pour les appels régionaux (R&D Booster en Auvergne-Rhône-Alpes), le
-   FUI, le FEDER opéré par une région, le BMBF allemand. Cette passe ne devine rien : elle
-   relit le texte que le crawl a DÉJÀ stocké (``actor_sources.blocks_json``), et ne retient un
-   bloc que s'il nomme un programme connu ET relève du laser ultra-rapide. Le résultat est un
-   signal faible, écrit en ``review_status='pending'`` -- il passe par la file de relecture,
+   FUI, le FEDER opéré par une région, les ministères fédéraux allemands. Cette passe ne
+   devine rien : elle relit le texte que le crawl a DÉJÀ stocké
+   (``actor_sources.blocks_json``), et ne retient un bloc que s'il nomme un programme
+   connu ET relève du laser ultra-rapide. Le résultat est un signal faible, écrit en
+   ``review_status='pending'`` -- il passe par la file de relecture,
    contrairement aux deux premières sources qui sont sourcées sur une fiche projet officielle.
 
 Limite assumée : l'Allemagne, premier pays de la base par le nombre d'acteurs, n'a pas de
 source structurée ici. Le Förderkatalog du Bund (foerderportal.bund.de/foekat) est la
 référence, mais c'est une application JSP à session, sans API ni export stable -- la scraper
-donnerait un collecteur qui casse à la première refonte. Les projets BMBF entrent donc par la
-passe 3, quand l'institut les annonce sur son propre site, et pas autrement.
+donnerait un collecteur qui casse à la première refonte (revérifié le 15/09/2026 : le portail
+GovData ne publie aucun jeu "Förderkatalog"). Les projets fédéraux allemands entrent donc par
+la passe 3, quand l'institut les annonce sur son propre site, et pas autrement.
 """
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import re
+import time
+from collections import defaultdict
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -69,6 +79,7 @@ from cordis import (
 )
 from db import (
     ACTORS_DB,
+    DATA_DIR,
     TECH_DB,
     connect,
     technology_signal_key,
@@ -90,22 +101,44 @@ from lexicon import (
 
 # --- Source 1 : ANR ------------------------------------------------------------------------
 #
-# API Explore v2.1 d'Opendatasoft (portail open data du MESR). Pas de clé, pas de quota
-# documenté ; une requête par acteur suivi, filtrée côté serveur sur le nom du partenaire.
-ANR_RECORDS_URL = (
-    "https://data.enseignementsup-recherche.gouv.fr/api/explore/v2.1/catalog/datasets/"
-    "fr-esr-aap-anr-projets-retenus-participants-identifies/records"
+# Les jeux que l'ANR publie ELLE-MÊME sur data.gouv.fr, en deux dépôts : ANR_01 pour les appels
+# de la direction scientifique (DOS/DGDS, l'essentiel du portefeuille) et ANR_02 pour ceux que
+# l'agence opère au titre des investissements d'avenir (DGPIE : PIA, France 2030).
+#
+# Ce module a d'abord tapé ailleurs, et c'était une erreur coûteuse : le portail
+# data.enseignementsup-recherche.gouv.fr expose un jeu "Appels à projets ANR - Projets retenus
+# et participants identifiés" avec une API de requêtage très commode, utilisée ici jusqu'au
+# 14/09/2026. C'est une ARCHIVE. Sa dernière modification date du 10/10/2016, son projet le
+# plus récent porte l'édition 2016, et sa propre description dit « [Archive] Les données sont
+# à présent publiées par l'ANR ». Dix ans de financements manquaient donc en silence, sans
+# aucune erreur pour le signaler : mesuré le 14/09/2026, l'archive voyait 4 acteurs suivis et
+# 2 projets pertinents, les jeux vivants en voient 10 et 10 -- IREPA LASER et Meliad étaient
+# purement absents, et MANUTECH USD passait de 1 projet à 7 participations.
+#
+# D'où la leçon inscrite ici : un jeu de données ouvert qui répond 200 n'est pas pour autant
+# un jeu de données à jour. ANR_DATASETS pointe des IDENTIFIANTS de jeux, pas des URL de
+# fichiers -- les fichiers sont versionnés par horodatage à chaque republication mensuelle, et
+# les coder en dur les ferait pourrir de la même façon.
+ANR_DATASETS: tuple[tuple[str, str], ...] = (
+    ("60ca2086030c7b7e52e2c02e", "ANR_01 DOS/DGDS"),
+    ("60ca244980d5c4f0aecd07d1", "ANR_02 DGPIE (PIA / France 2030)"),
 )
-# 100 est le maximum accepté par l'API sur ce paramètre. Aucun acteur suivi n'approche ce
-# nombre de projets ANR (le mieux doté en compte 3), donc pas de pagination : si un acteur
-# venait à le dépasser, `anr_projects_truncated` le signale dans le rapport plutôt que de
-# laisser croire à une collecte complète.
-ANR_PAGE_SIZE = 100
-# 3 033 des 13 450 projets n'ont pas de `lien_projet`. La fiche existe pourtant toujours à
-# cette adresse -- vérifié le 13/09/2026 : anr.fr/Projet-ANR-14-CE16-0008 rend bien la fiche
-# du projet, et anr.fr/Projet-ANR-99-ZZZZ-9999 répond 404. Ce n'est donc pas une URL devinée,
-# c'est le gabarit canonique du site, contrôlé sur un code valide et un code invalide.
+ANR_DATAGOUV_DATASET_URL = "https://www.data.gouv.fr/api/1/datasets/{dataset_id}/"
+ANR_CACHE_DIR = DATA_DIR / "anr_cache"
+# Republication mensuelle (les deux jeux portent la même date de mise à jour, le 1er du mois) --
+# même cadence, et donc même politique de cache, que le dump CORDIS.
+ANR_CACHE_MAX_AGE_DAYS = 25
+# Les deux moitiés de chaque jeu. Le nom de fichier porte toujours l'un de ces deux mots, et
+# c'est sur lui qu'on les distingue : "...-projets.csv" et "...-partenaires.csv".
+ANR_PROJECTS_MARKER = "projets.csv"
+ANR_PARTNERS_MARKER = "partenaires.csv"
+# La fiche publique du projet. Vérifié le 13/09/2026 sur un code valide et un code invalide :
+# anr.fr/Projet-ANR-14-CE16-0008 rend la fiche, anr.fr/Projet-ANR-99-ZZZZ-9999 répond 404.
 ANR_PROJECT_URL_TEMPLATE = "https://anr.fr/Projet-{code}"
+# Les résumés ANR dépassent largement la limite par défaut du module csv (131 072 caractères
+# par champ) : sans ce relèvement, la lecture s'arrête sur une exception au premier projet
+# bavard. Posé au niveau du module, comme le fait déjà csv pour tout le processus.
+csv.field_size_limit(10_000_000)
 
 # --- Source 2 : UKRI Gateway to Research -----------------------------------------------------
 GTR_API_BASE = "https://gtr.ukri.org/gtr/api"
@@ -160,21 +193,38 @@ FUNDING_PROGRAMS: Lexicon = {
     "ADEME": {"regex": (r"\bademe\b",)},
     "Innovate UK": {"any_of": ("innovate uk", "technology strategy board")},
     "EPSRC / UKRI": {
-        "any_of": ("engineering and physical sciences research council", "ukri"),
+        # "UK Research and Innovation" en toutes lettres est la forme que prennent les pages
+        # institutionnelles britanniques ; seul le sigle était listé.
+        "any_of": ("engineering and physical sciences research council", "ukri",
+                   "uk research and innovation"),
         "regex": (r"\bepsrc\b", r"\bstfc\b"),
     },
-    "BMBF / BMWK (Allemagne)": {
+    # Les ministères fédéraux allemands ont changé de nom en mai 2025 : le BMBF est devenu le
+    # BMFTR (Forschung, Technologie und Raumfahrt, l'éducation partant ailleurs) et le BMWK le
+    # BMWE (Wirtschaft und Energie). Les anciens sigles restent listés -- une page qui annonce
+    # un projet financé en 2022 les porte encore, et c'est précisément ce qu'on cherche -- mais
+    # sans les nouveaux, aucune page allemande écrite depuis mai 2025 n'était reconnue.
+    # Vérifié le 15/09/2026 sur "Gefördert vom BMFTR" et "gefördert durch das BMWE" : les deux
+    # passaient au travers. Même leçon que l'ANR : une source qui ne renvoie rien ne dit pas
+    # qu'elle est périmée, elle ne dit rien du tout.
+    "BMFTR / BMWE (ex-BMBF / BMWK, Allemagne)": {
         "any_of": ("bundesministerium für bildung und forschung",
-                   "bundesministerium für wirtschaft", "gefördert vom bmbf", "zim-projekt"),
-        "regex": (r"\bbmbf\b", r"\bbmwk\b", r"\bbmwi\b"),
+                   "bundesministerium für forschung, technologie und raumfahrt",
+                   "bundesministerium für wirtschaft", "gefördert vom bmbf",
+                   "gefördert vom bmftr", "zim-projekt"),
+        "regex": (r"\bbmbf\b", r"\bbmftr\b", r"\bbmwk\b", r"\bbmwi\b", r"\bbmwe\b"),
     },
     "Innosuisse / FNS (Suisse)": {
         "any_of": ("innosuisse", "commission for technology and innovation",
                    "swiss national science foundation", "fonds national suisse"),
     },
     "Eurostars / EUREKA": {"any_of": ("eurostars", "eureka")},
-    "Enterprise Ireland / SFI": {
-        "any_of": ("enterprise ireland", "science foundation ireland"),
+    # Depuis le 1er août 2024, Science Foundation Ireland et l'Irish Research Council sont
+    # fusionnés dans Taighde Éireann - Research Ireland. Les deux anciens noms restent, pour
+    # les projets antérieurs qui les citent toujours.
+    "Research Ireland / Enterprise Ireland": {
+        "any_of": ("enterprise ireland", "science foundation ireland", "research ireland",
+                   "taighde éireann", "irish research council"),
         "regex": (r"\bsfi\b",),
     },
     "CDTI (Espagne)": {
@@ -191,13 +241,16 @@ FUNDING_PROGRAMS: Lexicon = {
         "regex": (r"\bfeder\b", r"\berdf\b"),
     },
     "Interreg": {"any_of": ("interreg",)},
+    # "Région Sud Provence" et non "région sud" seul : la marque de PACA, prise isolément,
+    # matche "la région Sud-Ouest" et "la région sud du pays" (vérifié le 15/09/2026).
     "Appel à projets régional": {
         "any_of": ("r&d booster", "conseil régional", "conseil départemental",
                    "région auvergne-rhône-alpes", "région nouvelle-aquitaine",
                    "région bourgogne-franche-comté", "région grand est", "région occitanie",
                    "région bretagne", "région hauts-de-france", "région normandie",
                    "région pays de la loire", "région centre-val de loire",
-                   "région provence-alpes-côte d'azur", "région île-de-france"),
+                   "région provence-alpes-côte d'azur", "région sud provence",
+                   "région île-de-france"),
     },
 }
 
@@ -217,10 +270,10 @@ FUNDING_PROGRAM_SCOPES: dict[str, tuple[str, str]] = {
     "ADEME": ("national", "France"),
     "Innovate UK": ("national", "Royaume-Uni"),
     "EPSRC / UKRI": ("national", "Royaume-Uni"),
-    "BMBF / BMWK (Allemagne)": ("national", "Allemagne"),
+    "BMFTR / BMWE (ex-BMBF / BMWK, Allemagne)": ("national", "Allemagne"),
     "Innosuisse / FNS (Suisse)": ("national", "Suisse"),
     "Eurostars / EUREKA": ("europeen", "Europe"),
-    "Enterprise Ireland / SFI": ("national", "Irlande"),
+    "Research Ireland / Enterprise Ireland": ("national", "Irlande"),
     "CDTI (Espagne)": ("national", "Espagne"),
     "Vinnova / Business Finland / RVO": ("national", "Europe du Nord"),
     "FEDER / ERDF": ("regional", "Union européenne"),
@@ -302,100 +355,153 @@ def _find_tracked_actor(related_name: str, aliases: dict[str, str]) -> str | Non
 # Source 1 : ANR
 # =============================================================================================
 
-def _anr_partner_names(record: dict[str, Any]) -> list[str]:
-    """Les organisations d'un projet ANR, telles que le jeu de données les nomme.
+def _anr_resource_urls(client: httpx.Client, dataset_id: str) -> tuple[list[str], list[str]]:
+    """Les URL CSV (projets, partenaires) d'un jeu ANR, lues dans son catalogue data.gouv.fr.
 
-    `libelle_de_partenaire` est un champ multivalué aligné avec `sigle_de_partenaire` et
-    `identifiant_de_partenaire` ; il contient des chaînes vides pour les partenaires dont
-    seul un libellé générique était connu à la saisie (`type_d_identifiant = 'lib_generique'`).
+    Résolues à chaque collecte plutôt que codées en dur : l'ANR republie mensuellement, et
+    chaque republication crée un nouveau dossier horodaté dans l'URL du fichier. Une URL en
+    dur pointerait indéfiniment sur le CSV du mois où elle a été écrite -- exactement la panne
+    silencieuse qui a coûté dix ans de données avec le jeu archivé (voir ANR_DATASETS).
+
+    TOUTES les ressources CSV sont renvoyées, jamais une seule par moitié : un jeu ANR est
+    découpé en ÈRES ("...-2005-2009-..." et "...-depuis-2010-..."), publiées comme des
+    ressources distinctes du même jeu. Une première version de cette fonction gardait la
+    dernière rencontrée, ce qui -- data.gouv.fr listant 2010+ avant 2005-2009 -- ne lisait en
+    pratique que l'ère 2005-2009 et perdait l'essentiel du portefeuille : 2 projets pertinents
+    trouvés au lieu de 10, sans la moindre erreur pour le dire. Le même piège que l'archive,
+    à un niveau de plus.
     """
-    names = record.get("libelle_de_partenaire") or []
-    if isinstance(names, str):  # l'API sert une chaîne quand le projet n'a qu'un partenaire
-        names = [names]
-    return [str(name).strip() for name in names if str(name).strip()]
-
-
-def _anr_partner_acronyms(record: dict[str, Any]) -> list[str]:
-    """Les sigles des partenaires (`sigle_de_partenaire`), champ multivalué aligné sur
-    `libelle_de_partenaire` -- souvent le SEUL endroit où un acteur apparaît sous le nom que
-    la base suit (IREIS, LabHC, CETHIL...)."""
-    acronyms = record.get("sigle_de_partenaire") or []
-    if isinstance(acronyms, str):
-        acronyms = [acronyms]
-    return [str(value).strip() for value in acronyms if str(value).strip()]
-
-
-def _anr_project_url(record: dict[str, Any]) -> str:
-    return (record.get("lien_projet") or "").strip() or ANR_PROJECT_URL_TEMPLATE.format(
-        code=record.get("code_du_projet") or ""
-    )
-
-
-def _anr_text(record: dict[str, Any]) -> str:
-    return f"{record.get('titre') or ''} {record.get('resume') or ''}".strip()
-
-
-def anr_records_for_alias(client: httpx.Client, alias: str) -> list[dict[str, Any]]:
-    """Les projets ANR où `alias` apparaît comme partenaire, sigle ou coordinateur.
-
-    Le filtre est posé côté serveur (ODSQL ``search()``), donc une seule requête par acteur au
-    lieu du téléchargement des 13 450 projets. ``search()`` est tolérant (insensible à la
-    casse et aux accents, découpé en mots), ce qui est exactement ce qu'il faut pour trouver
-    un candidat -- mais pas pour l'accepter : l'appariement strict est refait ensuite, en
-    local, par ``_contains_whole_phrase`` sur les noms réellement renvoyés.
-    """
-    # `alias` sort de _normalize_org_text : majuscules, chiffres et espaces uniquement. Aucun
-    # guillemet ne peut donc s'y trouver et casser le littéral ODSQL ci-dessous.
-    where = (
-        f'search(libelle_de_partenaire,"{alias}") '
-        f'or search(sigle_de_partenaire,"{alias}") '
-        f'or search(coordinateur_du_projet,"{alias}")'
-    )
-    response = client.get(ANR_RECORDS_URL, params={"where": where, "limit": ANR_PAGE_SIZE})
+    response = client.get(ANR_DATAGOUV_DATASET_URL.format(dataset_id=dataset_id))
     response.raise_for_status()
-    payload = response.json()
-    return list(payload.get("results") or [])
+    projects: list[str] = []
+    partners: list[str] = []
+    for resource in response.json().get("resources") or []:
+        if (resource.get("format") or "").lower() != "csv":
+            continue
+        url = (resource.get("url") or "").strip()
+        title = (resource.get("title") or "").lower()
+        if title.endswith(ANR_PROJECTS_MARKER):
+            projects.append(url)
+        elif title.endswith(ANR_PARTNERS_MARKER):
+            partners.append(url)
+    return projects, partners
 
+def _anr_cached_csv(client: httpx.Client, url: str) -> Path:
+    """Télécharge un CSV ANR s'il manque ou s'il a vieilli, et renvoie son chemin local.
+
+    Même politique que cordis._ensure_cache : écriture dans un fichier temporaire puis
+    renommage atomique, pour qu'un run interrompu ne laisse jamais un cache tronqué -- le CSV
+    des projets DGDS pèse 136 Mo, une coupure en cours de route est un cas réel.
+    """
+    ANR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = ANR_CACHE_DIR / url.rsplit("/", 1)[-1]
+    if path.exists() and (time.time() - path.stat().st_mtime) / 86400 < ANR_CACHE_MAX_AGE_DAYS:
+        return path
+    tmp_path = path.with_suffix(".part")
+    with client.stream("GET", url) as response:
+        response.raise_for_status()
+        with open(tmp_path, "wb") as handle:
+            for chunk in response.iter_bytes(chunk_size=1 << 20):
+                handle.write(chunk)
+    tmp_path.replace(path)
+    return path
+
+
+def _anr_csv_rows(path: Path) -> Iterator[dict[str, str]]:
+    """Lit un CSV ANR en streaming (séparateur ';', UTF-8).
+
+    ``errors="replace"`` parce qu'un caractère mal encodé au milieu d'un résumé ne doit pas
+    faire échouer la lecture des 120 000 lignes qui suivent.
+    """
+    with open(path, encoding="utf-8", errors="replace", newline="") as handle:
+        yield from csv.DictReader(handle, delimiter=";")
+
+
+def _anr_project_url(code: str) -> str:
+    return ANR_PROJECT_URL_TEMPLATE.format(code=code)
+
+
+def _anr_text(project: dict[str, str]) -> str:
+    """Titre et résumé, dans les DEUX langues que l'ANR publie.
+
+    Les deux comptent : le lexique laser a une moitié anglophone plus riche que sa moitié
+    française, et beaucoup de projets ne remplissent qu'un des deux résumés.
+    """
+    return " ".join(filter(None, (
+        project.get("Projet.Titre.Francais"), project.get("Projet.Titre.Anglais"),
+        project.get("Projet.Resume.Francais"), project.get("Projet.Resume.Anglais"),
+    ))).strip()
+
+
+def _anr_project_label(project: dict[str, str], code: str) -> str:
+    return (project.get("Projet.Acronyme") or "").strip() or code
+
+
+def _anr_project_title(project: dict[str, str]) -> str:
+    return (project.get("Projet.Titre.Francais") or project.get("Projet.Titre.Anglais") or "").strip()
+
+
+def anr_cached_files(client: httpx.Client) -> tuple[list[Path], list[Path]]:
+    """Tous les CSV ANR en cache local : (fichiers de projets, fichiers de partenaires).
+
+    Deux listes plutôt que des paires (projets, partenaires) : les ères et les deux jeux se
+    lisent indifféremment les unes après les autres, `Projet.Code_Decision` étant unique sur
+    l'ensemble du portefeuille. Apparier les fichiers deux à deux n'apporterait rien et
+    redonnerait une occasion d'en oublier un.
+    """
+    projects: list[Path] = []
+    partners: list[Path] = []
+    for dataset_id, _label in ANR_DATASETS:
+        projects_urls, partners_urls = _anr_resource_urls(client, dataset_id)
+        projects.extend(_anr_cached_csv(client, url) for url in projects_urls)
+        partners.extend(_anr_cached_csv(client, url) for url in partners_urls)
+    return projects, partners
 
 def _collect_anr(client: httpx.Client, aliases: dict[str, str], report: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Passe ANR : renvoie ``{code du projet: {"record":..., "actors": {noms}}}`` on-topic."""
+    """Passe ANR, en deux lectures -- même forme que cordis._match_projects.
+
+    Passe 1, les fichiers de partenaires (25 Mo) : quels projets impliquent un acteur suivi.
+    Passe 2, les fichiers de projets (166 Mo) : le texte des SEULS projets ainsi retenus, ce
+    qui borne la mémoire au nombre de projets pertinents plutôt qu'au portefeuille entier.
+
+    Le nom d'organisation est le seul champ d'identité de ces jeux -- il n'y a pas de colonne
+    de sigle, contrairement au jeu archivé. L'ANR y inscrit heureusement les organisations
+    telles qu'elles signent ("IREIS", "MANUTECH-USD", "IREPA LASER"), et l'appariement se joue
+    donc entièrement sur ``match_alias`` + ``_contains_whole_phrase``.
+    """
     found: dict[str, dict[str, Any]] = {}
-    for actor_name, alias in aliases.items():
-        try:
-            records = anr_records_for_alias(client, alias)
-        except Exception:
-            report["errors"] += 1
-            continue
-        if len(records) == ANR_PAGE_SIZE:
-            report["anr_projects_truncated"] += 1
-        for record in records:
-            code = (record.get("code_du_projet") or "").strip()
-            if not code:
+    projects_paths, partners_paths = anr_cached_files(client)
+
+    partners_by_project: dict[str, list[dict[str, str]]] = defaultdict(list)
+    actors_by_project: dict[str, set[str]] = defaultdict(set)
+    for partners_path in partners_paths:
+        for row in _anr_csv_rows(partners_path):
+            code = (row.get("Projet.Code_Decision") or "").strip()
+            name = _normalize_org_text(row.get("Projet.Partenaire.Nom_organisme") or "")
+            if not code or not name:
                 continue
-            # L'appariement strict : le nom d'une organisation du projet doit contenir l'alias
-            # à des frontières de mot. Sans ce contrôle, `search()` ramènerait un projet pour
-            # un simple mot voisin dans un libellé plus long.
-            #
-            # Les SIGLES comptent autant que les libellés, et les oublier a coûté un vrai
-            # projet : l'ANR inscrit IREIS sous "INSTITUT DE RECHERCHES EN INGENIERIE DES
-            # SURFACES", le sigle "IREIS" ne vivant que dans `sigle_de_partenaire`. La requête
-            # serveur, elle, interrogeait bien ce champ -- le projet TOPOINJECTION revenait de
-            # l'API, passait le filtre laser, et se faisait refuser ici. Vérifier ce que l'on
-            # a interrogé, ni plus ni moins.
-            candidates = (
-                _anr_partner_names(record)
-                + _anr_partner_acronyms(record)
-                + [record.get("coordinateur_du_projet") or ""]
-            )
-            if not any(_contains_whole_phrase(_normalize_org_text(name), alias) for name in candidates):
+            partners_by_project[code].append(row)
+            for actor_name, alias in aliases.items():
+                if _contains_whole_phrase(name, alias):
+                    actors_by_project[code].add(actor_name)
+
+    wanted = set(actors_by_project)
+    if not wanted:
+        return found
+    for projects_path in projects_paths:
+        for project in _anr_csv_rows(projects_path):
+            code = (project.get("Projet.Code_Decision") or "").strip()
+            if code not in wanted or code in found:
                 continue
-            if not is_on_topic(_anr_text(record)):
+            if not is_on_topic(_anr_text(project)):
                 report["projects_off_topic"] += 1
                 continue
-            entry = found.setdefault(code, {"record": record, "actors": set()})
-            entry["actors"].add(actor_name)
+            found[code] = {
+                "project": project,
+                "partners": partners_by_project.get(code, []),
+                "actors": set(actors_by_project[code]),
+            }
     return found
-
 
 # =============================================================================================
 # Source 2 : UKRI Gateway to Research
@@ -665,41 +771,46 @@ def _project_signal(
 def _write_anr(actors_db, tech_db, found: dict[str, dict[str, Any]], aliases: dict[str, str],
                actors_by_name: dict[str, int], report: dict[str, Any]) -> None:
     for code, entry in found.items():
-        record, actor_names = entry["record"], sorted(entry["actors"])
-        source_url = _anr_project_url(record)
-        label = (record.get("acronyme") or "").strip() or code
-        title = (record.get("titre") or "").strip()
-        program = (record.get("programme") or "").strip()
+        project, actor_names = entry["project"], sorted(entry["actors"])
+        source_url = _anr_project_url(code)
+        label = _anr_project_label(project, code)
+        title = _anr_project_title(project)
+        program = (project.get("Programme.Acronyme") or "").strip()
         try:
             for actor_name in actor_names:
                 actor_id = actors_by_name[actor_name]
                 description = f"Participation au projet national ANR {label} ({title})".strip()[:500]
                 report["events_added"] += upsert_actor_event(
                     actors_db, actor_id, EVENT_ANR, description, source_url=source_url,
-                    # `date_de_debut` est une ANNÉE dans ce jeu de données ("2007"), pas une
-                    # date complète : elle est écrite telle quelle plutôt que complétée d'un
-                    # 01-01 qui ferait passer une approximation pour un jour connu.
-                    event_date=str(record.get("date_de_debut") or "") or None,
+                    # `Projet.T0 scientifique` est une vraie date ISO (2026-04-01), pas une
+                    # année comme dans le jeu archivé -- un des gains du passage à la source
+                    # vivante. Absente sur les projets anciens : rien plutôt qu'une date
+                    # reconstruite à partir de l'édition de l'appel.
+                    event_date=(project.get("Projet.T0 scientifique") or "").strip() or None,
                     # Fiche projet publique et stable sur anr.fr, comme une page CORDIS.
                     review_status="verified",
                 )
                 own_alias = aliases[actor_name]
-                for partner in _anr_partner_names(record)[:MAX_PARTNERS_PER_PROJECT]:
-                    if _contains_whole_phrase(_normalize_org_text(partner), own_alias):
+                for partner in entry["partners"][:MAX_PARTNERS_PER_PROJECT]:
+                    related_name = (partner.get("Projet.Partenaire.Nom_organisme") or "").strip()
+                    if not related_name or _contains_whole_phrase(_normalize_org_text(related_name), own_alias):
                         continue  # la ligne de l'acteur lui-même, pas un partenaire
-                    related_actor_id = actors_by_name.get(_find_tracked_actor(partner, aliases) or "")
-                    note = f"Consortium ANR {label}"[:240]
+                    related_actor_id = actors_by_name.get(_find_tracked_actor(related_name, aliases) or "")
+                    role = "coordinateur" if (partner.get("Projet.Partenaire.Est_coordinateur") or "").strip().lower() == "true" else "partenaire"
+                    note = f"Consortium ANR {label} ({role})"[:240]
                     report["relations_added"] += _upsert_actor_relation(
-                        actors_db, actor_id, partner[:180], related_actor_id, note, source_url,
+                        actors_db, actor_id, related_name[:180], related_actor_id, note, source_url,
                     )
 
             added, source_added = _project_signal(
                 tech_db,
-                text=_anr_text(record),
+                text=_anr_text(project),
                 project_name=label,
                 source_url=source_url,
                 source_title=title or None,
                 actor_names=actor_names,
+                # Les appels DGPIE sont opérés par l'ANR pour le compte du PIA / France 2030 ;
+                # l'échelle reste nationale, seul le nom du guichet change (Programme.Acronyme).
                 funding_scope="national",
                 funding_program=f"ANR — {program}" if program else "ANR",
                 language="fr",
@@ -762,8 +873,8 @@ def _write_gtr(actors_db, tech_db, found: dict[str, dict[str, Any]], aliases: di
 def _write_mentions(actors_db, mentions: list[dict[str, Any]], report: dict[str, Any]) -> None:
     for mention in mentions:
         scope_label = SCOPE_LABELS.get(mention["scope"], mention["scope"])
-        # Plusieurs libellés nomment déjà leur pays ("BMBF / BMWK (Allemagne)") : le répéter
-        # donnait "BMBF / BMWK (Allemagne) (Allemagne)".
+        # Plusieurs libellés nomment déjà leur pays ("BMFTR / BMWE (ex-BMBF / BMWK,
+        # Allemagne)") : le répéter donnait "... (Allemagne) (Allemagne)".
         guichet = mention["program"]
         if mention["country"].lower() not in guichet.lower():
             guichet = f"{guichet} ({mention['country']})"
@@ -797,7 +908,7 @@ def collect_national_projects(*, include_sources: tuple[str, ...] = ("anr", "gtr
     report: dict[str, Any] = {
         "actors_matched": 0, "projects_matched": 0, "projects_off_topic": 0,
         "events_added": 0, "relations_added": 0, "signals_added": 0, "signal_sources_added": 0,
-        "pages_scanned": 0, "mentions_added": 0, "anr_projects_truncated": 0, "errors": 0,
+        "pages_scanned": 0, "mentions_added": 0, "errors": 0,
     }
     with connect(ACTORS_DB) as db:
         actors = [dict(row) for row in db.execute("SELECT id,name FROM actors WHERE active=1").fetchall()]
@@ -809,22 +920,36 @@ def collect_national_projects(*, include_sources: tuple[str, ...] = ("anr", "gtr
     # Tout le réseau d'abord, l'écriture ensuite : une transaction SQLite ouverte pendant des
     # dizaines de requêtes HTTP bloquerait les autres écrivains (même raison que cordis.py,
     # qui télécharge son ZIP avant d'ouvrir sa connexion).
-    if {"anr", "gtr"} & set(include_sources):
+    #
+    # Deux clients, deux profils de timeout : l'ANR se télécharge en vrac (le CSV des projets
+    # DGDS pèse 136 Mo, le profil "api" et ses 20 s le couperaient systématiquement), GtR se
+    # consulte requête par requête. Et deux try/except distincts : un jeu ANR indisponible ne
+    # doit pas emporter la passe UKRI, ni l'inverse.
+    if "anr" in include_sources:
+        try:
+            with connector_client("bulk") as client:
+                anr_found = _collect_anr(client, aliases, report)
+        except Exception as error:
+            report["anr_error"] = str(error)[:300]
+            report["errors"] += 1
+    if "gtr" in include_sources:
         try:
             with connector_client("api") as client:
-                if "anr" in include_sources:
-                    anr_found = _collect_anr(client, aliases, report)
-                if "gtr" in include_sources:
-                    gtr_found = _collect_gtr(client, aliases, report)
+                gtr_found = _collect_gtr(client, aliases, report)
         except Exception as error:
-            report["error"] = str(error)[:300]
+            report["gtr_error"] = str(error)[:300]
             report["errors"] += 1
 
     mentions: list[dict[str, Any]] = []
     if "mentions" in include_sources:
         try:
             mentions = _collect_program_mentions(report)
-        except Exception:
+        except Exception as error:
+            # Le message, pas seulement le compteur : cette passe parcourt 1 235 pages et une
+            # exception au milieu du parcours abandonne silencieusement tout le reste. Un
+            # `errors: 1` nu ne disait ni où ni pourquoi -- constaté le 14/09/2026, la passe
+            # s'est arrêtée à la page 198 sans laisser la moindre trace exploitable.
+            report["mentions_error"] = f"{type(error).__name__}: {error}"[:300]
             report["errors"] += 1
 
     report["projects_matched"] = len(anr_found) + len(gtr_found)

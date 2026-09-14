@@ -10,5 +10,6 @@ data/*.db-wal
 data/*.db-shm
 data/backups/
 data/cordis_cache/
+data/anr_cache/
 
 .env

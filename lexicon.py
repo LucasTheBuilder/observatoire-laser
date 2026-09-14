@@ -830,6 +830,13 @@ LASER_AS_SOURCE_CUES = (
     "titanium sapphire", "ti:sapphire", "ti sapphire", "saturable absorber",
     "mode-locked", "mode locked", "mode-locking", "laser crystal", "laser crystals",
     "gain medium", "gain media", "laser gain", "doped crystal", "doped crystals",
+    # Cinquième passe (14/09/2026), sur les projets ANR : le français nomme volontiers une
+    # source « source (à fibres) optique(s) » sans jamais écrire le mot laser à côté. Cas
+    # trouvé en production : « FLEX-UV — Source à fibres optiques émettant dans l'ultraviolet
+    # extrême » (ALPhANOV) entrait comme projet de l'observatoire. Mesuré sur les dix projets
+    # ANR on-topic des acteurs suivis : ces termes en écartent exactement un, FLEX-UV.
+    "source à fibre", "source à fibres", "sources à fibre", "sources à fibres",
+    "source fibrée", "sources fibrées", "source optique", "sources optiques",
 )
 
 

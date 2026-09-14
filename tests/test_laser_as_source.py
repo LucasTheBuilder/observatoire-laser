@@ -148,6 +148,29 @@ class GainMediumIsASourceTests(unittest.TestCase):
                 self.assertTrue(is_on_topic(text))
 
 
+class FrenchOpticalSourceTests(unittest.TestCase):
+    """Le français nomme une source « source (à fibres) optique(s) », souvent sans écrire le
+    mot laser à côté. Cas trouvé dans les projets ANR d'ALPhANOV le 14/09/2026."""
+
+    FLEX_UV = "FLEX-UV — Source à fibres optiques émettant dans l'ultraviolet extrême"
+
+    def test_an_optical_fibre_source_is_out_of_scope(self):
+        self.assertTrue(is_laser_the_source(self.FLEX_UV))
+        self.assertFalse(is_on_topic(self.FLEX_UV))
+
+    def test_french_process_projects_are_untouched(self):
+        for text in (
+            "Soudure haute cadence du verre par laser ultra-bref",
+            "Fonctionnalisation de Fenêtres Optiques par Structuration Laser femtoseconde",
+            # Titre + résumé, comme le collecteur les assemble : le titre seul de ce projet
+            # ne porte aucun terme ultra-rapide, c'est son résumé qui le qualifie.
+            "Texturation topographique multiéchelles de pièces polymères par structuration "
+            "laser. Structuration par impulsions ultracourtes, régime LIPSS.",
+        ):
+            with self.subTest(text=text[:50]):
+                self.assertTrue(is_on_topic(text))
+
+
 class DocumentIntakeAppliesTheGuardTests(unittest.TestCase):
     def test_openalex_rejects_source_only_titles(self):
         from openalex import _work_is_on_topic
