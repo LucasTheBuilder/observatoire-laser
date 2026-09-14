@@ -70,6 +70,24 @@ ANR_FUZZY_NOISE = {
     "coordinateur_du_projet": "Institut de Chimie de Clermont-Ferrand",
 }
 
+# Le cas IREIS, trouvé en production le 14/09/2026 : l'ANR inscrit l'acteur sous sa raison
+# sociale complète, et le nom que la base suit ne vit que dans `sigle_de_partenaire`.
+ANR_ACRONYM_ONLY = {
+    "code_du_projet": "ANR-13-RMNP-0010",
+    "titre": "Texturation topographique multiéchelles de pièces polymères par structuration laser",
+    "acronyme": "TOPOINJECTION",
+    "resume": (
+        "Structuration par impulsions ultracourtes de moules d'injection pour texturer des "
+        "pièces polymères. Les structures périodiques visées relèvent du régime LIPSS."
+    ),
+    "programme": "RMNP 2013",
+    "lien_projet": "",
+    "date_de_debut": 2014,
+    "libelle_de_partenaire": ["INSTITUT DE RECHERCHES EN INGENIERIE DES SURFACES", "Laboratoire Hubert Curien"],
+    "sigle_de_partenaire": ["IREIS", "LabHC"],
+    "coordinateur_du_projet": "Monsieur Stéphane BENAYOUN (LABORATOIRE DE TRIBOLOGIE)",
+}
+
 # --- Fixtures UKRI Gateway to Research --------------------------------------------------------
 GTR_ON_TOPIC = {
     "id": "2D8359F7-1643-4438-8FC2-0CEE64B249B2",
@@ -339,6 +357,84 @@ class NationalProjectsTests(unittest.TestCase):
             for key in ("events_added", "relations_added", "signals_added", "mentions_added"):
                 self.assertEqual(0, second[key], key)
             self.assertEqual(0, second["errors"])
+
+
+class AliasRecallTests(unittest.TestCase):
+    """Les quatre défauts de rappel trouvés le 14/09/2026 en confrontant le collecteur aux
+    registres réels. Tous faisaient perdre des projets qui existaient bel et bien."""
+
+    def test_a_legal_suffix_never_blocks_a_match(self):
+        """GtR connaît "Laser Micromachining Limited", la base suit "Laser Micromachining
+        Ltd" : exiger le suffixe donnait 0 fiche retenue sur 25 renvoyées."""
+        alias = npmod.match_alias("Laser Micromachining Ltd")
+        self.assertEqual("LASER MICROMACHINING", alias)
+        for spelling in ("Laser Micromachining Limited", "LASER MICROMACHINING LIMITED",
+                         "Laser Micromachining Ltd"):
+            with self.subTest(spelling=spelling):
+                self.assertTrue(npmod._contains_whole_phrase(npmod._normalize_org_text(spelling), alias))
+        # ...sans pour autant ouvrir la porte à une organisation voisine mais distincte.
+        self.assertFalse(npmod._contains_whole_phrase(npmod._normalize_org_text("Laser Quantum Ltd"), alias))
+
+    def test_a_parenthesised_acronym_leaves_the_alias(self):
+        """"Manufacturing Technology Centre (MTC)" ne matchait que sa fiche exacte, pas les
+        trois autres fiches GtR du même centre."""
+        alias = npmod.match_alias("Manufacturing Technology Centre (MTC)")
+        self.assertEqual("MANUFACTURING TECHNOLOGY CENTRE", alias)
+        self.assertTrue(npmod._contains_whole_phrase(
+            npmod._normalize_org_text("THE MANUFACTURING TECHNOLOGY CENTRE LIMITED"), alias))
+
+    def test_a_three_letter_actor_is_queried(self):
+        """TWI (9 fiches dans GtR) et HEF étaient écartés avant toute requête par le seuil
+        de CORDIS, calibré pour un dump de 300 000 lignes, pas pour une API par nom."""
+        actors = [{"id": 1, "name": "TWI"}, {"id": 2, "name": "HEF"}]
+        self.assertEqual({"TWI": "TWI", "HEF": "HEF"}, npmod._tracked_aliases(actors))
+
+    def test_an_alias_reduced_to_nothing_keeps_the_full_name(self):
+        """Une raison sociale qui n'est QUE sa forme juridique ne doit pas devenir vide."""
+        self.assertEqual("AG", npmod.match_alias("AG"))
+
+    def test_an_actor_named_only_by_its_acronym_in_anr_is_matched(self):
+        """Le cas IREIS : la requête serveur interroge `sigle_de_partenaire`, la vérification
+        locale doit interroger le même champ -- sinon on refuse ce qu'on est allé chercher."""
+        with tempfile.TemporaryDirectory() as tmp:
+            actors_db, tech_db = self._databases(tmp)
+            with dbmod.connect(actors_db) as db:
+                db.execute("DELETE FROM actors")
+            with patch.object(dbmod, "ACTORS_DB", actors_db):
+                dbmod.create_actor("IREIS", "France", "Test", "https://www.ireis.fr")
+
+            def fake_anr(client, alias):
+                return [ANR_ACRONYM_ONLY] if alias == "IREIS" else []
+
+            with (
+                patch.object(npmod, "ACTORS_DB", actors_db),
+                patch.object(npmod, "TECH_DB", tech_db),
+                patch.object(npmod, "anr_records_for_alias", fake_anr),
+            ):
+                result = npmod.collect_national_projects(include_sources=("anr",))
+            self.assertEqual(1, result["projects_matched"])
+
+            with dbmod.connect(actors_db) as db:
+                event = db.execute("SELECT description FROM actor_events").fetchone()
+            self.assertIn("TOPOINJECTION", event["description"])
+
+    _databases = NationalProjectsTests._databases
+
+
+class GtrScopeTests(unittest.TestCase):
+    """GtR n'est pas que le guichet national : "Horizon Europe Guarantee" et "EU" y sont de
+    vrais leadFunder (6 projets chez TWI, 3 au MTC, relevé du 14/09/2026). Les étiqueter
+    "projet national" serait faux sur l'étiquette la plus visible de la fiche."""
+
+    def test_european_funders_are_not_national(self):
+        for funder in ("Horizon Europe Guarantee", "EU", "horizon europe guarantee"):
+            with self.subTest(funder=funder):
+                self.assertEqual("europeen", npmod._gtr_scope(funder))
+
+    def test_every_other_ukri_funder_is_national(self):
+        for funder in ("EPSRC", "Innovate UK", "ISCF", "ATI", "APC", "UKRI FLF", "SPF", "UKRI"):
+            with self.subTest(funder=funder):
+                self.assertEqual("national", npmod._gtr_scope(funder))
 
 
 class GtrTransportTests(unittest.TestCase):

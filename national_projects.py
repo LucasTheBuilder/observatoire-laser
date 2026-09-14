@@ -26,8 +26,11 @@ ne publient pas tous leurs lauréats de la même façon :
    par la DGA/AID), les appels du PIA et de France 2030.
 
 2. UKRI Gateway to Research (Royaume-Uni) -- l'API publique de UKRI (pas de clé), qui couvre
-   Innovate UK, EPSRC, STFC et les autres conseils : le guichet national britannique, celui
-   par lequel passent les projets collaboratifs des huit prestataires UK suivis.
+   Innovate UK, EPSRC, STFC, ISCF et les autres conseils : le guichet national britannique,
+   celui par lequel passent les projets collaboratifs des prestataires UK suivis. GtR
+   enregistre aussi la participation britannique à des programmes européens ("Horizon Europe
+   Guarantee", "EU") : l'échelle se lit donc sur le guichet du projet, pas sur le pays de
+   l'organisation -- voir GTR_EUROPEAN_FUNDERS.
 
 3. Mentions de programme dans les pages déjà collectées -- pour tous les guichets qui ne
    publient AUCUNE liste de lauréats exploitable. RAPID est le cas type : vérifié le
@@ -59,7 +62,6 @@ import httpx
 from cordis import (
     CORDIS_MATCH_BLOCKLIST,
     MAX_PARTNERS_PER_PROJECT,
-    MIN_ALIAS_LENGTH,
     _actor_alias,
     _contains_whole_phrase,
     _normalize_org_text,
@@ -113,12 +115,21 @@ GTR_MAX_PROJECT_PAGES = 5
 # Un même établissement a plusieurs fiches dans GtR ("OXFORD LASERS LIMITED", "Oxford Lasers
 # Ltd", "Oxford Lasers Ltd" à nouveau) : on interroge toutes celles dont le nom contient
 # l'alias suivi, et on dédoublonne les projets sur leur identifiant.
-GTR_MAX_ORG_MATCHES = 5
+# Relevé du 14/09/2026 : TWI en a 9 à lui seul ("TWI", "TWI LIMITED", "TWI  LIMITED"...),
+# chacune portant ses propres projets -- la borne précédente (5) en perdait la moitié.
+GTR_MAX_ORG_MATCHES = 12
 # GtR renvoie ce texte à la place de l'objectif quand le résumé n'a jamais été saisi. Le
 # prendre pour un résumé remplirait `quote` avec une phrase qui ne parle pas du projet.
 GTR_ABSENT_ABSTRACT = "abstracts are not currently available in gtr"
 # La fiche lisible par un humain, celle qu'on met en source -- pas l'URL de l'API.
 GTR_PROJECT_URL_TEMPLATE = "https://gtr.ukri.org/projects?ref={ref}"
+# GtR n'est pas QUE le guichet national : il enregistre aussi la participation britannique à
+# des programmes européens. Relevé du 14/09/2026 sur les 10 fiches du MTC et les 9 de TWI,
+# `leadFunder` prend une douzaine de valeurs, dont deux qui ne sont pas de l'argent national --
+# "Horizon Europe Guarantee" (le dispositif qui a pris le relais après le Brexit) et "EU".
+# Les écrire "projet national" serait faux sur l'étiquette la plus visible de la fiche.
+# Tout le reste (EPSRC, Innovate UK, ISCF, ATI, APC, UKRI FLF, SPF...) est bien national.
+GTR_EUROPEAN_FUNDERS = {"horizon europe guarantee", "eu", "horizon 2020", "erc"}
 
 # --- Source 3 : mentions de programme dans les pages déjà collectées --------------------------
 #
@@ -226,17 +237,56 @@ EVENT_GTR = "ukri_project"
 EVENT_MENTION = "funding_program_mention"
 
 
+# Formes juridiques retirées de l'alias avant comparaison. Un registre national épelle la
+# sienne comme il veut -- GtR connaît "Laser Micromachining Limited" là où la base suit "Laser
+# Micromachining Ltd" -- et exiger le suffixe faisait manquer l'organisation entière (mesuré le
+# 14/09/2026 : 0 fiche retenue sur 25 renvoyées, alors que deux d'entre elles étaient la bonne).
+_LEGAL_SUFFIXES = (
+    "LTD", "LTD.", "LIMITED", "PLC", "INC", "LLC", "GMBH", "MBH", "AG", "KG", "SA", "SAS",
+    "SARL", "SRL", "SPA", "BV", "NV", "AB", "AS", "OY", "APS", "EV", "EEIG", "SE",
+)
+# Plus court que CORDIS (MIN_ALIAS_LENGTH = 4), et pour une raison de fond : CORDIS cherche
+# l'alias dans ~300 000 lignes d'organisations téléchargées en vrac, où un sigle de trois
+# lettres est un aimant à faux positifs. Ici l'API fait d'abord la recherche par nom, le
+# rapprochement local ne fait que VÉRIFIER une poignée de candidats, et le filtre laser passe
+# derrière. Avec 4, TWI -- centre de recherche britannique majeur, 9 fiches dans GtR -- et HEF
+# n'étaient tout simplement jamais interrogés.
+MIN_MATCH_ALIAS_LENGTH = 3
+
+
+def match_alias(actor_name: str) -> str:
+    """Le nom d'un acteur réduit à ce qui l'identifie vraiment dans un registre tiers.
+
+    Trois réductions, toutes mesurées sur des cas réels du 14/09/2026 :
+
+    - le sigle entre parenthèses part avec elles : "Manufacturing Technology Centre (MTC)"
+      donnait l'alias "MANUFACTURING TECHNOLOGY CENTRE MTC", qui ne matche aucune des trois
+      autres fiches GtR du même centre ("THE MANUFACTURING TECHNOLOGY CENTRE LIMITED"...) ;
+    - la forme juridique finale part aussi (voir _LEGAL_SUFFIXES) ;
+    - si ces coupes laissent moins de MIN_MATCH_ALIAS_LENGTH caractères, on garde le nom
+      entier : mieux vaut ne pas apparier qu'apparier sur deux lettres.
+    """
+    alias = _actor_alias(re.sub(r"\([^)]*\)", " ", actor_name))
+    words = alias.split()
+    while len(words) > 1 and words[-1] in _LEGAL_SUFFIXES:
+        words.pop()
+    reduced = " ".join(words)
+    return reduced if len(reduced) >= MIN_MATCH_ALIAS_LENGTH else alias
+
+
 def _tracked_aliases(actors: list[dict[str, Any]]) -> dict[str, str]:
     """Les alias de nom utilisés pour reconnaître un acteur suivi dans une base tierce.
 
-    Rigoureusement les mêmes règles que CORDIS -- même normalisation, même liste noire, même
-    longueur minimale --, importées plutôt que réécrites : deux collecteurs qui appariraient
-    les noms différemment finiraient par rattacher le même projet à deux acteurs différents.
+    Même normalisation et même liste noire que CORDIS -- deux collecteurs qui appariraient les
+    noms différemment finiraient par rattacher le même projet à deux acteurs différents --,
+    mais l'alias est réduit par match_alias() et le seuil de longueur est le seuil local : les
+    registres nationaux interrogés ici ne posent pas le même risque de faux positif que le
+    dump CORDIS. Voir MIN_MATCH_ALIAS_LENGTH pour le raisonnement complet.
     """
     return {
-        actor["name"]: _actor_alias(actor["name"])
+        actor["name"]: match_alias(actor["name"])
         for actor in actors
-        if actor["name"] not in CORDIS_MATCH_BLOCKLIST and len(_actor_alias(actor["name"])) >= MIN_ALIAS_LENGTH
+        if actor["name"] not in CORDIS_MATCH_BLOCKLIST and len(match_alias(actor["name"])) >= MIN_MATCH_ALIAS_LENGTH
     }
 
 
@@ -263,6 +313,16 @@ def _anr_partner_names(record: dict[str, Any]) -> list[str]:
     if isinstance(names, str):  # l'API sert une chaîne quand le projet n'a qu'un partenaire
         names = [names]
     return [str(name).strip() for name in names if str(name).strip()]
+
+
+def _anr_partner_acronyms(record: dict[str, Any]) -> list[str]:
+    """Les sigles des partenaires (`sigle_de_partenaire`), champ multivalué aligné sur
+    `libelle_de_partenaire` -- souvent le SEUL endroit où un acteur apparaît sous le nom que
+    la base suit (IREIS, LabHC, CETHIL...)."""
+    acronyms = record.get("sigle_de_partenaire") or []
+    if isinstance(acronyms, str):
+        acronyms = [acronyms]
+    return [str(value).strip() for value in acronyms if str(value).strip()]
 
 
 def _anr_project_url(record: dict[str, Any]) -> str:
@@ -315,7 +375,18 @@ def _collect_anr(client: httpx.Client, aliases: dict[str, str], report: dict[str
             # L'appariement strict : le nom d'une organisation du projet doit contenir l'alias
             # à des frontières de mot. Sans ce contrôle, `search()` ramènerait un projet pour
             # un simple mot voisin dans un libellé plus long.
-            candidates = _anr_partner_names(record) + [record.get("coordinateur_du_projet") or ""]
+            #
+            # Les SIGLES comptent autant que les libellés, et les oublier a coûté un vrai
+            # projet : l'ANR inscrit IREIS sous "INSTITUT DE RECHERCHES EN INGENIERIE DES
+            # SURFACES", le sigle "IREIS" ne vivant que dans `sigle_de_partenaire`. La requête
+            # serveur, elle, interrogeait bien ce champ -- le projet TOPOINJECTION revenait de
+            # l'API, passait le filtre laser, et se faisait refuser ici. Vérifier ce que l'on
+            # a interrogé, ni plus ni moins.
+            candidates = (
+                _anr_partner_names(record)
+                + _anr_partner_acronyms(record)
+                + [record.get("coordinateur_du_projet") or ""]
+            )
             if not any(_contains_whole_phrase(_normalize_org_text(name), alias) for name in candidates):
                 continue
             if not is_on_topic(_anr_text(record)):
@@ -393,6 +464,13 @@ def _gtr_reference(project: dict[str, Any]) -> str | None:
 
 def _gtr_text(project: dict[str, Any]) -> str:
     return f"{project.get('title') or ''} {_gtr_abstract(project)}".strip()
+
+
+def _gtr_scope(funder: str) -> str:
+    """L'échelle du financement d'un projet GtR, lue sur son guichet (voir
+    GTR_EUROPEAN_FUNDERS) : national par défaut, européen pour les quelques guichets qui
+    n'en sont pas. Jamais déduite du pays de l'organisation -- ce qui compte est qui paie."""
+    return "europeen" if funder.strip().lower() in GTR_EUROPEAN_FUNDERS else "national"
 
 
 def _gtr_partners(project: dict[str, Any]) -> list[dict[str, str]]:
@@ -640,10 +718,12 @@ def _write_gtr(actors_db, tech_db, found: dict[str, dict[str, Any]], aliases: di
         source_url = GTR_PROJECT_URL_TEMPLATE.format(ref=reference)
         title = (project.get("title") or "").strip()
         funder = (project.get("leadFunder") or "").strip() or "UKRI"
+        scope = _gtr_scope(funder)
+        scope_label = SCOPE_LABELS[scope]
         try:
             for actor_name in actor_names:
                 actor_id = actors_by_name[actor_name]
-                description = f"Participation au projet national {funder} {title}".strip()[:500]
+                description = f"Participation au projet {scope_label} {funder} {title}".strip()[:500]
                 report["events_added"] += upsert_actor_event(
                     actors_db, actor_id, EVENT_GTR, description, source_url=source_url,
                     # GtR ne renseigne `start` que pour une partie des projets (les projets
@@ -669,7 +749,7 @@ def _write_gtr(actors_db, tech_db, found: dict[str, dict[str, Any]], aliases: di
                 source_url=source_url,
                 source_title=title or None,
                 actor_names=actor_names,
-                funding_scope="national",
+                funding_scope=scope,
                 funding_program=funder,
                 language="en",
             )

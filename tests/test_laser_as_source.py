@@ -124,6 +124,30 @@ class FrenchSourceVocabularyTests(unittest.TestCase):
         ))
 
 
+class GainMediumIsASourceTests(unittest.TestCase):
+    """La garde décrivait l'ARCHITECTURE d'une source (oscillateur, amplificateur, CPA) mais
+    pas son MILIEU À GAIN. Cas trouvé le 14/09/2026 dans les projets UKRI de Coherent."""
+
+    GRATIS = (
+        "GraTi:S - Graphene for Titanium Sapphire Lasers. This high-risk feasibility project "
+        "aims to pave the way for the UK's first graphene-enabled ultrafast lasers."
+    )
+
+    def test_a_gain_medium_project_is_out_of_scope(self):
+        self.assertTrue(is_laser_the_source(self.GRATIS))
+        self.assertFalse(is_on_topic(self.GRATIS))
+
+    def test_naming_the_source_of_a_process_never_excludes_it(self):
+        """Un vrai travail de procédé décrit sa source autant qu'un projet de source : c'est
+        le procédé nommé qui tranche, pas le vocabulaire de source."""
+        for text in (
+            "Ultrashort pulse laser micromachining of glass using a mode-locked fibre laser",
+            "Femtosecond laser welding of dissimilar materials with a Ti:Sapphire amplifier",
+        ):
+            with self.subTest(text=text[:50]):
+                self.assertTrue(is_on_topic(text))
+
+
 class DocumentIntakeAppliesTheGuardTests(unittest.TestCase):
     def test_openalex_rejects_source_only_titles(self):
         from openalex import _work_is_on_topic
