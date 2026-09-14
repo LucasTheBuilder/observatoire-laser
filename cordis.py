@@ -36,6 +36,7 @@ import unicodedata
 import zipfile
 from collections import defaultdict
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,38 @@ CORDIS_CACHE_PATH = DATA_DIR / "cordis_cache" / "horizon_projects.zip"
 # CORDIS republie ce jeu de données une fois par mois (voir la page du dataset sur
 # data.europa.eu, "Accrual Periodicity: monthly") -- inutile de le re-télécharger plus souvent.
 CORDIS_CACHE_MAX_AGE_DAYS = 25
+
+
+@dataclass(frozen=True)
+class CordisDataset:
+    id: str
+    label: str
+    zip_url: str
+    cache_path: Path
+
+
+# Extension H2020/FP7 (chantier /sources, 13/09/2026) : le docstring du module qualifiait ces deux
+# jeux de "hors scope de cette première intégration" -- vérifié en direct (HEAD, 13/09/2026) que
+# CORDIS les publie au même endroit, sous le même nom de fichier générique
+# (cordis-<programme>projects-csv.zip), 200 OK, ~55 Mo (H2020) et ~33 Mo (FP7). Les en-têtes de
+# project.csv/organization.csv sont IDENTIQUES à celles d'HORIZON pour H2020 (mêmes colonnes, même
+# ordre) ; FP7 n'a simplement pas les colonnes "keywords"/"Human-validated" -- sans conséquence ici,
+# tout le parsing lit par nom de colonne (csv.DictReader + .get()), jamais par position. Horizon
+# reste l'entrée par défaut (CORDIS_DATASETS[0]) : c'est elle que collect_cordis(cache_path=...)
+# sert par défaut aux tests existants, jamais changée pour ne pas les casser.
+CORDIS_DATASETS: tuple[CordisDataset, ...] = (
+    CordisDataset("horizon", "Horizon Europe (2021-2027)", CORDIS_PROJECTS_ZIP_URL, CORDIS_CACHE_PATH),
+    CordisDataset(
+        "h2020", "Horizon 2020 (2014-2020)",
+        "https://cordis.europa.eu/data/cordis-h2020projects-csv.zip",
+        DATA_DIR / "cordis_cache" / "h2020_projects.zip",
+    ),
+    CordisDataset(
+        "fp7", "7e PCRD (2007-2013)",
+        "https://cordis.europa.eu/data/cordis-fp7projects-csv.zip",
+        DATA_DIR / "cordis_cache" / "fp7_projects.zip",
+    ),
+)
 # Telechargement du dump complet : profil "bulk" de http_client (voir TIMEOUTS).
 
 # Alias explicite quand le nom légal utilisé par CORDIS diffère du nom suivi dans l'app --
@@ -124,27 +157,28 @@ def _project_is_on_topic(project: dict[str, str]) -> bool:
     return is_on_topic(text)
 
 
-def _ensure_cache(client: httpx.Client) -> Path:
-    """Télécharge le ZIP "HORIZON Projects" si le cache local est absent ou trop vieux.
+def _ensure_cache(client: httpx.Client, dataset: CordisDataset = CORDIS_DATASETS[0]) -> Path:
+    """Télécharge le ZIP du jeu de données CORDIS demandé si le cache local est absent ou trop vieux.
 
     Téléchargement en streaming vers un fichier temporaire puis renommage atomique, pour
     qu'un run interrompu (crash, timeout) ne laisse jamais un cache à moitié écrit derrière lui.
     """
-    CORDIS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if CORDIS_CACHE_PATH.exists():
-        age_days = (time.time() - CORDIS_CACHE_PATH.stat().st_mtime) / 86400
+    cache_path = dataset.cache_path
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if cache_path.exists():
+        age_days = (time.time() - cache_path.stat().st_mtime) / 86400
         if age_days < CORDIS_CACHE_MAX_AGE_DAYS:
-            return CORDIS_CACHE_PATH
-    tmp_path = CORDIS_CACHE_PATH.with_suffix(".zip.part")
+            return cache_path
+    tmp_path = cache_path.with_suffix(".zip.part")
     # Pas de timeout par requête : le client est construit avec le profil "bulk" de
     # http_client (180 s), calibré précisément pour ce téléchargement.
-    with client.stream("GET", CORDIS_PROJECTS_ZIP_URL) as response:
+    with client.stream("GET", dataset.zip_url) as response:
         response.raise_for_status()
         with open(tmp_path, "wb") as handle:
             for chunk in response.iter_bytes(chunk_size=1 << 20):
                 handle.write(chunk)
-    tmp_path.replace(CORDIS_CACHE_PATH)
-    return CORDIS_CACHE_PATH
+    tmp_path.replace(cache_path)
+    return cache_path
 
 
 def _csv_rows(zip_path: Path, member: str) -> Iterator[dict[str, str]]:
@@ -284,7 +318,10 @@ def _upsert_actor_relation(db, actor_id: int, related_name: str, related_actor_i
     return 1
 
 
-def _upsert_technology_signal(db, *, axis: str, project: dict[str, str], actor_names: list[str], quote: str) -> tuple[int, int]:
+def _upsert_technology_signal(
+    db, *, axis: str, project: dict[str, str], actor_names: list[str], quote: str,
+    default_program: str = "Horizon Europe",
+) -> tuple[int, int]:
     """Même schéma d'upsert que scrapers._upsert_market_candidate : une ligne technology_signals
     par (axis, projet) -- voir db.technology_signal_key --, potentiellement partagée entre
     plusieurs acteurs suivis d'un même consortium (actor_names fusionne au lieu de dupliquer)."""
@@ -308,6 +345,14 @@ def _upsert_technology_signal(db, *, axis: str, project: dict[str, str], actor_n
         field_confidence=0.9,
         project_name=project_name,
         source_title=project.get("title"),
+        # `frameworkProgramme` est repris tel quel quand CORDIS le renseigne plutôt que d'écrire
+        # un nom de programme en dur -- c'est la valeur de la source, pas une déduction. Le repli
+        # (``default_program``, "Horizon Europe" par défaut pour ne rien changer aux appels
+        # existants) suit le jeu de données réellement lu -- voir CORDIS_DATASETS/collect_cordis --
+        # pour qu'un projet H2020/FP7 sans frameworkProgramme ne s'affiche jamais comme Horizon
+        # Europe par supposition.
+        funding_scope="europeen",
+        funding_program=project.get("frameworkProgramme") or default_program,
     )
 
     source_added = upsert_fact_source(
@@ -320,14 +365,19 @@ def _upsert_technology_signal(db, *, axis: str, project: dict[str, str], actor_n
     return added, source_added
 
 
-def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None = None) -> dict:
+def collect_cordis(
+    *, dataset: CordisDataset = CORDIS_DATASETS[0], cache_path: Path | None = None,
+    limit_projects: int | None = None,
+) -> dict:
     """Point d'entrée principal (voir app.py: collectors["cordis"]).
 
-    ``cache_path`` court-circuite le téléchargement/cache -- utilisé par les tests avec un
-    petit fichier ZIP fabriqué à la main plutôt que le vrai jeu de données Horizon Europe.
-    ``limit_projects`` borne le nombre de projets réellement écrits en base (la passe 1, qui
-    doit lire tout organization.csv pour SAVOIR quels projets sont pertinents, n'est jamais
-    bornée par ce paramètre -- il n'existe que pour garder les tests rapides côté écriture).
+    ``dataset`` sélectionne le jeu de données CORDIS (Horizon Europe par défaut -- voir
+    CORDIS_DATASETS ; collect_cordis_all_programmes() appelle cette fonction une fois par
+    programme). ``cache_path`` court-circuite le téléchargement/cache -- utilisé par les tests
+    avec un petit fichier ZIP fabriqué à la main plutôt que le vrai jeu de données. ``limit_
+    projects`` borne le nombre de projets réellement écrits en base (la passe 1, qui doit lire
+    tout organization.csv pour SAVOIR quels projets sont pertinents, n'est jamais bornée par ce
+    paramètre -- il n'existe que pour garder les tests rapides côté écriture).
     """
     with connect(ACTORS_DB) as db:
         actors = [dict(row) for row in db.execute("SELECT id,name FROM actors WHERE active=1").fetchall()]
@@ -339,7 +389,7 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
             zip_path = cache_path
         else:
             with connector_client("bulk") as client:
-                zip_path = _ensure_cache(client)
+                zip_path = _ensure_cache(client, dataset)
     except Exception as exc:
         return {
             "error": str(exc)[:300], "actors_matched": 0, "projects_matched": 0, "projects_off_topic": 0,
@@ -416,6 +466,7 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
                     if quote:
                         added, source_added = _upsert_technology_signal(
                             tech_db, axis=axis, project=project, actor_names=sorted(actor_names), quote=quote,
+                            default_program=dataset.label,
                         )
                         signals_added += added
                         signal_sources_added += source_added
@@ -442,3 +493,31 @@ def collect_cordis(*, cache_path: Path | None = None, limit_projects: int | None
         "topic_scoped_candidates_added": topic_scoped_candidates,
         "errors": errors,
     }
+
+
+_MERGED_INT_KEYS = (
+    "actors_matched", "projects_matched", "projects_off_topic", "events_added", "relations_added",
+    "signals_added", "signal_sources_added", "topic_scoped_candidates_added", "errors",
+)
+
+
+def collect_cordis_all_programmes(*, limit_projects: int | None = None) -> dict:
+    """Lance collect_cordis() sur les 3 programmes-cadres publiés par CORDIS (voir CORDIS_DATASETS)
+    et fusionne les compteurs -- une seule entrée /api/scrape pour couvrir toute la profondeur
+    historique disponible (2007-2027), là où l'intégration initiale ne couvrait qu'Horizon Europe
+    (voir le docstring du module).
+
+    ``actors_matched``/``projects_matched`` sont sommés programme par programme : un acteur ou un
+    projet distinct dans chaque jeu de données CORDIS (aucun ID de projet ne traverse deux
+    programmes), donc pas de double-comptage à corriger. Le détail par programme reste disponible
+    dans ``per_dataset`` -- utile pour voir, par exemple, qu'un run échoue sur FP7 seul sans que
+    Horizon/H2020 en pâtissent (chaque appel à collect_cordis() est isolé par son propre bloc
+    try/except, voir sa gestion d'erreur)."""
+    totals: dict[str, int] = {key: 0 for key in _MERGED_INT_KEYS}
+    per_dataset: dict[str, dict] = {}
+    for dataset in CORDIS_DATASETS:
+        result = collect_cordis(dataset=dataset, limit_projects=limit_projects)
+        per_dataset[dataset.id] = result
+        for key in _MERGED_INT_KEYS:
+            totals[key] += result.get(key, 0)
+    return {**totals, "per_dataset": per_dataset}

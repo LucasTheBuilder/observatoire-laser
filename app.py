@@ -62,8 +62,9 @@ from pydantic import BaseModel, Field
 
 import review_journal
 from actor_discovery import discover_actor_candidates, promote_candidate, reject_candidate
+from arxiv_feed import collect_arxiv_preprints
 from capabilities import collect_capability_specs
-from cordis import collect_cordis
+from cordis import collect_cordis_all_programmes
 from data_quality import (
     add_golden_fact,
     data_quality_report,
@@ -94,8 +95,10 @@ from demand_signals import collect_demand_signals
 from feedback_dossier import build_feedback_dossier
 from firmographics import collect_french_registry
 from gleif import collect_gleif_group_identity
+from hal import collect_hal_publications
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from market_sizing import add_market_sizing, delete_market_sizing, list_market_sizing
+from national_projects import collect_national_projects
 from openalex import collect_openalex_publications, discover_global_actor_candidates
 from patent import collect_patents
 from press import collect_actor_feeds, collect_press_mentions
@@ -225,6 +228,9 @@ jobs: dict[str, dict[str, Any]] = {
     "demand_signals": {"status": "idle", "result": None, "error": None},
     "wayback_retrodating": {"status": "idle", "result": None, "error": None},
     "capabilities": {"status": "idle", "result": None, "error": None},
+    "national_projects": {"status": "idle", "result": None, "error": None},
+    "hal": {"status": "idle", "result": None, "error": None},
+    "arxiv": {"status": "idle", "result": None, "error": None},
     "tech_corpus": {"status": "idle", "result": None, "error": None},
     "monthly": {"status": "idle", "result": None, "error": None},
 }
@@ -234,20 +240,22 @@ def _collect_tech_corpus() -> dict:
     """Rafraîchit les trois sources du corpus technique, et seulement elles.
 
     C'est ce que déclenche "Actualiser la veille" sur la page Technologie laser. Cette page
-    montre publications + brevets + projets européens ; or aucune collecte existante ne couvre
-    les trois : `technology` et `openalex` ne ramènent que des publications, `patents` que des
-    brevets, `cordis` que des projets. Y brancher `technology` seul aurait laissé croire que
-    les brevets et les projets venaient d'être réactualisés alors qu'ils n'auraient pas bougé.
+    montre publications + brevets + projets ; or aucune collecte existante ne couvre les
+    quatre : `technology` et `openalex` ne ramènent que des publications, `patents` que des
+    brevets, `cordis` que des projets européens et `national_projects` que des projets
+    nationaux/régionaux. Y brancher `technology` seul aurait laissé croire que les brevets et
+    les projets venaient d'être réactualisés alors qu'ils n'auraient pas bougé.
 
     Chaque collecteur est isolé : une source indisponible (identifiants EPO absents, CORDIS
-    injoignable) ne doit pas priver l'utilisateur des deux autres.
+    injoignable) ne doit pas priver l'utilisateur des autres.
     """
     report: dict[str, Any] = {}
     for name, collector in (
         ("technology", scrape_technology),
         ("openalex", collect_openalex_publications),
         ("patents", collect_patents),
-        ("cordis", collect_cordis),
+        ("cordis", collect_cordis_all_programmes),
+        ("national_projects", collect_national_projects),
     ):
         try:
             report[name] = collector()
@@ -260,12 +268,14 @@ def _collect_monthly() -> dict:
     """Run the eight collectors in dependency order for a one-click monthly refresh."""
     # Ordre important : market/technology/capabilities s'appuient sur les pages découvertes par
     # actors. cordis/firmographics/openalex/press n'ont aucune dépendance sur le crawl web
-    # (sources indépendantes, chantiers 3 et 5).
+    # (sources indépendantes, chantiers 3 et 5). national_projects, lui, vient APRÈS actors et
+    # capabilities : sa troisième passe relit `actor_sources.blocks_json`, donc les pages que
+    # le crawl vient d'actualiser dans ce même cycle (voir national_projects, source 3).
     return {
         "actors": scrape_actors(),
         "market": scrape_market(),
         "technology": scrape_technology(),
-        "cordis": collect_cordis(),
+        "cordis": collect_cordis_all_programmes(),
         "firmographics": collect_french_registry(),
         "openalex": collect_openalex_publications(),
         "press": collect_press_mentions(),
@@ -277,6 +287,9 @@ def _collect_monthly() -> dict:
         "demand_signals": collect_demand_signals(),
         "wayback_retrodating": retrodate_evidence_sources(),
         "capabilities": collect_capability_specs(),
+        "national_projects": collect_national_projects(),
+        "hal": collect_hal_publications(),
+        "arxiv": collect_arxiv_preprints(),
     }
 
 
@@ -284,7 +297,7 @@ collectors: dict[str, Callable[[], dict]] = {
     "actors": scrape_actors,
     "market": scrape_market,
     "technology": scrape_technology,
-    "cordis": collect_cordis,
+    "cordis": collect_cordis_all_programmes,
     "firmographics": collect_french_registry,
     "openalex": collect_openalex_publications,
     "press": collect_press_mentions,
@@ -296,6 +309,9 @@ collectors: dict[str, Callable[[], dict]] = {
     "demand_signals": collect_demand_signals,
     "wayback_retrodating": retrodate_evidence_sources,
     "capabilities": collect_capability_specs,
+    "national_projects": collect_national_projects,
+    "hal": collect_hal_publications,
+    "arxiv": collect_arxiv_preprints,
     "tech_corpus": _collect_tech_corpus,
     "monthly": _collect_monthly,
 }
@@ -1816,6 +1832,13 @@ def documents(document_type: Literal["publication", "patent", "project", "other"
 # tourner le lexique à la volée sur le titre donnerait une inférence non relue présentée comme
 # un fait -- exactement ce que la file de validation existe pour éviter.
 _PROJECT_GA_RE = re.compile(r"/project/id/(\d+)")
+# Échelle du financement, telle qu'elle s'affiche. Les clés sont celles écrites par les
+# collecteurs dans technology_signals.funding_scope (cordis.py, national_projects.py).
+PROJECT_SCOPE_LABELS = {
+    "europeen": "Projet européen",
+    "national": "Projet national",
+    "regional": "Projet régional",
+}
 # OpenAlex renvoie parfois une date de publication partielle (`2027-4`, sans le jour) et elle
 # est stockée telle quelle. Un tri lexicographique brut classerait alors "2027-4" APRÈS
 # "2027-12-01" -- ce complément met les composantes à deux chiffres avant de comparer.
@@ -1839,15 +1862,17 @@ def _corpus_sort_key(value: str | None) -> str:
 
 @app.get("/api/tech-corpus")
 def tech_corpus() -> list[dict[str, Any]]:
-    """Le corpus technique complet en un seul modèle : publications, brevets et projets
-    européens, avec axe technologique et maturité quand ils ont été validés.
+    """Le corpus technique complet en un seul modèle : publications, brevets et projets --
+    européens, nationaux ou régionaux --, avec axe technologique et maturité quand ils ont été
+    validés.
 
     Le front (page "Technologie laser") filtre et facette côté client sur ce résultat ; il n'y
     a pas de pagination serveur, le corpus se compte en dizaines de lignes.
     """
     signals = rows(
         TECH_DB,
-        """SELECT id,axis,dimension,maturity_stage,bucket,project_name,actor_names,source_url,created_at
+        """SELECT id,axis,dimension,maturity_stage,bucket,project_name,actor_names,source_url,
+                  funding_scope,funding_program,created_at
            FROM technology_signals
            WHERE review_status='accepted'
            ORDER BY created_at DESC,id""",
@@ -1883,6 +1908,11 @@ def tech_corpus() -> list[dict[str, Any]]:
             "title": signal["project_name"],
             "axes": [], "families": {}, "actors": [], "maturity": None, "bucket": signal["bucket"],
             "signal_ids": [], "observed_at": signal["created_at"],
+            # NULL sur toutes les lignes écrites avant le 13/09/2026 : à cette date, cordis.py
+            # était la seule source de projets et ne finançait qu'européen (voir la migration
+            # dans db.py, qui a délibérément choisi de ne pas rétro-remplir la colonne).
+            "funding_scope": signal["funding_scope"] or "europeen",
+            "funding_program": signal["funding_program"],
         })
         _add_family(group, signal)
         for actor in _corpus_actor_names(signal["actor_names"]):
@@ -1911,6 +1941,10 @@ def tech_corpus() -> list[dict[str, Any]]:
             "kind": "brevet" if is_patent else ("pub" if document["document_type"] == "publication" else "autre"),
             "title": document["title"],
             "reference": reference,
+            # Un document n'a pas de guichet de financement -- les deux clés existent quand
+            # même pour que le front n'ait pas à distinguer deux formes d'entrée de corpus.
+            "funding_scope": None,
+            "funding_program": None,
             "axes": qualified.get("axes", []),
             "families": qualified.get("families", {}),
             "actors": [document["actor_name"]] if document["actor_name"] else [],
@@ -1928,11 +1962,22 @@ def tech_corpus() -> list[dict[str, Any]]:
         # source au mauvais éditeur -- on retombe sur le domaine réellement cité.
         ga = _PROJECT_GA_RE.search(url)
         host = urlparse(url).netloc.removeprefix("www.")
+        scope_label = PROJECT_SCOPE_LABELS.get(group["funding_scope"], "Projet")
+        if ga:
+            reference = f"CORDIS · GA {ga.group(1)}"
+        else:
+            # Le guichet quand il est connu (ANR, Innovate UK...), le domaine sinon : les deux
+            # sont sourcés, aucun n'est déduit de l'autre.
+            reference = f"{scope_label} · {group['funding_program'] or host or '?'}"
         corpus.append({
             "uid": f"proj:{group['signal_ids'][0]}",
             "kind": "projet",
             "title": group["title"],
-            "reference": f"CORDIS · GA {ga.group(1)}" if ga else (f"Projet européen · {host}" if host else "Projet européen"),
+            "reference": reference,
+            # Facette du front : "européen" / "national" / "régional". Le libellé, lui, se
+            # calcule côté serveur pour que la même convention serve l'API et l'UI.
+            "funding_scope": group["funding_scope"],
+            "funding_program": group["funding_program"],
             "axes": group["axes"],
             "families": group["families"],
             "actors": group["actors"],
@@ -2014,7 +2059,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "tech_corpus", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "national_projects", "hal", "arxiv", "tech_corpus", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -2029,7 +2074,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "tech_corpus", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "national_projects", "hal", "arxiv", "tech_corpus", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 
