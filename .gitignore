@@ -11,5 +11,13 @@ data/*.db-shm
 data/backups/
 data/cordis_cache/
 data/anr_cache/
+# Meme raison, format different : les instantanes ecrits par les scripts de maintenance
+# (data/documents_sans_acteur.json, ecrit le 13/09/2026 quand 48 publications sont sorties du
+# corpus) sont de la donnee produite, pas de la source. Celui-la est d'ailleurs redondant
+# depuis que la table unlinked_documents porte ces memes lignes.
+data/*.json
+# Artefacts du montage Docker sous Windows : un fichier supprime alors qu'un conteneur le
+# tenait encore ouvert laisse ce residu, qui n'appartient a personne.
+data/.fuse_hidden*
 
 .env
