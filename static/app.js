@@ -59,7 +59,7 @@ const state = {
   // Les clés doivent couvrir TC_FACET_GROUPS : une dimension ajoutée au lexique sans clé ici
   // faisait passer `undefined` à facetGroupHtml, qui plantait le rendu de toute la page.
   // Le `|| []` aux points d'appel est la vraie garde ; cette liste reste la valeur de départ.
-  techFacets: {operation: [], material: [], actor: [], market: [], component: [], axis: [], machine_capability: [], architecture: []},
+  techFacets: {operation: [], material: [], actor: [], market: [], component: [], axis: [], machine_capability: [], architecture: [], funding: []},
   // Groupes de facettes dépliés (voir explorer.js) -- purement d'affichage.
   techExpanded: [],
   // File des publications trouvées par sujet qu'aucun acteur suivi ne signe (voir
@@ -933,9 +933,16 @@ function renderOffers() {
 const DOC_TYPE_LABELS = {publication: "Publication", patent: "Brevet", project: "Projet", other: "Autre"};
 const DOC_TYPE_ORDER = ["publication", "patent", "project", "other"];
 
-const TC_KIND_LABELS = {pub: "Publication", brevet: "Brevet", projet: "Projet EU", autre: "Autre"};
-const TC_TYPE_TABS = ["Tous", "Publications", "Brevets", "Projets européens"];
-const TC_TAB_KIND = {Publications: "pub", Brevets: "brevet", "Projets européens": "projet"};
+// "Projet" et plus "Projet EU" depuis le 13/09/2026 : l'onglet mélange désormais les projets
+// européens (cordis.py) et les projets nationaux/régionaux (national_projects.py). L'échelle
+// se lit sur la facette FINANCEMENT et dans la référence de chaque ligne ("Projet national ·
+// Innovate UK"), pas dans le nom de l'onglet, qui mentirait sur une des deux moitiés.
+const TC_KIND_LABELS = {pub: "Publication", brevet: "Brevet", projet: "Projet", autre: "Autre"};
+const TC_TYPE_TABS = ["Tous", "Publications", "Brevets", "Projets"];
+const TC_TAB_KIND = {Publications: "pub", Brevets: "brevet", Projets: "projet"};
+// Libellés de la facette FINANCEMENT. Les clés sont celles servies par /api/tech-corpus
+// (technology_signals.funding_scope) ; une publication n'en a pas et ne rejoint pas la facette.
+const TC_SCOPE_LABELS = {europeen: "Européen", national: "National", regional: "Régional"};
 // Mots-clés proposés sous la barre de recherche. Pris dans le vocabulaire réellement présent
 // en base (axes du lexique fermé) plutôt que des exemples décoratifs : une suggestion qui ne
 // ramène rien apprend à l'utilisateur que la recherche ne marche pas.
@@ -951,7 +958,7 @@ function tcRowActors(row) { return row.actors.length ? row.actors : [TC_NO_ACTOR
 function tcDateLabel(row) {
   // OpenAlex renvoie parfois une date partielle ("2027-4") et elle est stockée telle quelle :
   // elle n'est pas parsable de façon fiable d'un navigateur à l'autre, on la rend brute plutôt
-  // que d'inventer un jour. Un projet européen n'a aucune date de projet en base (voir le
+  // que d'inventer un jour. Un projet n'a aucune date de projet en base (voir le
   // commentaire de /api/tech-corpus) -- on affiche sa date d'observation, explicitement
   // préfixée, jamais une période supposée.
   const raw = row.published_at;
@@ -1021,12 +1028,18 @@ const TC_FACET_GROUPS = [
   {key: "axis", label: "PROCÉDÉ TECHNOLOGIQUE", valuesOf: tcRowAxes},
   {key: "machine_capability", label: "CAPACITÉ MACHINE", valuesOf: row => tcRowFamily(row, "machine_capability")},
   {key: "architecture", label: "ARCHITECTURE", valuesOf: row => tcRowFamily(row, "architecture")},
+  // Placée en dernier parce qu'elle ne concerne qu'une partie du corpus : une publication ou
+  // un brevet n'a pas de guichet, et `valuesOf` renvoie [] pour eux -- ils ne comptent donc
+  // dans aucune valeur de ce groupe au lieu d'y entrer sous un libellé inventé.
+  {key: "funding", label: "FINANCEMENT", valuesOf: row => (
+    row.funding_scope ? [TC_SCOPE_LABELS[row.funding_scope] || row.funding_scope] : []
+  )},
 ];
 
 // Bloc de lecture, en bas de page : ce que la répartition des familles dit du corpus.
 //
 // Le constat qui a motivé ce bloc (Lucas, 10/09/2026) : les procédés technologiques ne sortent
-// que de publications, les capacités machine quasi exclusivement de projets européens. Un
+// que de publications, les capacités machine quasi exclusivement de projets financés. Un
 // article décrit un mécanisme physique, un projet finance le développement d'une machine --
 // c'est une information stratégique, et elle n'était visible nulle part.
 //
@@ -1069,7 +1082,7 @@ function tcCorpusReading(corpus) {
   const capacite = tcOriginSplit(corpus, "machine_capability");
   if (!procede.total && !capacite.total) return "";
 
-  const chiffres = `Les <b>procédés technologiques</b> sont portés par ${procede.publications} publication(s) et ${procede.projets} projet(s) européen(s).
+  const chiffres = `Les <b>procédés technologiques</b> sont portés par ${procede.publications} publication(s) et ${procede.projets} projet(s) financé(s).
     Les <b>capacités machine</b> le sont par ${capacite.publications} publication(s) et ${capacite.projets} projet(s).`;
 
   // Chaque phrase n'est écrite que si elle a de quoi être écrite. Un bloc d'analyse qui
@@ -1087,12 +1100,12 @@ function tcCorpusReading(corpus) {
   const napparait = labels => (labels.length > 1 ? "n’apparaissent" : "n’apparaît");
   if (financeNonPublie.length) {
     lignes.push(`<p><span class="ex-reading-take">Financé, pas publié —</span> ${esc(financeNonPublie.join(", "))}
-      ${napparait(financeNonPublie)} que dans des projets européens, jamais dans la littérature du corpus.
+      ${napparait(financeNonPublie)} que dans des projets financés, jamais dans la littérature du corpus.
       Un sujet qu’on finance avant d’en publier les résultats se voit ici en premier.</p>`);
   }
   if (publieNonFinance.length) {
     lignes.push(`<p><span class="ex-reading-take">Publié, pas financé —</span> ${esc(publieNonFinance.join(", "))}
-      ${napparait(publieNonFinance)} que dans des publications, sans projet européen correspondant dans le corpus.</p>`);
+      ${napparait(publieNonFinance)} que dans des publications, sans projet financé correspondant dans le corpus.</p>`);
   }
   if (!financeNonPublie.length && !publieNonFinance.length) {
     lignes.push(`<p><span class="ex-reading-take">Aucune famille n’est aujourd’hui exclusive à l’une des deux populations.</span></p>`);
@@ -1231,7 +1244,7 @@ function renderTechCorpus() {
       <div>
         <p class="ex-eyebrow">INTELLIGENCE</p>
         <h1>Technologie laser</h1>
-        <p class="ex-lede">Le corpus technique complet : publications, brevets et projets européens. Les facettes se lisent dans l’ordre : opération, matériau, acteur, puis marché et pièce. Procédé technologique et capacité machine s’ajoutent d’un clic.</p>
+        <p class="ex-lede">Le corpus technique complet : publications, brevets et projets financés — européens, nationaux et régionaux. Les facettes se lisent dans l’ordre : opération, matériau, acteur, puis marché et pièce. Procédé technologique, capacité machine et financement s’ajoutent d’un clic.</p>
       </div>
       <div class="ex-head-actions">
         <button type="button" class="ex-btn" data-ex-export>↓ Exporter CSV</button>
@@ -1568,8 +1581,11 @@ function documentLine(d) {
 // comme signaux structurés") -- voir press.classify_press_event côté serveur. press_mention
 // (mention générique, sans mot-clé structurant détecté) n'a pas de badge : c'est le
 // comportement par défaut, pas un signal typé à mettre en avant.
-const EVENT_TYPE_BADGE_LABELS = {patent: "Brevet", investment: "Investissement", recruitment: "Recrutement", acquisition: "M&A"};
-const EVENT_TYPE_BADGE_COLORS = {patent: "#a8790b", investment: "#048f83", recruitment: "#6b4fb3", acquisition: "#c14a2f"};
+const EVENT_TYPE_BADGE_LABELS = {patent: "Brevet", investment: "Investissement", recruitment: "Recrutement", acquisition: "M&A",
+  cordis_project: "Projet européen", anr_project: "Projet ANR", ukri_project: "Projet UKRI",
+  funding_program_mention: "Financement cité"};
+const EVENT_TYPE_BADGE_COLORS = {patent: "#a8790b", investment: "#048f83", recruitment: "#6b4fb3", acquisition: "#c14a2f",
+  cordis_project: "#2f6fb0", anr_project: "#2f6fb0", ukri_project: "#2f6fb0", funding_program_mention: "#687683"};
 
 function eventTypeBadge(type) {
   const label = EVENT_TYPE_BADGE_LABELS[type];

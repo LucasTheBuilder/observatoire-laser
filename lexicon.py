@@ -47,6 +47,26 @@ LASER_RULES: Lexicon = {
     "USP laser": {"regex": (r"\busp(?:[ -]?laser)?\b",), "requires_any": ("laser", "pulse", "machining", "processing")},
     "UKP laser": {"regex": (r"\bukp(?:[ -]?laser)?\b",), "requires_any": ("laser", "pulse", "bearbeitung")},
     "Ultrakurzpulslaser": {"any_of": ("ultrakurzpulslaser", "ultrakurzpuls laser")},
+    # Français, ajouté avec national_projects.py (13/09/2026). Les projets ANR/FUI/FEDER et les
+    # pages « projets collaboratifs » des acteurs français décrivent leur objet en français,
+    # où AUCUN des termes ci-dessus n'apparaît -- la moitié anglophone du vocabulaire suffisait
+    # tant que la seule source de projets était CORDIS, qui publie ses objectifs en anglais.
+    # Les regex (pas any_of) parce que le français décline : "ultracourtes", "ultra-brèves",
+    # "ultrarapides" -- _term_pattern pose des frontières de mot et ne les attraperait pas.
+    # "ultracourt"/"ultrarapide" seuls sont ambigus en français (électronique ultrarapide,
+    # liaison ultrarapide) : ils exigent donc un contexte laser/impulsion/photonique, comme
+    # "USP laser" plus haut exige déjà laser/pulse.
+    "impulsions ultracourtes (FR)": {
+        "regex": (r"\bultra[- ]?(?:court|bref|br[èe]v)\w*",),
+        "requires_any": ("laser", "impulsion", "impulsions", "photonique"),
+    },
+    "laser ultrarapide (FR)": {
+        "regex": (r"\bultra[- ]?rapide\w*",),
+        "requires_any": ("laser", "impulsion", "impulsions", "photonique"),
+    },
+    # "femtoseconde" est déjà dans la règle "femtosecond" ci-dessus, mais au singulier exact :
+    # "impulsions femtosecondes", la forme courante en français, lui échappait.
+    "femtoseconde (FR)": {"regex": (r"\bfemtoseconde\w*",)},
 }
 
 # Marchés/secteurs applicatifs finaux (une des 3 dimensions "core" d'un fait marché, avec
@@ -212,7 +232,16 @@ OPERATIONS: Lexicon = {
     "Écriture de guide d'onde": {"any_of": ("waveguide writing", "direct laser writing of waveguide")},
     # Ajouté le 10/09/2026 : "scribing" a été retiré comme libellé (c'est le mot anglais du
     # marquage, pas une opération française), mais le marquage lui-même manquait au lexique.
-    "Marquage": {"any_of": ("laser marking", "marquage laser", "marquage", "laser marker", "annealing marking", "color marking")},
+    # "marquage" nu est un faux ami depuis que des textes FRANÇAIS entrent dans le pipeline
+    # (national_projects.py, 14/09/2026) : en biologie, un marquage est un traçage fluorescent.
+    # Le projet ANR SOFICARS -- microscopie CARS "sans avoir recours à aucun marquage
+    # fluorescent" -- matchait donc l'opération "Marquage" au sens laser, ce qui neutralisait
+    # is_laser_the_source (dont la seconde moitié épargne tout texte nommant un procédé) et
+    # faisait entrer un projet de développement de SOURCE dans l'observatoire.
+    "Marquage": {
+        "any_of": ("laser marking", "marquage laser", "marquage", "laser marker", "annealing marking", "color marking"),
+        "exclude": ("marquage fluorescent", "marquage moléculaire", "fluorescent labelling", "fluorescent labeling"),
+    },
     "Nettoyage": {"any_of": ("laser cleaning", "nettoyage laser")},
     "Polissage": {"any_of": ("laser polishing", "polishing")},
     # "volumetric scribing" ajouté ici et non dans "Marquage" : le seul document du corpus qui
@@ -741,6 +770,16 @@ LASER_AS_SOURCE_CUES = (
     "oscillators", "amplifier", "amplifiers", "parametric oscillator", "parametric oscillators",
     "mopa", "multi-pass cell", "multipass cell", "petawatt", "peak power",
     "thin film coating", "thin film coatings", "mirror", "mirrors",
+    # Troisième passe (13/09/2026), avec l'arrivée des projets nationaux : la liste était
+    # entièrement anglophone, or l'ANR finance beaucoup de développement de SOURCE et le décrit
+    # en français. Mesuré sur les 598 projets ANR contenant « laser » : sans ces termes, des
+    # projets comme « Nouvelles Architectures pour les lasers intenses dans le moyen
+    # infrarouge » ou « Lasers accordables pompés par LED » entraient dans l'observatoire comme
+    # s'ils développaient un procédé. Les deux nombres, toujours (voir la note ci-dessus).
+    "source laser", "sources laser", "sources lasers", "cavité laser", "cavités laser",
+    "oscillateur", "oscillateurs", "amplificateur", "amplificateurs", "pompage",
+    "peigne de fréquences", "milieu amplificateur", "laser accordable", "lasers accordables",
+    "laser à fibre", "lasers à fibre", "puissance crête",
 )
 
 

@@ -2113,6 +2113,16 @@ def _init_tech_db() -> None:
         # libellés voisins pour deux concepts différents, indiscernables au comptage) -- d'où
         # cette colonne, qui sert aussi de groupe de facettes sur le front.
         _add_columns(db, "technology_signals", {"dimension": "TEXT"})
+        # Qui a financé le projet porteur du signal, et à quelle échelle (13/09/2026, arrivée de
+        # national_projects.py). Tant que cordis.py était la seule source de projets, la réponse
+        # était la même pour tous -- européen, Horizon Europe -- et se lisait dans l'URL source
+        # (cordis.europa.eu). Un projet ANR, Innovate UK ou FEDER n'a plus rien qui l'annonce
+        # dans son URL, et la différence compte : « soutenu par la Région » et « lauréat d'un
+        # appel européen » ne se lisent pas de la même façon dans une revue de veille.
+        # Les deux colonnes restent NULL sur les lignes écrites avant ce changement ; elles ne
+        # sont PAS rétro-remplies par une règle sur l'URL, c'est l'affichage qui documente le
+        # défaut (voir app.tech_corpus, qui traite NULL comme européen et dit pourquoi).
+        _add_columns(db, "technology_signals", {"funding_scope": "TEXT", "funding_program": "TEXT"})
         _normalize_technology_axes(db)
         # Après les alias (un libellé renommé n'est pas inconnu) et avant la déduction des
         # dimensions (inutile de ranger une ligne qu'on va supprimer).
@@ -2735,6 +2745,8 @@ def upsert_technology_signal(
     project_name: str | None = None,
     source_title: str | None = None,
     dimension: str = "process_technology",
+    funding_scope: str | None = None,
+    funding_program: str | None = None,
 ) -> tuple[int, int]:
     """Insère un signal technologique, ou fusionne ses acteurs s'il existe déjà.
 
@@ -2745,6 +2757,10 @@ def upsert_technology_signal(
 
     Cette règle est le point important : un même axe peut être porté par plusieurs acteurs d'un
     même consortium, donc ``actor_names`` fusionne au lieu de dupliquer la ligne.
+
+    ``funding_scope``/``funding_program`` ne concernent que les signaux de projet : d'où vient
+    l'argent ('europeen'/'national'/'regional') et sous quel nom ('ANR — ASTRID', 'Innovate UK').
+    Un signal de document les laisse à NULL -- une publication n'a pas de guichet.
 
     Renvoie ``(1 si créé sinon 0, id du signal)``. L'écriture de la ligne de preuve associée
     (technology_signal_sources) reste à l'appelant : CORDIS en écrit une, la passe documentaire
@@ -2764,13 +2780,15 @@ def upsert_technology_signal(
     new_id = db.execute(
         """INSERT INTO technology_signals(
                axis,maturity_stage,bucket,project_name,actor_names,source_url,source_title,quote,
-               fact_key,fingerprint,review_status,field_confidence,dimension,created_at,updated_at,last_seen_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?,?,?)""",
+               fact_key,fingerprint,review_status,field_confidence,dimension,funding_scope,funding_program,
+               created_at,updated_at,last_seen_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?,?,?,?,?)""",
         (
             axis, maturity_stage, bucket, project_name,
             json.dumps(sorted(set(actor_names)), ensure_ascii=False),
             source_url, source_title, quote, fact_key,
-            hashlib.sha256(fact_key.encode()).hexdigest(), field_confidence, dimension, stamp, stamp, stamp,
+            hashlib.sha256(fact_key.encode()).hexdigest(), field_confidence, dimension,
+            funding_scope, funding_program, stamp, stamp, stamp,
         ),
     ).lastrowid
     assert new_id is not None  # garanti par sqlite3 juste après un INSERT AUTOINCREMENT réussi

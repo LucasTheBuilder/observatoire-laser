@@ -92,6 +92,38 @@ class LaserAsSourceTests(unittest.TestCase):
                 self.assertTrue(is_on_topic(text))
 
 
+class FrenchSourceVocabularyTests(unittest.TestCase):
+    """La garde était entièrement anglophone jusqu'au 14/09/2026 ; l'arrivée des projets
+    nationaux (national_projects.py) lui a apporté des textes français, où l'ANR finance
+    beaucoup de développement de source. Cas trouvé en production le jour même : le projet
+    ANR-07-PRIB-0013 (SOFICARS, Amplitude), « Sources optiques fibrées pour la microscopie
+    CARS », entrait comme projet de l'observatoire."""
+
+    SOFICARS = (
+        "Sources optiques fibrées pour la microscopie CARS. Nous présentons un projet de "
+        "recherche visant à développer et explorer les performances de sources lasers fibrées "
+        "compactes pour la microscopie CARS, sans avoir recours à aucun marquage fluorescent."
+    )
+
+    def test_a_french_source_project_is_out_of_scope(self):
+        self.assertTrue(is_laser_the_source(self.SOFICARS))
+        self.assertFalse(is_on_topic(self.SOFICARS))
+
+    def test_biological_labelling_is_not_the_laser_operation(self):
+        """« marquage » est un faux ami : en biologie c'est un traçage fluorescent. Le
+        confondre avec le marquage laser nommait un procédé dans SOFICARS, et un procédé nommé
+        désarme la seconde moitié de is_laser_the_source."""
+        self.assertTrue(is_on_topic("Marquage laser femtoseconde de pièces horlogères en acier"))
+        self.assertFalse(is_on_topic(
+            "Imagerie de cellules vivantes sans marquage fluorescent par microscopie non linéaire"
+        ))
+
+    def test_a_french_process_project_still_passes(self):
+        self.assertTrue(is_on_topic(
+            "Découpe et texturation par impulsions ultracourtes de supports de culture cellulaire"
+        ))
+
+
 class DocumentIntakeAppliesTheGuardTests(unittest.TestCase):
     def test_openalex_rejects_source_only_titles(self):
         from openalex import _work_is_on_topic
