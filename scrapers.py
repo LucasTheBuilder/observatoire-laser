@@ -2930,7 +2930,12 @@ def upsert_document_technology_signal(
         # des libellés disjoints (garanti par un test), donc l'axe seul discrimine déjà -- et
         # préfixer aurait changé la clé des signaux déjà en base, donc tout dupliqué.
         fact_key = technology_signal_key(axis, source_url)
-        quote = _quote(text, rule.get("any_of", ()))
+        # La citation se choisit sur les termes REELLEMENT matches, pas sur `any_of` seul :
+        # une regle qui matche par `regex` (TGV, MEMS, DOE, SLE...) ne passait aucun terme a
+        # _quote, qui renvoyait alors la plus longue phrase du texte -- une preuve ou le mot
+        # justificatif n'apparait meme pas. Sans abstract le defaut ne se voyait pas, la
+        # citation etant le titre de toute facon.
+        quote = _quote(text, _rule_match_terms(text, rule))
         created, signal_id = upsert_technology_signal(
             db,
             fact_key=fact_key,

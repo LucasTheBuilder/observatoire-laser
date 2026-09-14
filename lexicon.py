@@ -654,6 +654,45 @@ DOCUMENT_OPERATIONS: Lexicon = {
 #
 # Même mécanique que _NON_DOCUMENT_OPERATIONS : ces libellés restent intacts pour Marché et
 # Offres, où ils se lisent sur une page d'acteur et non sur un titre de douze mots.
+# Deux termes de MARKETS ne survivent pas a la lecture d'un resume, et c'est une affaire de
+# LANGUE, pas de peri. Le lexique a ete ecrit pour des titres de douze mots ; un resume OpenAlex
+# en fait mille cent, d'anglais scientifique courant.
+#
+#   - « spatial » designe l'industrie spatiale en francais et une simple geometrie en anglais.
+#     Releve sur le corpus : 33 occurrences, et les huit premieres lues a la main disent toutes
+#     « spatial beam shape », « Spatial Light Modulator », « spatial separation », « spatial and
+#     temporal accuracy » -- zero industrie spatiale ;
+#   - « optical » est l'adjectif le plus banal de cette litterature : sur 73 occurrences, la
+#     plupart nomment un INSTRUMENT de mesure (« optical microscopy », « optical profilometry »,
+#     « optical properties »), pas le marche de l'optique. Les vrais cas -- guides d'onde,
+#     elements diffractifs -- sont deja captes par la dimension piece.
+#
+# Les autres termes du marche resistent tres bien : « automotive », « semiconductor »,
+# « biomedical », « defence », « solar cells » ne veulent dire qu'une chose.
+#
+# MARKETS lui-meme n'est pas touche : il sert aussi a l'extraction de faits marche, sur des
+# pages d'acteurs ou le contexte est tout autre, et le modifier reecrirait des faits deja
+# valides. Meme separation que DOCUMENT_OPERATIONS et DOCUMENT_COMPONENTS, au terme pres.
+_WEAK_DOCUMENT_MARKET_TERMS: dict[str, frozenset[str]] = {
+    "Spatial": frozenset({"spatial"}),
+    "Optique": frozenset({"optical"}),
+}
+DOCUMENT_MARKETS: Lexicon = {
+    label: (
+        rule
+        if label not in _WEAK_DOCUMENT_MARKET_TERMS
+        else {
+            **rule,
+            "any_of": tuple(
+                terme for terme in rule.get("any_of", ())
+                if terme not in _WEAK_DOCUMENT_MARKET_TERMS[label]
+            ),
+        }
+    )
+    for label, rule in MARKETS.items()
+}
+
+
 _NON_DOCUMENT_COMPONENTS = frozenset({"Composants en verre", "Substrats", "Capteurs"})
 DOCUMENT_COMPONENTS: Lexicon = {
     label: rule for label, rule in COMPONENTS.items() if label not in _NON_DOCUMENT_COMPONENTS
@@ -667,7 +706,7 @@ DOCUMENT_COMPONENTS: Lexicon = {
 DOCUMENT_LEXICONS: dict[str, Lexicon] = {
     "operation": DOCUMENT_OPERATIONS,
     "material": MATERIALS,
-    "market": MARKETS,
+    "market": DOCUMENT_MARKETS,
     # Ajoutée le 13/09/2026. Sans effet sur ce qui ENTRE dans le corpus : is_on_topic ne lit que
     # TECHNOLOGY_AXES, jamais ce dictionnaire -- cette dimension ne fait qu'étiqueter ce qui est
     # déjà admis. Mesurée sur les 144 publications : 12 nomment une pièce (micro-canaux, guides
@@ -780,6 +819,17 @@ LASER_AS_SOURCE_CUES = (
     "oscillateur", "oscillateurs", "amplificateur", "amplificateurs", "pompage",
     "peigne de fréquences", "milieu amplificateur", "laser accordable", "lasers accordables",
     "laser à fibre", "lasers à fibre", "puissance crête",
+    # Quatrième passe (14/09/2026), déclenchée par les projets UKRI : la liste décrivait une
+    # source par son ARCHITECTURE (oscillateur, amplificateur, CPA) mais jamais par son MILIEU
+    # À GAIN ni par son mécanisme de blocage de modes. « GraTi:S - Graphene for Titanium
+    # Sapphire Lasers » (Coherent, Innovate UK) entrait donc comme projet de l'observatoire
+    # alors qu'il développe un cristal laser. Mesuré sur les projets GtR on-topic des quatre
+    # acteurs britanniques retenus : ces termes en écartent exactement un, GraTi:S, et aucun
+    # autre -- « mode-locked » ne fait pas sortir un travail de procédé qui décrit sa source,
+    # la seconde moitié de la règle (un procédé nommé épargne le texte) s'en charge.
+    "titanium sapphire", "ti:sapphire", "ti sapphire", "saturable absorber",
+    "mode-locked", "mode locked", "mode-locking", "laser crystal", "laser crystals",
+    "gain medium", "gain media", "laser gain", "doped crystal", "doped crystals",
 )
 
 
@@ -845,18 +895,42 @@ def _detect_maturity(text: str) -> tuple[str, str]:
             return bucket, stage
     return "unknown", "Maturité industrielle non déterminée"
 
+_QUOTE_MAX = 700
+
+
+def _term_position(text: str, term: str) -> int | None:
+    """Position de `term` dans `text`, aux mêmes règles de frontière que _contains_term."""
+    match = _term_pattern(term).search(_normalize_text(text))
+    return match.start() if match else None
+
+
 def _quote(text: str, terms: tuple[str, ...] | list[str]) -> str:
     """Choisit, parmi les phrases de `text`, celle qui contient le plus de `terms` (la citation
-    la plus "preuve") pour l'afficher dans l'UI comme justification du fait extrait."""
+    la plus "preuve") pour l'afficher dans l'UI comme justification du fait extrait.
+
+    La coupe se recentre sur le terme. Jusqu'au 14/09/2026 la phrase retenue était tronquée
+    depuis son DÉBUT, ce qui pouvait couper juste avant le mot qui l'avait fait gagner : mesuré
+    sur le corpus documentaire, 8 citations sur 790 ne contenaient plus aucun terme
+    déclencheur. Une preuve qui ne montre pas ce qu'elle prouve n'est pas une preuve. Le défaut
+    ne pouvait pas se voir tant que les documents n'avaient que leur titre pour texte -- il est
+    apparu avec les résumés OpenAlex, longs de mille caractères."""
     text = (text or "").strip()
     if not text:
         return ""
     sentences = re.split(r"(?<=[.!?])\s+|\n+", text)
     def score(sentence: str) -> tuple[int, int]:
         hits = sum(_contains_term(sentence, term) for term in terms)
-        return hits, min(len(sentence), 700)
+        return hits, min(len(sentence), _QUOTE_MAX)
     ranked = sorted((s.strip() for s in sentences if s.strip()), key=score, reverse=True)
-    return (ranked[0] if ranked else text)[:700]
+    best = ranked[0] if ranked else text
+    if len(best) <= _QUOTE_MAX:
+        return best
+    positions = [pos for term in terms if (pos := _term_position(best, term)) is not None]
+    if not positions:
+        return best[:_QUOTE_MAX]
+    # Fenêtre centrée sur la première occurrence, recadrée quand elle déborde d'un côté.
+    start = max(0, min(min(positions) - _QUOTE_MAX // 3, len(best) - _QUOTE_MAX))
+    return f"…{best[start:start + _QUOTE_MAX]}" if start else best[:_QUOTE_MAX]
 
 
 # --- API publique, pour les modules hors crawl -------------------------------------------

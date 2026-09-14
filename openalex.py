@@ -191,7 +191,7 @@ def _fetch_recent_works(client: httpx.Client, institution_id: str, from_date: st
                     "sort": "publication_date:desc",
                     "per-page": OPENALEX_WORKS_PER_PAGE,
                     "cursor": cursor,
-                    "select": "id,doi,title,type,publication_date,primary_location,authorships",
+                    "select": "id,doi,title,type,publication_date,primary_location,authorships,abstract_inverted_index",
                     **_mailto_params(),
                 },
             )
@@ -227,7 +227,7 @@ def _fetch_topic_works(client: httpx.Client, institution_id: str, from_date: str
                     ),
                     "per-page": OPENALEX_WORKS_PER_PAGE,
                     "cursor": cursor,
-                    "select": "id,doi,title,type,publication_date,primary_location,authorships",
+                    "select": "id,doi,title,type,publication_date,primary_location,authorships,abstract_inverted_index",
                     **_mailto_params(),
                 },
             )
@@ -255,7 +255,7 @@ def _fetch_global_on_topic_works(client: httpx.Client, query: str, from_date: st
                 "filter": f"from_publication_date:{from_date}",
                 "sort": "publication_date:desc",
                 "per-page": GLOBAL_SEARCH_WORKS_PER_QUERY,
-                "select": "id,doi,title,type,publication_date,primary_location,authorships",
+                "select": "id,doi,title,type,publication_date,primary_location,authorships,abstract_inverted_index",
                 **_mailto_params(),
             },
         )
@@ -298,6 +298,35 @@ def _co_institutions(work: dict, exclude_institution_id: str) -> list[tuple[str,
     return results
 
 
+def _abstract(work: dict) -> str:
+    """Reconstruit le résumé depuis l'index inversé d'OpenAlex (mot -> positions).
+
+    OpenAlex ne redistribue pas les résumés en texte suivi -- c'est une contrainte de droits,
+    pas un caprice de format -- mais publie l'index inversé, dont la reconstruction est exacte
+    et documentée par OpenAlex lui-même.
+
+    Ce qu'il change : le classement d'un document ne reposait que sur son titre, douze mots où
+    rien ne tient. Mesuré le 14/09/2026 sur les 302 publications du corpus, dont 260 ont un
+    résumé (86 %, longueur médiane 1 126 caractères) : 370 étiquettes -> 887, et les documents
+    sans aucune famille passent de 76 à 25. La citation attachée à chaque étiquette devient
+    surtout une VRAIE preuve -- une phrase du résumé qui porte le terme -- au lieu du titre
+    répété faute de mieux.
+
+    Renvoie "" plutôt que None quand OpenAlex n'a pas de résumé : c'est ce qu'attendent
+    upsert_document et upsert_document_technology_signal, et une chaîne vide dit la même chose
+    qu'une absence sans obliger chaque appelant à la tester.
+    """
+    index = work.get("abstract_inverted_index")
+    if not isinstance(index, dict) or not index:
+        return ""
+    positions: dict[int, str] = {}
+    for mot, places in index.items():
+        for place in places or ():
+            if isinstance(place, int):
+                positions[place] = mot
+    return " ".join(positions[rang] for rang in sorted(positions))[:6000]
+
+
 def _parse_work(work: dict) -> dict | None:
     title = str(work.get("title") or "").strip()
     if not title:
@@ -309,7 +338,10 @@ def _parse_work(work: dict) -> dict | None:
     url = location.get("landing_page_url") or (f"https://doi.org/{doi}" if doi else None) or work.get("id")
     if not url:
         return None
-    return {"title": title, "url": url, "doi": doi, "published_at": work.get("publication_date")}
+    return {
+        "title": title, "url": url, "doi": doi,
+        "published_at": work.get("publication_date"), "abstract": _abstract(work),
+    }
 
 
 def _upsert_document(db, actor_name: str, item: dict) -> tuple[int, int]:
@@ -325,6 +357,7 @@ def _upsert_document(db, actor_name: str, item: dict) -> tuple[int, int]:
         actor_name=actor_name,
         published_at=item["published_at"],
         doi=item["doi"],
+        abstract=item.get("abstract") or None,
     )
 
 # Combien de DOI par appel à /works. OpenAlex accepte un filtre `doi:a|b|c` ; 25 tient
@@ -463,12 +496,12 @@ def collect_openalex_publications(lookback_days: int = OPENALEX_LOOKBACK_DAYS_DE
                         inserted, was_attributed = _upsert_document(db, actor["name"], item)
                         added += inserted
                         attributed += was_attributed
-                        # §4.C.2 audit veille (Lot 3 §3.5) : titre seul, comme _work_is_on_topic
-                        # ci-dessus -- OpenAlex n'expose l'abstract qu'en index inversé, pas
-                        # demandé ici (même choix que le reste de ce module : pas de nouveau
-                        # champ API tant que le titre suffit).
+                        # Titre ET résumé depuis le 14/09/2026 : le titre seul plafonnait le
+                        # classement (voir _abstract). Le filtre d'entrée _work_is_on_topic,
+                        # lui, reste sur le titre -- un résumé qui mentionne le femtoseconde en
+                        # passant ne fait pas d'un article un article de procédé.
                         technology_signals_added += upsert_document_technology_signal(
-                            db, item["title"], "", item["url"], actor["name"],
+                            db, item["title"], item.get("abstract", ""), item["url"], actor["name"],
                         )
                         # §4.D audit veille (Lot 3 §3.2) : une institution co-autrice récurrente
                         # sur des travaux on-topic est un candidat acteur -- voir actor_discovery.py.
