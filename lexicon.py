@@ -779,6 +779,33 @@ LASER_AS_INSTRUMENT_CUES = (
     # de diagnostic DE procédé -- « Pump-probe shadography of glass drilling » nomme le
     # perçage, la seconde moitié de la règle le garde.
     "imaging interferometry", "interferometry", "ultrafast imaging", "single-shot imaging",
+    # Le miroir français, ajouté le 15/09/2026. La garde était entièrement anglophone alors que
+    # sa jumelle is_laser_the_source parlait français depuis la veille : une garde traduite,
+    # l'autre non. L'asymétrie se voyait à l'œil nu --
+    #
+    #     « Femtosecond transient absorption spectroscopy of nanoparticles »   -> écarté
+    #     « Spectroscopie femtoseconde résolue en temps des métaux carbonyles » -> ADMIS
+    #
+    # la même phrase, traduite, changeait de verdict. Sans conséquence tant que le corpus était
+    # anglophone ; l'arrivée des projets ANR (national_projects.py) l'a rendue coûteuse, et le
+    # tableau de bord ANR de Lucas a montré l'ampleur : plus de la moitié des projets
+    # femtoseconde financés en France emploient le laser comme INSTRUMENT de mesure.
+    #
+    # Mesuré sur les 314 projets ANR passant _laser_match, et c'est l'exacte mesure de ce qui
+    # manquait : la liste anglaise en écartait 0, celle-ci en écarte 46. Aucun des 46 ne nomme
+    # d'opération laser (contrôle inverse), et aucune des 304 publications du corpus ne bouge.
+    #
+    # Terme pour terme, pas un filet plus large : « spectroscopie », « microscopie » et
+    # « imagerie » NUS en écarteraient 137, sans qu'on puisse montrer que les 91 de plus sont
+    # des instruments. Ce qui n'est pas écarté en anglais ne doit pas l'être en français.
+    "spectroscopie d'absorption transitoire", "absorption transitoire",
+    "spectroscopie pompe-sonde", "spectroscopie pompe sonde", "pompe-sonde", "pompe sonde",
+    "photoluminescence résolue en temps", "spectroscopie résolue en temps",
+    "spectroscopie ultrarapide", "spectroscopie ultra-rapide", "spectroscopie femtoseconde",
+    "spectroscopie d'absorption à deux photons", "spectroscopie à deux photons",
+    "interférométrie", "imagerie ultrarapide", "imagerie ultra-rapide",
+    "microscopie à deux photons", "microscopie multiphotonique", "microscopie multimodale",
+    "microscopie à 3 photons", "microscopie à trois photons",
 )
 
 
@@ -873,6 +900,9 @@ def is_laser_the_instrument(text: str) -> bool:
     applicative -- distingue les deux sans avoir à lister les exceptions une par une. Vérifié
     sur les 25 publications en base : rejette la seule qui doit l'être, garde les deux de
     monitoring.
+
+    Bilingue depuis le 15/09/2026 (voir LASER_AS_INSTRUMENT_CUES) : la règle vaut désormais
+    sur un résumé d'appel à projets français comme sur un titre de revue anglophone.
 
     Appliqué dans is_on_topic() depuis le 09/09/2026, donc à TOUTES les sources, projets
     CORDIS compris -- où il retire 26 des 257 projets qui y étaient admis (dynamique

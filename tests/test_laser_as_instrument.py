@@ -97,6 +97,67 @@ class LaserAsInstrumentTests(unittest.TestCase):
                 self.assertTrue(is_on_topic(text))
 
 
+class FrenchInstrumentVocabularyTests(unittest.TestCase):
+    """La garde était entièrement anglophone jusqu'au 15/09/2026, alors que sa jumelle
+    is_laser_the_source parlait français depuis la veille -- une garde traduite, l'autre non.
+
+    L'asymétrie se voyait à l'œil nu : la MÊME phrase, traduite, changeait de verdict. Sans
+    conséquence tant que le corpus était anglophone ; l'arrivée des projets ANR l'a rendue
+    coûteuse, la moitié des projets femtoseconde financés en France employant le laser comme
+    instrument de mesure.
+    """
+
+    # Titres réels de projets ANR (jeux ANR_01/ANR_02, édition 2022-2025).
+    INSTRUMENT_FR = (
+        "Spectroscopie ultrarapide non-linéaire de plexcitons à base de bipyramides d'or",
+        "Microscopie multimodale à 3 photons pour l'analyse de l'oxygénation du sang",
+        "Un nouveau regard sur la dynamique des métaux carbonyles grâce à la spectroscopie "
+        "femtoseconde dans l'extrême ultraviolet",
+        "Imagerie par absorption transitoire femtoseconde de nanoparticules",
+    )
+
+    def test_a_french_measurement_project_is_out_of_scope(self):
+        for text in self.INSTRUMENT_FR:
+            with self.subTest(text=text[:56]):
+                self.assertTrue(is_laser_the_instrument(text))
+                self.assertFalse(is_on_topic(text))
+
+    def test_the_same_sentence_gets_the_same_verdict_in_both_languages(self):
+        """Ce que le correctif rétablit, et la seule chose qui compte vraiment ici."""
+        paires = (
+            ("Femtosecond transient absorption spectroscopy of nanoparticles",
+             "Spectroscopie d'absorption transitoire femtoseconde de nanoparticules"),
+            ("Ultrafast spectroscopy of plexcitons in gold bipyramids",
+             "Spectroscopie ultrarapide de plexcitons dans des bipyramides d'or"),
+        )
+        for anglais, francais in paires:
+            with self.subTest(text=francais[:48]):
+                self.assertEqual(is_laser_the_instrument(anglais), is_laser_the_instrument(francais))
+                self.assertEqual(is_on_topic(anglais), is_on_topic(francais))
+
+    def test_a_french_process_project_still_passes(self):
+        """Le second membre de la règle vaut dans les deux langues : caractériser une surface
+        usinée au microscope ne fait pas d'un article d'usinage un article de métrologie."""
+        for text in (
+            "Micro-usinage par laser femtoseconde du verre borosilicate",
+            "Texturation de surface par impulsions ultracourtes, caractérisée par microscopie "
+            "à deux photons",
+            "Découpe et gravure laser femtoseconde de supports de culture cellulaire",
+        ):
+            with self.subTest(text=text[:56]):
+                self.assertFalse(is_laser_the_instrument(text))
+                self.assertTrue(is_on_topic(text))
+
+    def test_bare_words_are_deliberately_absent(self):
+        """« spectroscopie », « microscopie » et « imagerie » nus écarteraient 137 projets ANR
+        au lieu de 46, sans qu'on puisse montrer que les 91 de plus sont des instruments. Ce
+        test fixe la décision : terme pour terme, jamais un filet plus large."""
+        from lexicon import LASER_AS_INSTRUMENT_CUES
+        for mot in ("spectroscopie", "microscopie", "imagerie", "spectroscopy", "microscopy"):
+            with self.subTest(mot=mot):
+                self.assertNotIn(mot, LASER_AS_INSTRUMENT_CUES)
+
+
 class DocumentIntakeAppliesTheGuardTests(unittest.TestCase):
     def test_openalex_rejects_characterisation_only_titles(self):
         from openalex import _work_is_on_topic
