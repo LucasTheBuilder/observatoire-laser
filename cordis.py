@@ -318,6 +318,22 @@ def _upsert_actor_relation(db, actor_id: int, related_name: str, related_actor_i
     return 1
 
 
+def _decimal(value: str | None) -> float | None:
+    """Un montant CORDIS en nombre, ou None -- jamais 0.0 par défaut.
+
+    Les exports CORDIS mélangent les deux conventions décimales selon les colonnes et les
+    programmes ("1234.56" et "1234,56") ; un champ vide ou illisible doit rester None, parce
+    qu'un projet dont on ignore le montant n'est pas un projet financé zéro euro.
+    """
+    text = (value or "").strip().replace(" ", "").replace(",", ".")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def _upsert_technology_signal(
     db, *, axis: str, project: dict[str, str], actor_names: list[str], quote: str,
     default_program: str = "Horizon Europe",
@@ -353,6 +369,13 @@ def _upsert_technology_signal(
         # Europe par supposition.
         funding_scope="europeen",
         funding_program=project.get("frameworkProgramme") or default_program,
+        project_start=(project.get("startDate") or "").strip() or None,
+        # `ecMaxContribution` -- la contribution de la Commission -- et non `totalCost`, qui
+        # inclut la part autofinancée par le consortium : c'est le montant du GUICHET, seul
+        # comparable à l'aide allouée que publient l'ANR et UKRI. Les exports CORDIS écrivent
+        # certains montants avec une virgule décimale ("1234,56"), d'où _decimal().
+        funding_amount=_decimal(project.get("ecMaxContribution")),
+        funding_currency="EUR",
     )
 
     source_added = upsert_fact_source(

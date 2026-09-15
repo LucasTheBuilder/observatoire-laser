@@ -491,6 +491,75 @@ class AnrSourceFreshnessTests(unittest.TestCase):
         self.assertNotIn("fr-esr-aap-anr-projets-retenus-participants-identifies", source.split('"""', 2)[2])
 
 
+class GtrDateAndAmountTests(unittest.TestCase):
+    """Deux informations que GtR publie ailleurs qu'on ne les cherche d'abord.
+
+    `start` au niveau du projet est vide sur une grande partie des fiches -- aucun projet
+    d'Oxford Lasers ne le porte (relevé du 15/09/2026) --, mais la période de financement est
+    toujours là, dans le lien `FUND` et en millisecondes epoch. Sans ce repli, aucun projet
+    UKRI n'aurait de date et l'histogramme par année les ignorerait tous.
+    """
+
+    def test_the_fund_link_supplies_the_missing_start_date(self):
+        project = {"links": {"link": [
+            {"rel": "PI_PER", "start": 1600000000000},
+            {"rel": "FUND", "start": 1138752000000, "end": 1233360000000},
+        ]}}
+        self.assertEqual("2006-02-01", npmod._gtr_start(project))
+
+    def test_the_earliest_funding_period_wins(self):
+        """Un projet reconduit porte plusieurs liens FUND : c'est son début qu'on veut."""
+        project = {"links": {"link": [
+            {"rel": "FUND", "start": 1711926000000},
+            {"rel": "FUND", "start": 1138752000000},
+        ]}}
+        self.assertEqual("2006-02-01", npmod._gtr_start(project))
+
+    def test_an_explicit_start_is_preferred_to_the_fund_link(self):
+        project = {"start": "2013-04-01", "links": {"link": [{"rel": "FUND", "start": 1138752000000}]}}
+        self.assertEqual("2013-04-01", npmod._gtr_start(project))
+
+    def test_no_date_at_all_stays_none(self):
+        self.assertIsNone(npmod._gtr_start({"links": {"link": [{"rel": "PI_PER", "start": 1138752000000}]}}))
+        self.assertIsNone(npmod._gtr_start({}))
+
+    def test_the_grant_is_summed_only_when_every_share_is_published(self):
+        """Un total partiel est plus trompeur qu'une absence : il se lit comme un total."""
+        complet = {"participantValues": {"participant": [{"grantOffer": 100.0}, {"grantOffer": 50.0}]}}
+        self.assertEqual(150.0, npmod._gtr_amount(complet))
+        partiel = {"participantValues": {"participant": [{"grantOffer": 100.0}, {}]}}
+        self.assertIsNone(npmod._gtr_amount(partiel))
+        self.assertIsNone(npmod._gtr_amount({"participantValues": {"participant": []}}))
+
+
+class AnrDateAndAmountTests(unittest.TestCase):
+    def test_the_call_edition_stands_in_for_a_missing_start_date(self):
+        """`Projet.T0 scientifique` manque sur les projets anciens ; l'édition de l'appel est
+        alors la seule information temporelle publiée, écrite telle quelle."""
+        self.assertEqual("2021-04-20", npmod._anr_start(
+            {"Projet.T0 scientifique": "2021-04-20", "AAP.Edition": "2021"}))
+        self.assertEqual("2013", npmod._anr_start({"Projet.T0 scientifique": "", "AAP.Edition": "2013"}))
+        self.assertIsNone(npmod._anr_start({}))
+
+    def test_the_project_total_is_preferred_to_the_sum_of_shares(self):
+        projet = {"Projet.Montant.AF.Aide_allouee.ANR": "517116.00"}
+        parts = [{"Projet.Partenaire.Aide_allouee.ANR": "1.00"}]
+        self.assertAlmostEqual(517116.0, npmod._anr_amount(projet, parts))
+
+    def test_shares_are_summed_only_when_all_are_published(self):
+        parts = [{"Projet.Partenaire.Aide_allouee.ANR": "100.0"},
+                 {"Projet.Partenaire.Aide_allouee.ANR": "50.5"}]
+        self.assertAlmostEqual(150.5, npmod._anr_amount({}, parts))
+        incomplet = [{"Projet.Partenaire.Aide_allouee.ANR": "100.0"}, {}]
+        self.assertIsNone(npmod._anr_amount({}, incomplet))
+
+    def test_an_unreadable_amount_is_absent_not_zero(self):
+        """Un projet dont on ignore le montant n'est pas un projet financé zéro euro."""
+        self.assertIsNone(npmod._amount("n/a"))
+        self.assertIsNone(npmod._amount(""))
+        self.assertEqual(0.0, npmod._amount("0"))
+
+
 class GtrScopeTests(unittest.TestCase):
     """GtR n'est pas que le guichet national : "Horizon Europe Guarantee" et "EU" y sont de
     vrais leadFunder (6 projets chez TWI, 3 au MTC, relevé du 14/09/2026). Les étiqueter

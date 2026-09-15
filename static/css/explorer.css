@@ -133,6 +133,88 @@ main.ex-host {
 }
 .ex-kpi-note { margin-top: 3px; font-size: 11px; color: var(--ex-label); }
 
+/* --- Histogramme par annee -------------------------------------------------------------- */
+/*
+ * Le filtre temporel du corpus : une colonne par annee, cliquable. Rendu en continu (annees
+ * vides comprises, voir tcYearHistogram) pour que l'axe ne mente pas sur les intervalles.
+ *
+ * Pas de graphique en SVG ni de librairie : douze a vingt barres se font en flex, et la barre
+ * EST le bouton -- ce qui donne gratuitement le focus clavier et aria-pressed.
+ */
+
+.ex-histogram {
+  margin-top: 26px;
+  border: 1px solid var(--ex-line);
+  border-radius: 7px;
+  padding: 14px 18px 10px;
+  background: var(--ex-surface);
+}
+.ex-histogram-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.ex-histogram-title { font-size: 13px; font-weight: 600; color: var(--ex-ink); }
+.ex-histogram-hint { font-size: 11px; color: var(--ex-label); }
+.ex-linkish {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--ex-accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.ex-bars { display: flex; align-items: flex-end; gap: 4px; }
+.ex-bar {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  border: 0;
+  background: none;
+  padding: 0 0 2px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.ex-bar:hover:not([disabled]) { background: var(--ex-subtle); }
+.ex-bar-count {
+  font-size: 10px;
+  color: var(--ex-label);
+  line-height: 1;
+  min-height: 10px;
+}
+/* La barre elle-meme : un trait epais plutot qu'un rectangle plein, pour rester lisible a
+ * une entree comme a quarante sans ecraser le reste de la page. */
+.ex-bar-fill {
+  width: 100%;
+  border-radius: 2px 2px 0 0;
+  background: var(--ex-accent);
+  opacity: .28;
+  transition: opacity .12s ease;
+}
+.ex-bar:hover:not([disabled]) .ex-bar-fill { opacity: .5; }
+.ex-bar.is-active .ex-bar-fill { opacity: 1; }
+.ex-bar.is-active .ex-bar-count { color: var(--ex-ink); font-weight: 600; }
+.ex-bar.is-empty { cursor: default; }
+/* Une annee sans entree garde sa colonne -- c'est le creux qui informe -- mais s'efface. */
+.ex-bar.is-empty .ex-bar-year { color: var(--ex-disabled); }
+.ex-bar-year {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--ex-ink-3);
+  line-height: 1;
+  border-top: 1px solid var(--ex-line);
+  width: 100%;
+  padding-top: 4px;
+}
+
 /* --- Barre de recherche ----------------------------------------------------------------- */
 
 .ex-search {
@@ -527,4 +609,13 @@ button.ex-row:last-child { border-bottom: 0; }
   .ex-source-domain { grid-column: 1; }
   .ex-source-count { grid-column: 2; grid-row: 1; }
   .ex-source-status { grid-column: 2; grid-row: 2; }
+}
+
+/* Le montant du financement, dans la meta d'une ligne de corpus. Chiffres tabulaires pour que
+ * deux montants empiles s'alignent, et la meme discretion que .ex-ref : c'est une propriete du
+ * financement, pas ce qu'on vient lire en premier. */
+.ex-amount {
+  font-variant-numeric: tabular-nums;
+  color: var(--ex-ink-2);
+  white-space: nowrap;
 }

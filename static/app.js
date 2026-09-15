@@ -63,7 +63,7 @@ const state = {
   // Les clés doivent couvrir TC_FACET_GROUPS : une dimension ajoutée au lexique sans clé ici
   // faisait passer `undefined` à facetGroupHtml, qui plantait le rendu de toute la page.
   // Le `|| []` aux points d'appel est la vraie garde ; cette liste reste la valeur de départ.
-  techFacets: {operation: [], material: [], actor: [], market: [], component: [], axis: [], machine_capability: [], architecture: [], funding: []},
+  techFacets: {operation: [], material: [], actor: [], market: [], component: [], axis: [], machine_capability: [], architecture: [], funding: [], year: []},
   // Groupes de facettes dépliés (voir explorer.js) -- purement d'affichage.
   techExpanded: [],
   // File des publications trouvées par sujet qu'aucun acteur suivi ne signe (voir
@@ -979,11 +979,12 @@ function tcRowActors(row) { return row.actors.length ? row.actors : [TC_NO_ACTOR
 
 
 function tcDateLabel(row) {
-  // OpenAlex renvoie parfois une date partielle ("2027-4") et elle est stockée telle quelle :
-  // elle n'est pas parsable de façon fiable d'un navigateur à l'autre, on la rend brute plutôt
-  // que d'inventer un jour. Un projet n'a aucune date de projet en base (voir le
-  // commentaire de /api/tech-corpus) -- on affiche sa date d'observation, explicitement
-  // préfixée, jamais une période supposée.
+  // OpenAlex renvoie parfois une date partielle ("2027-4", et l'ANR publie des éditions
+  // d'appel réduites à une année) : elle est stockée telle quelle, n'est pas parsable de façon
+  // fiable d'un navigateur à l'autre, et se rend donc brute plutôt que complétée d'un jour
+  // inventé. Le repli sur la date d'OBSERVATION, explicitement préfixé "Vu", ne concerne plus
+  // que les lignes dont la source ne publie aucune date -- depuis le 15/09/2026 un projet
+  // porte sa vraie date de début (technology_signals.project_start).
   const raw = row.published_at;
   if (!raw) {
     if (!row.observed_at) return "—";
@@ -1057,7 +1058,31 @@ const TC_FACET_GROUPS = [
   {key: "funding", label: "FINANCEMENT", valuesOf: row => (
     row.funding_scope ? [TC_SCOPE_LABELS[row.funding_scope] || row.funding_scope] : []
   )},
+  // L'année sert de facette pour le FILTRAGE et les COMPTEURS -- explore() sait déjà croiser
+  // les groupes et compter une option sans se compter elle-même --, mais elle ne se rend pas
+  // dans la colonne de gauche : son affichage est l'histogramme en haut de page (voir
+  // tcYearHistogram et TC_HIDDEN_FACETS). Une ligne sans année ne renvoie [] et ne rejoint
+  // donc aucune barre, au lieu d'entrer sous un libellé inventé.
+  {key: "year", label: "ANNÉE", valuesOf: row => {
+    const year = tcRowYear(row);
+    return year ? [year] : [];
+  }},
 ];
+
+// Groupes que la colonne de facettes ne rend pas : ils ont leur propre affichage ailleurs.
+const TC_HIDDEN_FACETS = ["year"];
+
+// L'année d'une ligne du corpus, en chaîne de 4 chiffres, ou "" si la source n'en publie pas.
+//
+// `published_at` porte la date de publication d'un document et, depuis le 15/09/2026, la date
+// de DÉBUT d'un projet (technology_signals.project_start). On ne retombe volontairement PAS
+// sur `observed_at` : la date à laquelle l'observatoire a vu passer une ligne n'est pas une
+// date de projet, et la faire entrer dans l'histogramme empilerait tout le corpus ancien sur
+// l'année de la dernière collecte.
+function tcRowYear(row) {
+  const match = /^(\d{4})/.exec(String(row.published_at || ""));
+  return match ? match[1] : "";
+}
 
 // Bloc de lecture, en bas de page : ce que la répartition des familles dit du corpus.
 //
@@ -1166,6 +1191,7 @@ function tcSplitFacetGroups(corpus) {
   const primary = [];
   const secondary = [];
   for (const group of TC_FACET_GROUPS) {
+    if (TC_HIDDEN_FACETS.includes(group.key)) continue;
     const covered = corpus.filter(row => group.valuesOf(row).length).length;
     const isPrimary = TC_ALWAYS_SECONDARY.includes(group.key)
       ? false
@@ -1245,6 +1271,85 @@ function tcSourcesBlock(sources) {
   </div>`;
 }
 
+// Montants : "82,3 M€", "430 k€", "1,2 M£". Arrondi à trois chiffres significatifs, parce que
+// l'euro près d'une aide publique n'apprend rien et allonge la ligne. La devise vient de la
+// donnée (technology_signals.funding_currency), jamais du guichet : additionner des euros et
+// des livres sans le dire donnerait un faux total.
+const TC_CURRENCY_SIGNS = {EUR: "€", GBP: "£", USD: "$", CHF: "CHF"};
+
+function tcAmountLabel(amount, currency) {
+  if (amount === null || amount === undefined || !Number.isFinite(Number(amount))) return "";
+  const value = Number(amount);
+  const sign = TC_CURRENCY_SIGNS[currency] || currency || "";
+  const [scaled, suffix] = value >= 1e6 ? [value / 1e6, "M"] : value >= 1e3 ? [value / 1e3, "k"] : [value, ""];
+  const digits = scaled >= 100 || !suffix ? 0 : 1;
+  return `${scaled.toLocaleString("fr-FR", {maximumFractionDigits: digits})}${suffix ? "\u202f" + suffix : ""}${sign}`;
+}
+
+// L'histogramme du corpus par année, cliquable -- la même fonction de filtrage que les
+// facettes de la colonne de gauche (state.techFacets.year), juste un autre affichage.
+//
+// Les années sont rendues en CONTINU, trous compris : un appel à projets sans lauréat suivi
+// laisse un creux, et ce creux est une information. Lister seulement les années peuplées
+// donnerait un axe qui ment sur les intervalles.
+function tcYearHistogram(options, selected) {
+  const counts = new Map((options || []).map(([year, count]) => [Number(year), count]));
+  const years = [...counts.keys()].filter(Number.isFinite).sort((a, b) => a - b);
+  if (years.length < 2) return "";
+  const first = years[0];
+  const last = years[years.length - 1];
+  const peak = Math.max(...counts.values(), 1);
+  const span = [];
+  for (let year = first; year <= last; year += 1) span.push(year);
+
+  const bars = span.map(year => {
+    const count = counts.get(year) || 0;
+    const on = selected.includes(String(year));
+    // Une année vide reste cliquable-inerte : le bouton est désactivé, la colonne garde sa
+    // place pour que l'axe reste régulier.
+    return `<button type="button" class="ex-bar${on ? " is-active" : ""}${count ? "" : " is-empty"}"
+      data-ex-year="${year}" aria-pressed="${on}"${count ? "" : " disabled"}
+      title="${count} entrée(s) en ${year}">
+      <span class="ex-bar-count">${count || ""}</span>
+      <span class="ex-bar-fill" style="height:${count ? Math.max(3, Math.round((count / peak) * 46)) : 0}px"></span>
+      <span class="ex-bar-year">${String(year).slice(2)}</span>
+    </button>`;
+  }).join("");
+
+  return `<div class="ex-histogram">
+    <div class="ex-histogram-head">
+      <span class="ex-histogram-title">Corpus par année</span>
+      <span class="ex-histogram-hint">${selected.length
+        ? `${selected.length} année(s) filtrée(s) — <button type="button" class="ex-linkish" data-ex-year-reset>tout afficher</button>`
+        : "cliquer une année pour filtrer"}</span>
+    </div>
+    <div class="ex-bars">${bars}</div>
+  </div>`;
+}
+
+// La note sous le KPI "PROJETS FINANCÉS" : le total des aides quand elles sont connues, et
+// combien de projets le composent. Jamais un total muet -- dire "12,4 M€" sans préciser qu'il
+// ne couvre que 9 projets sur 13 laisserait lire une somme pour l'ensemble.
+//
+// Un total PAR DEVISE, et seule la devise majoritaire est affichée : additionner des euros et
+// des livres donnerait un nombre qui ne veut rien dire, et empiler trois totaux dans une note
+// de KPI la rendrait illisible.
+function tcFundingNote(corpus) {
+  const projects = corpus.filter(row => row.kind === "projet");
+  if (!projects.length) return "aucun projet collecté";
+  const totals = new Map();
+  for (const row of projects) {
+    const amount = Number(row.funding_amount);
+    if (!Number.isFinite(amount) || !row.funding_currency) continue;
+    const entry = totals.get(row.funding_currency) || {sum: 0, count: 0};
+    totals.set(row.funding_currency, {sum: entry.sum + amount, count: entry.count + 1});
+  }
+  if (!totals.size) return `${projects.length} projet(s), aucun montant publié`;
+  const [currency, {sum, count}] = [...totals.entries()].sort((a, b) => b[1].count - a[1].count)[0];
+  const others = totals.size > 1 ? ` (+ ${totals.size - 1} autre devise)` : "";
+  return `${tcAmountLabel(sum, currency)} sur ${count}/${projects.length} projet(s)${others}`;
+}
+
 function tcCorpusRow(row) {
   // Ce qu’on vient lire d’abord passe en accent ; procédé, capacité machine et architecture
   // suivent en gris. Deux manques distincts, et la distinction compte pour la file de
@@ -1261,11 +1366,14 @@ function tcCorpusRow(row) {
       ? `<span class="ex-axis ex-none">Non qualifié</span>`
       : `<span class="ex-axis ex-none">Non classé</span>`;
   const extra = rest.length ? `<span class="ex-family">${rest.map(esc).join(" · ")}</span>` : "";
+  // Le montant suit la référence du guichet, pas le titre : c'est une propriété du
+  // financement. Absent quand la source ne le publie pas -- rien n'est estimé.
+  const amount = tcAmountLabel(row.funding_amount, row.funding_currency);
   return `<button type="button" class="ex-row" data-ex-open="${esc(row.uid)}">
     <span class="ex-kind ${esc(row.kind)}">${esc(TC_KIND_LABELS[row.kind] || row.kind)}</span>
     <span class="ex-doc">
       <span class="ex-doc-title">${esc(row.title)}</span>
-      <span class="ex-doc-meta">${head}${extra ? `<span class="ex-sep">·</span>${extra}` : ""}<span class="ex-sep">·</span><span class="ex-actor">${esc(tcActorLabel(row))}</span><span class="ex-sep">·</span><span class="ex-ref">${esc(row.reference)}</span></span>
+      <span class="ex-doc-meta">${head}${extra ? `<span class="ex-sep">·</span>${extra}` : ""}<span class="ex-sep">·</span><span class="ex-actor">${esc(tcActorLabel(row))}</span><span class="ex-sep">·</span><span class="ex-ref">${esc(row.reference)}</span>${amount ? `<span class="ex-sep">·</span><span class="ex-amount">${esc(amount)}</span>` : ""}</span>
     </span>
     <span class="ex-date">${esc(tcDateLabel(row))}</span>
   </button>`;
@@ -1337,10 +1445,12 @@ function renderTechCorpus() {
 
     <div class="ex-kpis">
       <div class="ex-kpi"><div class="ex-kpi-label">FAMILLES TECHNIQUES</div><div class="ex-kpi-value">${distinctFamilies}</div><div class="ex-kpi-note">sur ${TC_FACET_GROUPS.length - 1} dimensions</div></div>
-      <div class="ex-kpi"><div class="ex-kpi-label">PROJETS EUROPÉENS</div><div class="ex-kpi-value">${projects}</div><div class="ex-kpi-note">${projectsWithActor} avec un acteur suivi</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">PROJETS FINANCÉS</div><div class="ex-kpi-value">${projects}</div><div class="ex-kpi-note">${tcFundingNote(corpus)}</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">BREVETS</div><div class="ex-kpi-value">${patents}</div><div class="ex-kpi-note">${patents ? "collectés" : "aucune collecte aboutie"}</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">PUBLICATIONS</div><div class="ex-kpi-value">${publications}</div><div class="ex-kpi-note">${unclassified} sans aucune famille</div></div>
     </div>
+
+    ${tcYearHistogram(options.year, state.techFacets.year || [])}
 
     <div class="ex-search">
       <span class="ex-search-icon" aria-hidden="true">⌕</span>
@@ -1353,7 +1463,7 @@ function renderTechCorpus() {
       <div class="ex-facets">
         <div class="ex-facet-group">
           <div class="ex-facet-title">TYPE DE DOCUMENT</div>
-          ${[["Publications", publications], ["Brevets", patents], ["Projets européens", projects]].map(([label, count]) => {
+          ${[["Publications", publications], ["Brevets", patents], ["Projets", projects]].map(([label, count]) => {
             const on = state.techType === label;
             return `<button type="button" class="ex-facet${on ? " is-active" : ""}${count ? "" : " is-empty"}" data-ex-tab="${esc(label)}" aria-pressed="${on}"${count || on ? "" : " disabled"}><span>${esc(label)}</span><span>${count}</span></button>`;
           }).join("")}
@@ -1420,6 +1530,12 @@ function renderTechCorpus() {
   }));
   document.querySelectorAll("[data-ex-facet]").forEach(el => el.addEventListener("click",
     rerender(() => { state.techFacets = toggleFacet(state.techFacets, el.dataset.exFacet, el.dataset.exValue); })));
+  // Une barre de l'histogramme est une facette comme une autre -- même toggleFacet, même
+  // groupe "year" : seul l'affichage diffère de la colonne de gauche.
+  document.querySelectorAll("[data-ex-year]").forEach(el => el.addEventListener("click",
+    rerender(() => { state.techFacets = toggleFacet(state.techFacets, "year", el.dataset.exYear); })));
+  document.querySelector("[data-ex-year-reset]")?.addEventListener("click",
+    rerender(() => { state.techFacets = {...state.techFacets, year: []}; }));
   document.querySelectorAll("[data-ex-expand]").forEach(el => el.addEventListener("click", () => {
     const key = el.dataset.exExpand;
     state.techExpanded = state.techExpanded.includes(key)

@@ -64,6 +64,7 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -433,6 +434,70 @@ def _anr_text(project: dict[str, str]) -> str:
     ))).strip()
 
 
+def _amount(value: str | None) -> float | None:
+    """Un montant publié en nombre, ou None -- jamais 0.0 par défaut.
+
+    L'ANR écrit ses aides avec un point décimal ("196748.85"), mais les exports changent de
+    convention d'un fichier à l'autre ; un champ vide ou illisible doit rester None, parce
+    qu'un projet dont on ignore le montant n'est pas un projet financé zéro euro.
+    """
+    text = (value or "").strip().replace("\u202f", "").replace(" ", "").replace(",", ".")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _anr_start(project: dict[str, str]) -> str | None:
+    """La date de début du projet, ou à défaut l'ÉDITION de l'appel, jamais rien d'inventé.
+
+    `Projet.T0 scientifique` est une vraie date ISO, mais elle n'est pas renseignée sur les
+    projets anciens. `AAP.Edition` est alors la seule information temporelle publiée : une
+    année seule, écrite telle quelle plutôt que complétée d'un 1er janvier qui ferait passer
+    une approximation pour un jour connu.
+    """
+    start = (project.get("Projet.T0 scientifique") or "").strip()
+    return start or (project.get("AAP.Edition") or "").strip() or None
+
+
+def _anr_amount(project: dict[str, str], partners: list[dict[str, str]]) -> float | None:
+    """L'aide ANR du projet : le montant global s'il est publié, sinon la somme des parts.
+
+    Les deux fichiers portent l'information -- `Projet.Montant.AF.Aide_allouee.ANR` côté
+    projet, `Projet.Partenaire.Aide_allouee.ANR` côté partenaires -- et l'un ou l'autre peut
+    manquer selon l'ère du jeu. La somme des parts n'est utilisée QUE si le total global est
+    absent : additionner des parts partielles donnerait un total plus petit que le vrai,
+    présenté comme s'il était complet.
+    """
+    total = _amount(project.get("Projet.Montant.AF.Aide_allouee.ANR"))
+    if total is not None:
+        return total
+    parts = [_amount(row.get("Projet.Partenaire.Aide_allouee.ANR")) for row in partners]
+    known = [value for value in parts if value is not None]
+    return sum(known) if known and len(known) == len(parts) else None
+
+
+def _gtr_amount(project: dict[str, Any]) -> float | None:
+    """La subvention UKRI du projet : la somme des `grantOffer` de ses participants.
+
+    GtR ne publie pas de total au niveau du projet -- seulement la part offerte à chaque
+    organisation. La somme n'est renvoyée que si TOUS les participants portent la leur, pour
+    la même raison que côté ANR : un total incomplet est plus trompeur qu'une absence.
+    """
+    participants = ((project.get("participantValues") or {}).get("participant")) or []
+    if not participants:
+        return None
+    offers = [row.get("grantOffer") for row in participants]
+    if any(offer is None for offer in offers):
+        return None
+    try:
+        return float(sum(float(offer) for offer in offers))
+    except (TypeError, ValueError):
+        return None
+
+
 def _anr_project_label(project: dict[str, str], code: str) -> str:
     return (project.get("Projet.Acronyme") or "").strip() or code
 
@@ -579,6 +644,34 @@ def _gtr_scope(funder: str) -> str:
     return "europeen" if funder.strip().lower() in GTR_EUROPEAN_FUNDERS else "national"
 
 
+def _gtr_start(project: dict[str, Any]) -> str | None:
+    """La date de début d'un projet UKRI, en ISO, ou None.
+
+    `start` au niveau du projet n'est renseigné que sur une partie des fiches -- vérifié le
+    15/09/2026 sur les projets d'Oxford Lasers : aucun ne le porte. La période de financement,
+    elle, est toujours là, mais rangée dans le lien `FUND` et exprimée en millisecondes depuis
+    l'époque Unix. C'est la même information publiée par la même API, pas une reconstruction :
+    sans elle, aucun projet UKRI n'aurait de date et l'histogramme par année les ignorerait
+    tous.
+
+    La PLUS ANCIENNE des dates de financement quand il y en a plusieurs : un projet reconduit
+    porte plusieurs liens FUND, et c'est son début qu'on veut, pas celui de son avenant.
+    """
+    start = (project.get("start") or "").strip()
+    if start:
+        return start
+    stamps = [
+        link.get("start") for link in ((project.get("links") or {}).get("link") or [])
+        if link.get("rel") == "FUND" and isinstance(link.get("start"), (int, float))
+    ]
+    if not stamps:
+        return None
+    try:
+        return datetime.fromtimestamp(min(stamps) / 1000, tz=timezone.utc).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _gtr_partners(project: dict[str, Any]) -> list[dict[str, str]]:
     participants = ((project.get("participantValues") or {}).get("participant")) or []
     return [
@@ -594,13 +687,17 @@ def _collect_gtr(client: httpx.Client, aliases: dict[str, str], report: dict[str
     for actor_name, alias in aliases.items():
         try:
             organisation_ids = gtr_organisation_ids(client, actor_name, alias)
-        except Exception:
+        except Exception as error:
+            report.setdefault("gtr_skipped", []).append(f"{actor_name}: {type(error).__name__}")
             report["errors"] += 1
             continue
         for organisation_id in organisation_ids:
             try:
                 projects = gtr_projects_for_organisation(client, organisation_id)
-            except Exception:
+            except Exception as error:
+                # Le nom de l'acteur perdu, pas seulement un compteur : cet échec coûte tous
+                # les projets d'une organisation, et « errors: 2 » ne dit pas lesquels.
+                report.setdefault("gtr_skipped", []).append(f"{actor_name}: {type(error).__name__}")
                 report["errors"] += 1
                 continue
             for project in projects:
@@ -722,6 +819,9 @@ def _project_signal(
     funding_scope: str,
     funding_program: str,
     language: str,
+    project_start: str | None = None,
+    funding_amount: float | None = None,
+    funding_currency: str | None = None,
 ) -> tuple[int, int]:
     """Un axe technologique pour un projet, s'il est nommé dans son texte -- jamais autrement.
 
@@ -757,6 +857,9 @@ def _project_signal(
         source_title=source_title,
         funding_scope=funding_scope,
         funding_program=funding_program,
+        project_start=project_start,
+        funding_amount=funding_amount,
+        funding_currency=funding_currency,
     )
     source_added = upsert_fact_source(
         tech_db, "technology_signal_sources", signal_id,
@@ -814,6 +917,9 @@ def _write_anr(actors_db, tech_db, found: dict[str, dict[str, Any]], aliases: di
                 funding_scope="national",
                 funding_program=f"ANR — {program}" if program else "ANR",
                 language="fr",
+                project_start=_anr_start(project),
+                funding_amount=_anr_amount(project, entry["partners"]),
+                funding_currency="EUR",
             )
             report["signals_added"] += added
             report["signal_sources_added"] += source_added
@@ -840,7 +946,7 @@ def _write_gtr(actors_db, tech_db, found: dict[str, dict[str, Any]], aliases: di
                     # GtR ne renseigne `start` que pour une partie des projets (les projets
                     # Innovate UK anciens n'en ont pas) : pas de date plutôt qu'une date déduite
                     # de la date de création de la fiche.
-                    event_date=(project.get("start") or None),
+                    event_date=_gtr_start(project),
                     review_status="verified",
                 )
                 own_alias = aliases[actor_name]
@@ -863,6 +969,12 @@ def _write_gtr(actors_db, tech_db, found: dict[str, dict[str, Any]], aliases: di
                 funding_scope=scope,
                 funding_program=funder,
                 language="en",
+                project_start=_gtr_start(project),
+                funding_amount=_gtr_amount(project),
+                # UKRI finance en livres. La devise voyage avec le montant plutôt que d'être
+                # déduite du guichet à l'affichage : un total qui mélangerait euros et livres
+                # sans le dire serait un faux chiffre.
+                funding_currency="GBP",
             )
             report["signals_added"] += added
             report["signal_sources_added"] += source_added
@@ -934,7 +1046,14 @@ def collect_national_projects(*, include_sources: tuple[str, ...] = ("anr", "gtr
             report["errors"] += 1
     if "gtr" in include_sources:
         try:
-            with connector_client("api") as client:
+            # Profil "slow" et non "api" : GtR sert les projets d'une organisation par pages de
+            # cent, résumés complets inclus, et se met parfois à répondre en plusieurs dizaines
+            # de secondes. Deux ReadTimeout observés le 15/09/2026 sur TWI et Coherent, les deux
+            # organisations les mieux fournies -- non reproductibles dix minutes plus tard (213
+            # projets en 0,2 s), donc de la lenteur passagère côté serveur, pas un volume
+            # ingérable. Le coût d'un timeout est disproportionné : la passe abandonne TOUS les
+            # projets de l'organisation concernée, silencieusement.
+            with connector_client("slow") as client:
                 gtr_found = _collect_gtr(client, aliases, report)
         except Exception as error:
             report["gtr_error"] = str(error)[:300]

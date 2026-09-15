@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -106,6 +107,79 @@ class UpsertFactSourceTests(unittest.TestCase):
         with dbmod.connect(dbmod.MARKET_DB) as db, self.assertRaises(ValueError):
             upsert_fact_source(db, "evidence_sources; DROP TABLE evidence", 1,
                                source_url="u", quote="q", fingerprint="f")
+
+
+
+class TechnologySignalGapFillingTests(unittest.TestCase):
+    """upsert_technology_signal complète les colonnes vides d'un signal déjà connu, et ne
+    touche jamais à celles qui portent déjà une valeur.
+
+    Sans cette règle, ajouter une colonne à technology_signals ne sert à rien pour l'existant :
+    la ligne d'un projet déjà collecté n'est plus jamais réécrite. Constaté le 15/09/2026 en
+    ajoutant le montant et la date de début, restés NULL sur les treize projets en base après
+    une collecte complète.
+    """
+
+    def _signal(self, db, **kwargs):
+        defaults = dict(
+            fact_key="LIPSS|demo", axis="LIPSS", maturity_stage="Maturité industrielle non déterminée",
+            bucket="radar", actor_names=["ALPHANOV"], source_url="https://anr.fr/Projet-ANR-00-TEST-0001",
+            quote="Structuration par impulsions ultracourtes.", field_confidence=0.9,
+            project_name="DEMO",
+        )
+        defaults.update(kwargs)
+        return dbmod.upsert_technology_signal(db, **defaults)
+
+    def test_a_later_run_fills_columns_that_were_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = Path(tmp) / "technology.db"
+            with (
+                patch.object(dbmod, "ACTORS_DB", Path(tmp) / "actors.db"),
+                patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+                patch.object(dbmod, "TECH_DB", tech_db),
+            ):
+                dbmod.init_databases()
+
+            with dbmod.connect(tech_db) as db:
+                added, signal_id = self._signal(db)
+                self.assertEqual(1, added)
+                # Deuxième passage : la source publie désormais le montant et la date.
+                again, same_id = self._signal(
+                    db, project_start="2021-04-20", funding_amount=196748.85, funding_currency="EUR",
+                )
+            self.assertEqual(0, again)
+            self.assertEqual(signal_id, same_id)
+
+            with dbmod.connect(tech_db) as db:
+                row = db.execute(
+                    "SELECT project_start,funding_amount,funding_currency FROM technology_signals WHERE id=?",
+                    (signal_id,),
+                ).fetchone()
+            self.assertEqual("2021-04-20", row["project_start"])
+            self.assertAlmostEqual(196748.85, row["funding_amount"])
+            self.assertEqual("EUR", row["funding_currency"])
+
+    def test_an_existing_value_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_db = Path(tmp) / "technology.db"
+            with (
+                patch.object(dbmod, "ACTORS_DB", Path(tmp) / "actors.db"),
+                patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+                patch.object(dbmod, "TECH_DB", tech_db),
+            ):
+                dbmod.init_databases()
+
+            with dbmod.connect(tech_db) as db:
+                _, signal_id = self._signal(db, funding_amount=100.0, funding_currency="EUR")
+                self._signal(db, funding_amount=999.0, funding_currency="GBP")
+
+            with dbmod.connect(tech_db) as db:
+                row = db.execute(
+                    "SELECT funding_amount,funding_currency FROM technology_signals WHERE id=?",
+                    (signal_id,),
+                ).fetchone()
+            self.assertAlmostEqual(100.0, row["funding_amount"])
+            self.assertEqual("EUR", row["funding_currency"])
 
 
 if __name__ == "__main__":

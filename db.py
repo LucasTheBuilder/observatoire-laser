@@ -787,6 +787,49 @@ def _migrate_lei_out_of_registry_columns(db: sqlite3.Connection) -> None:
     )
 
 
+def _widen_demand_signal_types(db: sqlite3.Connection) -> None:
+    """demand_signals.signal_type gagne 'cofunding' (15/09/2026).
+
+    Un industriel qui met de l'argent dans un projet ANR de procédé laser achète cette
+    technologie, au même titre que celui qui publie un appel d'offres -- c'est le même signal
+    de DEMANDE, qui n'existait jusqu'ici que sous la forme d'un marché public (TED/BOAMP).
+    Le distinguer plutôt que le ranger sous 'tender' : un cofinancement n'est pas un appel
+    d'offres, et la page doit pouvoir le dire.
+
+    Même mécanique que _widen_actor_candidate_sources_type : SQLite ne sait pas ALTER un CHECK
+    existant, seule option reconstruire la table. Idempotent (contrôle le texte du CREATE TABLE
+    en base avant de reconstruire quoi que ce soit).
+    """
+    row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='demand_signals'"
+    ).fetchone()
+    if row is None or "'cofunding'" in (row["sql"] or ""):
+        return
+    db.executescript(
+        """
+        CREATE TABLE demand_signals_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_type TEXT NOT NULL CHECK(signal_type IN ('tender','hiring','cofunding')),
+            source TEXT NOT NULL,
+            buyer_name TEXT,
+            title TEXT NOT NULL,
+            published_at TEXT,
+            source_url TEXT NOT NULL,
+            fingerprint TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT
+        );
+        INSERT INTO demand_signals_new
+            (id,signal_type,source,buyer_name,title,published_at,source_url,fingerprint,created_at,last_seen_at)
+            SELECT id,signal_type,source,buyer_name,title,published_at,source_url,fingerprint,created_at,last_seen_at
+              FROM demand_signals;
+        DROP TABLE demand_signals;
+        ALTER TABLE demand_signals_new RENAME TO demand_signals;
+        CREATE INDEX IF NOT EXISTS demand_signals_published_idx ON demand_signals(published_at);
+        """
+    )
+
+
 def _widen_actor_candidate_sources_type(db: sqlite3.Connection) -> None:
     """actor_candidate_sources.source_type gagne 'patent' (connecteur EPO OPS, Lot 3 §3.4) --
     SQLite ne sait pas ALTER un CHECK existant : seule option, reconstruire la table. Idempotent
@@ -1778,7 +1821,7 @@ def _init_market_db() -> None:
             -- d'emploi des donneurs d'ordre) reste hors scope, aucune source vérifiée identifiée.
             CREATE TABLE IF NOT EXISTS demand_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                signal_type TEXT NOT NULL CHECK(signal_type IN ('tender','hiring')),
+                signal_type TEXT NOT NULL CHECK(signal_type IN ('tender','hiring','cofunding')),
                 source TEXT NOT NULL,
                 buyer_name TEXT,
                 title TEXT NOT NULL,
@@ -2123,6 +2166,22 @@ def _init_tech_db() -> None:
         # sont PAS rétro-remplies par une règle sur l'URL, c'est l'affichage qui documente le
         # défaut (voir app.tech_corpus, qui traite NULL comme européen et dit pourquoi).
         _add_columns(db, "technology_signals", {"funding_scope": "TEXT", "funding_program": "TEXT"})
+        # Combien, et depuis quand (15/09/2026). Deux manques que la page "Technologie laser"
+        # rendait visibles dès que les projets nationaux l'ont rejointe :
+        #
+        # - `project_start` : la date de début du projet vivait UNIQUEMENT dans actor_events,
+        #   rattachée à un acteur suivi (voir la note de app.tech_corpus, qui affichait faute de
+        #   mieux la date d'OBSERVATION). Un projet dont aucun participant n'est suivi n'avait
+        #   donc aucune date, et le corpus ne pouvait pas se filtrer par année.
+        # - `funding_amount`/`funding_currency` : le montant est publié par les trois sources
+        #   (ecMaxContribution chez CORDIS, Aide_allouee chez l'ANR, grantOffer chez UKRI) et
+        #   n'était lu par aucune. La devise est stockée à côté du montant plutôt que déduite du
+        #   guichet : additionner des euros et des livres sans le dire serait un faux total.
+        _add_columns(db, "technology_signals", {
+            "project_start": "TEXT",
+            "funding_amount": "REAL",
+            "funding_currency": "TEXT",
+        })
         _normalize_technology_axes(db)
         # Après les alias (un libellé renommé n'est pas inconnu) et avant la déduction des
         # dimensions (inutile de ranger une ligne qu'on va supprimer).
@@ -2747,6 +2806,9 @@ def upsert_technology_signal(
     dimension: str = "process_technology",
     funding_scope: str | None = None,
     funding_program: str | None = None,
+    project_start: str | None = None,
+    funding_amount: float | None = None,
+    funding_currency: str | None = None,
 ) -> tuple[int, int]:
     """Insère un signal technologique, ou fusionne ses acteurs s'il existe déjà.
 
@@ -2760,14 +2822,22 @@ def upsert_technology_signal(
 
     ``funding_scope``/``funding_program`` ne concernent que les signaux de projet : d'où vient
     l'argent ('europeen'/'national'/'regional') et sous quel nom ('ANR — ASTRID', 'Innovate UK').
-    Un signal de document les laisse à NULL -- une publication n'a pas de guichet.
+    Un signal de document les laisse à NULL -- une publication n'a pas de guichet. Même chose
+    pour ``project_start`` (date de début, telle que la source la publie) et pour le couple
+    ``funding_amount``/``funding_currency``, qui vont toujours ensemble : un montant sans sa
+    devise ne se compare à rien.
 
     Renvoie ``(1 si créé sinon 0, id du signal)``. L'écriture de la ligne de preuve associée
     (technology_signal_sources) reste à l'appelant : CORDIS en écrit une, la passe documentaire
     non.
     """
     stamp = utc_now()
-    row = db.execute("SELECT id,actor_names FROM technology_signals WHERE fact_key=?", (fact_key,)).fetchone()
+    row = db.execute(
+        """SELECT id,actor_names,funding_scope,funding_program,project_start,funding_amount,
+                  funding_currency
+             FROM technology_signals WHERE fact_key=?""",
+        (fact_key,),
+    ).fetchone()
     if row:
         signal_id = int(row["id"])
         if actor_names:
@@ -2776,19 +2846,41 @@ def upsert_technology_signal(
                 "UPDATE technology_signals SET actor_names=?,updated_at=?,last_seen_at=? WHERE id=?",
                 (json.dumps(merged, ensure_ascii=False), stamp, stamp, signal_id),
             )
+        # Complète ce qui manque, n'écrase jamais ce qui est là. Ajouter une colonne à cette
+        # table ne servirait à rien sans ça : la ligne d'un projet déjà collecté ne serait plus
+        # jamais touchée, et la nouvelle information n'arriverait que sur les projets futurs --
+        # constaté le 15/09/2026 en ajoutant le montant et la date de début, qui sont restés
+        # NULL sur les treize projets déjà en base après une collecte complète.
+        #
+        # Le sens unique (NULL -> valeur, jamais valeur -> autre valeur) est délibéré : c'est la
+        # même règle que `reviewed_at IS NULL` ailleurs dans ce module. Un collecteur comble un
+        # trou ; il ne révise pas un fait déjà écrit, et surtout pas une décision humaine.
+        missing = {
+            "funding_scope": funding_scope, "funding_program": funding_program,
+            "project_start": project_start, "funding_amount": funding_amount,
+            "funding_currency": funding_currency,
+        }
+        filled = {name: value for name, value in missing.items() if value is not None and row[name] is None}
+        if filled:
+            assignments = ",".join(f"{name}=?" for name in filled)
+            db.execute(
+                f"UPDATE technology_signals SET {assignments},updated_at=? WHERE id=?",
+                (*filled.values(), stamp, signal_id),
+            )
         return 0, signal_id
     new_id = db.execute(
         """INSERT INTO technology_signals(
                axis,maturity_stage,bucket,project_name,actor_names,source_url,source_title,quote,
                fact_key,fingerprint,review_status,field_confidence,dimension,funding_scope,funding_program,
-               created_at,updated_at,last_seen_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?,?,?,?,?)""",
+               project_start,funding_amount,funding_currency,created_at,updated_at,last_seen_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?,?,?,?,?,?,?,?)""",
         (
             axis, maturity_stage, bucket, project_name,
             json.dumps(sorted(set(actor_names)), ensure_ascii=False),
             source_url, source_title, quote, fact_key,
             hashlib.sha256(fact_key.encode()).hexdigest(), field_confidence, dimension,
-            funding_scope, funding_program, stamp, stamp, stamp,
+            funding_scope, funding_program, project_start, funding_amount, funding_currency,
+            stamp, stamp, stamp,
         ),
     ).lastrowid
     assert new_id is not None  # garanti par sqlite3 juste après un INSERT AUTOINCREMENT réussi

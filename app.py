@@ -1872,7 +1872,8 @@ def tech_corpus() -> list[dict[str, Any]]:
     signals = rows(
         TECH_DB,
         """SELECT id,axis,dimension,maturity_stage,bucket,project_name,actor_names,source_url,
-                  funding_scope,funding_program,created_at
+                  funding_scope,funding_program,project_start,funding_amount,funding_currency,
+                  created_at
            FROM technology_signals
            WHERE review_status='accepted'
            ORDER BY created_at DESC,id""",
@@ -1913,6 +1914,9 @@ def tech_corpus() -> list[dict[str, Any]]:
             # dans db.py, qui a délibérément choisi de ne pas rétro-remplir la colonne).
             "funding_scope": signal["funding_scope"] or "europeen",
             "funding_program": signal["funding_program"],
+            "project_start": signal["project_start"],
+            "funding_amount": signal["funding_amount"],
+            "funding_currency": signal["funding_currency"],
         })
         _add_family(group, signal)
         for actor in _corpus_actor_names(signal["actor_names"]):
@@ -1941,10 +1945,12 @@ def tech_corpus() -> list[dict[str, Any]]:
             "kind": "brevet" if is_patent else ("pub" if document["document_type"] == "publication" else "autre"),
             "title": document["title"],
             "reference": reference,
-            # Un document n'a pas de guichet de financement -- les deux clés existent quand
-            # même pour que le front n'ait pas à distinguer deux formes d'entrée de corpus.
+            # Un document n'a pas de guichet de financement -- les clés existent quand même
+            # pour que le front n'ait pas à distinguer deux formes d'entrée de corpus.
             "funding_scope": None,
             "funding_program": None,
+            "funding_amount": None,
+            "funding_currency": None,
             "axes": qualified.get("axes", []),
             "families": qualified.get("families", {}),
             "actors": [document["actor_name"]] if document["actor_name"] else [],
@@ -1978,15 +1984,19 @@ def tech_corpus() -> list[dict[str, Any]]:
             # calcule côté serveur pour que la même convention serve l'API et l'UI.
             "funding_scope": group["funding_scope"],
             "funding_program": group["funding_program"],
+            "funding_amount": group["funding_amount"],
+            "funding_currency": group["funding_currency"],
             "axes": group["axes"],
             "families": group["families"],
             "actors": group["actors"],
             "maturity": group["maturity"],
-            # CORDIS expose bien une période de projet, mais cordis.py ne la garde que dans
-            # actor_events (actors.db), rattachée à un acteur suivi -- pas au signal. Un projet
-            # dont aucun participant n'est suivi n'a donc aucune date de projet en base. On
-            # affiche la date d'observation plutôt qu'une période inventée.
-            "published_at": None,
+            # La date de DÉBUT du projet, telle que son guichet la publie (colonne
+            # technology_signals.project_start depuis le 15/09/2026). Auparavant elle ne vivait
+            # que dans actor_events, rattachée à un acteur suivi : un projet dont aucun
+            # participant n'était suivi n'avait aucune date, et cette clé valait None faute de
+            # mieux. Elle reste None pour les projets dont la source ne publie pas de date --
+            # UKRI ne la renseigne pas sur tous ses projets --, jamais une date reconstruite.
+            "published_at": group["project_start"],
             "observed_at": group["observed_at"],
             "source_url": url,
             "signal_ids": group["signal_ids"],
