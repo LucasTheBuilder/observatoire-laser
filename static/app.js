@@ -947,6 +947,25 @@ const TC_TAB_KIND = {Publications: "pub", Brevets: "brevet", Projets: "projet"};
 // Libellés de la facette FINANCEMENT. Les clés sont celles servies par /api/tech-corpus
 // (technology_signals.funding_scope) ; une publication n'en a pas et ne rejoint pas la facette.
 const TC_SCOPE_LABELS = {europeen: "Européen", national: "National", regional: "Régional"};
+
+// Raccourci d'accès à la facette FINANCEMENT depuis l'onglet Projets : la même colonne de
+// facettes la propose déjà (voir TC_FACET_GROUPS), mais y accéder demande de repérer un groupe
+// parmi neuf. Un menu déroulant à un seul choix, posé juste à côté de l'onglet, couvre le cas
+// d'usage le plus fréquent (choisir un guichet) sans dupliquer le filtrage : il écrit dans la
+// même state.techFacets.funding que la colonne de gauche, donc les deux contrôles restent
+// synchronisés en toutes circonstances.
+function tcScopeSelectHtml(activeFunding) {
+  const current = activeFunding[0] || "";
+  // La facette FINANCEMENT (TC_FACET_GROUPS) stocke le LIBELLÉ ("Européen"), pas la clé brute
+  // ("europeen") : valuesOf() traduit déjà via TC_SCOPE_LABELS avant que la valeur n'entre dans
+  // state.techFacets.funding. Ce menu doit donc utiliser le même libellé comme value d'option,
+  // sous peine de poser un filtre qu'aucune ligne ne peut jamais satisfaire.
+  const labels = Object.values(TC_SCOPE_LABELS);
+  return `<select class="ex-scope-select" data-ex-scope-select aria-label="Filtrer les projets par guichet de financement">
+    <option value=""${current ? "" : " selected"}>Tous les guichets</option>
+    ${labels.map(label => `<option value="${esc(label)}"${label === current ? " selected" : ""}>${esc(label)}</option>`).join("")}
+  </select>`;
+}
 // Mots-clés proposés sous la barre de recherche. Pris dans le vocabulaire réellement présent
 // en base (axes du lexique fermé) plutôt que des exemples décoratifs : une suggestion qui ne
 // ramène rien apprend à l'utilisateur que la recherche ne marche pas.
@@ -1352,6 +1371,7 @@ function renderTechCorpus() {
       <div class="ex-results">
         <div class="ex-tabs">
           ${TC_TYPE_TABS.map(tab => `<button type="button" class="ex-tab${tab === state.techType ? " is-active" : ""}" data-ex-tab="${esc(tab)}">${esc(tab)}</button>`).join("")}
+          ${state.techType === "Projets" ? tcScopeSelectHtml(state.techFacets.funding || []) : ""}
           <span class="ex-tab-spacer"></span>
           <span class="ex-count">${countLabel}</span>
         </div>
@@ -1384,6 +1404,12 @@ function renderTechCorpus() {
     // depuis la facette TYPE serait de remonter jusqu'aux onglets.
     state.techType = state.techType === el.dataset.exTab ? "Tous" : el.dataset.exTab;
   })));
+  document.querySelector("[data-ex-scope-select]")?.addEventListener("change", event => {
+    const value = event.target.value;
+    state.techFacets = {...state.techFacets, funding: value ? [value] : []};
+    state.techLimit = TC_PAGE_SIZE;
+    renderTechCorpus();
+  });
   document.querySelectorAll("[data-ex-suggest]").forEach(el => el.addEventListener("click",
     rerender(() => { state.techQuery = el.dataset.exSuggest; })));
   document.querySelector("[data-ex-clear]")?.addEventListener("click", rerender(() => { state.techQuery = ""; }));
