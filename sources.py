@@ -34,6 +34,15 @@ class SourceInfo:
     purpose: str
     target: str
     env_vars: tuple[str, ...] = ()
+    # Ce que cette source apporte AU CORPUS de la page Technologie laser, dans le vocabulaire
+    # du lecteur et non dans celui du schéma : « publication scientifique », « projet européen »,
+    # « projet national », « brevet ». None = la source ne nourrit pas cette page (identité
+    # d'entreprise, appels d'offres, presse...), et elle n'y apparaît donc pas.
+    #
+    # Déclaré plutôt que déduit de `target` : « technology.db (technology_signals) » dit dans
+    # quelle TABLE ça tombe, jamais si c'est un projet ou un brevet -- et c'est la seconde
+    # question que se pose quelqu'un qui lit la page.
+    technology_role: str | None = None
 
     @property
     def requires_key(self) -> bool:
@@ -68,6 +77,7 @@ SOURCES: tuple[SourceInfo, ...] = (
         module="scrapers.py",
         purpose="Publications récentes sur des requêtes thématiques génériques (non attribuées à un acteur).",
         target="technology.db (documents)",
+        technology_role="publication scientifique",
     ),
     SourceInfo(
         id="openalex",
@@ -77,6 +87,7 @@ SOURCES: tuple[SourceInfo, ...] = (
         purpose="Publications rattachées à l'institution d'un acteur (vérifiée par domaine).",
         target="technology.db (documents), actors.db (actor_candidates)",
         env_vars=("OPENALEX_API_KEY",),
+        technology_role="publication scientifique",
     ),
     SourceInfo(
         id="cordis",
@@ -85,6 +96,7 @@ SOURCES: tuple[SourceInfo, ...] = (
         module="cordis.py",
         purpose="Projets européens (3 programmes-cadres, 2007-2027) : participations, partenaires de consortium, axes technologiques.",
         target="actors.db (actor_events, actor_relations), technology.db (technology_signals)",
+        technology_role="projet européen",
     ),
     SourceInfo(
         id="hal",
@@ -93,6 +105,7 @@ SOURCES: tuple[SourceInfo, ...] = (
         module="hal.py",
         purpose="Archive ouverte française, recherche thématique (topic-scoped, comme Crossref) -- complète Crossref/OpenAlex sur les dépôts français.",
         target="technology.db (unlinked_documents)",
+        technology_role="publication scientifique",
     ),
     SourceInfo(
         id="arxiv",
@@ -101,14 +114,19 @@ SOURCES: tuple[SourceInfo, ...] = (
         module="arxiv_feed.py",
         purpose="Préprints physics.optics, recherche thématique (topic-scoped) -- signal plus précoce qu'une publication indexée. Format non re-vérifié en direct (429 persistant à l'écriture du connecteur, voir arxiv_feed.py).",
         target="technology.db (unlinked_documents)",
+        technology_role="publication scientifique",
     ),
     SourceInfo(
         id="anr",
         name="ANR (+ ASTRID, PIA, France 2030)",
-        domain="data.enseignementsup-recherche.gouv.fr",
+        # data.enseignementsup-recherche.gouv.fr jusqu'au 15/09/2026 : c'était une ARCHIVE
+        # figée en 2016 qui répondait 200 sans le dire. Les deux jeux que l'ANR publie
+        # elle-même (ANR_01, ANR_02) sont republiés le 1er de chaque mois.
+        domain="data.gouv.fr (jeux ANR_01 et ANR_02)",
         module="national_projects.py",
         purpose="Projets financés nationaux (France) que CORDIS ne voit pas -- guichet ANR et programmes qu'elle opère pour d'autres.",
         target="actors.db (actor_events, actor_relations), technology.db (technology_signals)",
+        technology_role="projet national",
     ),
     SourceInfo(
         id="ukri_gtr",
@@ -117,6 +135,7 @@ SOURCES: tuple[SourceInfo, ...] = (
         module="national_projects.py",
         purpose="Projets financés nationaux (UK) : Innovate UK, EPSRC, STFC et les autres conseils.",
         target="actors.db (actor_events, actor_relations), technology.db (technology_signals)",
+        technology_role="projet national",
     ),
     SourceInfo(
         id="gleif",
@@ -158,6 +177,7 @@ SOURCES: tuple[SourceInfo, ...] = (
         purpose="Brevets par déposant suivi et par classe CPC B23K26 (signal le plus précoce, 18 mois d'avance).",
         target="technology.db (documents), actors.db (actor_candidates)",
         env_vars=("EPO_OPS_KEY", "EPO_OPS_SECRET"),
+        technology_role="brevet",
     ),
     SourceInfo(
         id="wayback_cdx",
@@ -210,6 +230,32 @@ SOURCES: tuple[SourceInfo, ...] = (
         target="(non implémenté)",
     ),
 )
+
+
+def technology_sources() -> list[dict]:
+    """Les sources qui nourrissent le corpus de la page Technologie laser, dans l'ordre du
+    registre (publications, puis projets, puis brevets).
+
+    Vue plus courte que list_sources() : la page n'a rien à dire de GLEIF ni des registres
+    d'entreprises, qui ne touchent jamais son corpus. `status` vient du même calcul que
+    l'autre vue -- une clé ajoutée dans .env se voit au rechargement suivant, ce qui est
+    précisément ce qu'on veut lire quand une source affiche zéro.
+    """
+    return [
+        {
+            "id": s.id,
+            "name": s.name,
+            "domain": s.domain,
+            "role": s.technology_role,
+            "module": s.module,
+            "purpose": s.purpose,
+            "requires_key": s.requires_key,
+            "env_vars": list(s.env_vars),
+            "status": s.status,
+        }
+        for s in SOURCES
+        if s.technology_role
+    ]
 
 
 def list_sources() -> list[dict]:

@@ -477,3 +477,44 @@ button.ex-row:last-child { border-bottom: 0; }
   .ex-doc { grid-column: 1 / -1; }
   .ex-date { text-align: left; padding-top: 0; }
 }
+
+/* --- Sources et bases interrogées, en bas de la page Technologie laser -----------------------
+   Même carte que le bloc de lecture au-dessus (fond teinté, filet haut) parce que les deux
+   répondent à la même famille de questions : d'où vient ce corpus, et que vaut-il. La
+   différence est la forme -- celui-ci est une TABLE de faits, pas une prose d'analyse, donc
+   une grille alignée plutôt que du Spectral au fil du texte. */
+.ex-sources-group + .ex-sources-group { margin-top: 16px; }
+.ex-sources-role {
+  font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--ex-label); padding-bottom: 5px; border-bottom: 1px solid var(--ex-line);
+}
+.ex-source {
+  display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.5fr) auto 84px;
+  gap: 14px; align-items: baseline; padding: 7px 0;
+  border-bottom: 1px solid var(--ex-line); font-size: 13px;
+}
+.ex-source:last-child { border-bottom: none; }
+.ex-source-name { color: var(--ex-ink); font-weight: 500; }
+.ex-source-domain {
+  color: var(--ex-ink-3); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ex-source-count { color: var(--ex-ink-2); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; }
+.ex-source-count b { color: var(--ex-ink); font-weight: 600; }
+.ex-source-status {
+  justify-self: end; font-size: 10.5px; letter-spacing: .4px; padding: 2px 8px; border-radius: 999px;
+  white-space: nowrap;
+}
+.ex-source-status.ok { background: var(--ex-accent-soft); color: var(--ex-accent-dark); }
+.ex-source-status.warn { background: #f7ece2; color: #8a5320; }
+.ex-sources-note {
+  margin-top: 14px !important; padding-top: 12px; border-top: 1px solid var(--ex-line);
+  font-size: 12.5px !important; color: var(--ex-ink-3) !important;
+}
+
+@media (max-width: 760px) {
+  .ex-source { grid-template-columns: minmax(0, 1fr) auto; row-gap: 3px; }
+  .ex-source-domain { grid-column: 1; }
+  .ex-source-count { grid-column: 2; grid-row: 1; }
+  .ex-source-status { grid-column: 2; grid-row: 2; }
+}

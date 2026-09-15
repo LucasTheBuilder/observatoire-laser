@@ -115,7 +115,7 @@ from review_queue import (
 )
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
 from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
-from sources import list_sources
+from sources import list_sources, technology_sources
 from timeseries import capture_metric_snapshot
 from veille_metrics import VEILLE_METRICS_THRESHOLDS, capture_veille_metrics
 from wayback_retrodating import retrodate_evidence_sources
@@ -1995,6 +1995,78 @@ def tech_corpus() -> list[dict[str, Any]]:
 
     corpus.sort(key=lambda row: _corpus_sort_key(row["published_at"] or row["observed_at"]), reverse=True)
     return corpus
+
+
+# Ce que chaque source a réellement mis dans le corpus, compté à l'appel. Le registre
+# (sources.py) dit qui est interrogé et avec quelle clé ; ces requêtes disent ce que ça donne,
+# et les deux ensemble répondent à la seule question qui compte en bas de page : cette source
+# sert-elle à quelque chose aujourd'hui ?
+#
+# Le rattachement se lit sur l'URL, faute d'une colonne qui nommerait le collecteur. C'est
+# suffisant parce que les hôtes sont disjoints, et c'est ici qu'il faut ajouter un motif quand
+# un collecteur arrive -- pas dans le front, qui ne doit rien savoir de tout ça.
+#
+# HAL essaime sur ses sous-domaines (hal.science, theses.hal.science, ujm.hal.science,
+# cnrs.hal.science, amu.hal.science) et sur l'ancien hébergement CCSD : les trois motifs
+# couvrent les 21 dépôts observés le 15/09/2026, là où « hal. » seul en manquait neuf.
+_TECHNOLOGY_SOURCE_COUNTS: dict[str, tuple[str, str]] = {
+    "openalex": (
+        "publications au corpus",
+        "SELECT COUNT(*) FROM documents WHERE document_type='publication' AND curated_by IS NULL",
+    ),
+    "crossref": (
+        "en file hors roster",
+        "SELECT COUNT(*) FROM unlinked_documents WHERE source_url LIKE '%doi.org%'",
+    ),
+    "hal": (
+        "en file hors roster",
+        "SELECT COUNT(*) FROM unlinked_documents WHERE source_url LIKE '%hal.science%'"
+        " OR source_url LIKE '%ccsd.cnrs.fr%' OR source_url LIKE '%archives-ouvertes%'",
+    ),
+    "arxiv": (
+        "en file hors roster",
+        "SELECT COUNT(*) FROM unlinked_documents WHERE source_url LIKE '%arxiv.org%'",
+    ),
+    "cordis": (
+        "projets",
+        "SELECT COUNT(DISTINCT project_name) FROM technology_signals"
+        " WHERE source_url LIKE '%cordis.europa.eu%'",
+    ),
+    "anr": (
+        "projets",
+        "SELECT COUNT(DISTINCT project_name) FROM technology_signals WHERE source_url LIKE '%anr.fr%'",
+    ),
+    "ukri_gtr": (
+        "projets",
+        "SELECT COUNT(DISTINCT project_name) FROM technology_signals"
+        " WHERE source_url LIKE '%gtr.ukri.org%'",
+    ),
+    "epo_ops": (
+        "brevets",
+        "SELECT COUNT(*) FROM documents WHERE document_type='patent'",
+    ),
+}
+
+
+@app.get("/api/tech-corpus/sources")
+def tech_corpus_sources() -> list[dict[str, Any]]:
+    """Les sources interrogées pour la page Technologie laser, et ce qu'elles y ont mis.
+
+    Deux moitiés, et il faut les deux : le registre déclaratif (sources.py) porte le nom, le
+    domaine, le module et l'état de la clé ; la base porte le compte. Une source à zéro ne dit
+    rien par elle-même -- zéro avec `missing_key` est un branchement qui attend une clé, zéro
+    avec `active` est une source interrogée qui n'a rien trouvé, et ce n'est pas le même
+    travail à faire.
+    """
+    counted: list[dict[str, Any]] = []
+    for source in technology_sources():
+        unit, query = _TECHNOLOGY_SOURCE_COUNTS.get(source["id"], ("", ""))
+        counted.append({
+            **source,
+            "count": scalar(TECH_DB, query) if query else None,
+            "count_unit": unit,
+        })
+    return counted
 
 
 @app.get("/api/tech-corpus/proofs")

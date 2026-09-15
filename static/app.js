@@ -51,6 +51,10 @@ const state = {
   // en une seule liste, servie par /api/tech-corpus. Le filtrage est entièrement client --
   // le corpus se compte en dizaines de lignes, pas en milliers.
   techCorpus: [],
+  // Registre des sources interrogées pour cette page (sources.py) + ce que chacune a mis en
+  // base. Tranche à part de `techCorpus` : elle ne bouge qu'entre deux collectes, là où le
+  // corpus se refiltre à chaque frappe.
+  techSources: [],
   techQuery: "",
   techType: "Tous",
   // Facettes cumulatives : plusieurs valeurs cochées dans un même groupe s'unissent (OU),
@@ -1162,6 +1166,66 @@ function tcSplitFacetGroups(corpus) {
 // tête de chaque ligne, à dire qu’elle est vide.
 const TC_ROW_PRIMARY = ["operation", "material", "market", "component"];
 
+// Les sources interrogées, en bas de page. Demandé par Lucas le 15/09/2026, et ça répond à une
+// question que la page posait sans y répondre : d'où vient tout ça ?
+//
+// Deux moitiés viennent de deux endroits, et il faut les deux. Le NOM, le domaine et l'état de
+// la clé viennent du registre déclaratif (sources.py) ; le COMPTE vient de la base. Un zéro ne
+// veut rien dire seul : zéro avec une clé manquante est un branchement qui attend une clé,
+// zéro avec une source active est une source interrogée qui n'a rien trouvé -- et ce n'est pas
+// le même travail à faire. L'état est donc dit, jamais laissé à deviner.
+const TC_SOURCE_STATUS = {
+  active: {label: "interrogée", tone: "ok"},
+  configured: {label: "interrogée", tone: "ok"},
+  missing_key: {label: "clé absente", tone: "warn"},
+  not_implemented: {label: "non branchée", tone: "warn"},
+};
+
+// L'ordre de lecture : ce qui remplit le corpus d'abord, ce qui l'attend ensuite. À l'intérieur
+// d'un type, le compte décroissant -- une source qui rapporte se lit avant une source muette.
+//
+// Le pluriel est ÉCRIT, jamais fabriqué en collant un « s » : le français n'y survit pas
+// (« projet national » donne « projets nationaux », pas « projet nationals »), et l'accord
+// porte sur les deux mots.
+const TC_SOURCE_ROLES = [
+  {role: "publication scientifique", plural: "Publications scientifiques"},
+  {role: "projet européen", plural: "Projets européens"},
+  {role: "projet national", plural: "Projets nationaux"},
+  {role: "brevet", plural: "Brevets"},
+];
+
+function tcSourcesBlock(sources) {
+  if (!sources.length) return "";
+  const groups = TC_SOURCE_ROLES
+    .map(({role, plural}) => [plural, sources.filter(s => s.role === role).sort((a, b) => (b.count || 0) - (a.count || 0))])
+    .filter(([, list]) => list.length);
+  const rows = groups.map(([plural, list]) => `
+    <div class="ex-sources-group">
+      <div class="ex-sources-role">${esc(plural)}</div>
+      ${list.map(source => {
+        const status = TC_SOURCE_STATUS[source.status] || {label: source.status, tone: "warn"};
+        const count = source.count === null || source.count === undefined
+          ? ""
+          : `<b>${source.count}</b> ${esc(source.count_unit || "")}`;
+        return `<div class="ex-source">
+          <span class="ex-source-name">${esc(source.name)}</span>
+          <span class="ex-source-domain">${esc(source.domain)}</span>
+          <span class="ex-source-count">${count}</span>
+          <span class="ex-source-status ${esc(status.tone)}">${esc(status.label)}</span>
+        </div>`;
+      }).join("")}
+    </div>`).join("");
+  const waiting = sources.filter(s => s.status === "missing_key" || s.status === "not_implemented");
+  const note = waiting.length
+    ? `<p class="ex-sources-note">${esc(waiting.map(s => s.name).join(", "))} ${waiting.length > 1 ? "attendent" : "attend"}
+       ${esc(waiting.flatMap(s => s.env_vars).join(", ") || "un connecteur")} : le collecteur existe, il ne peut pas interroger.</p>`
+    : "";
+  return `<div class="ex-reading ex-sources">
+    <div class="ex-reading-title">SOURCES ET BASES INTERROGÉES</div>
+    ${rows}${note}
+  </div>`;
+}
+
 function tcCorpusRow(row) {
   // Ce qu’on vient lire d’abord passe en accent ; procédé, capacité machine et architecture
   // suivent en gris. Deux manques distincts, et la distinction compte pour la file de
@@ -1301,6 +1365,7 @@ function renderTechCorpus() {
     </div>
 
     ${tcCorpusReading(corpus)}
+    ${tcSourcesBlock(state.techSources || [])}
   </div></div>`;
 
   const input = document.querySelector("#ex-search");
@@ -2952,6 +3017,7 @@ const LOADERS = {
   technologySignals: () => api("/api/technology-signals"),
   documents:         () => api("/api/documents?limit=500"),
   techCorpus:        () => api("/api/tech-corpus"),
+  techSources:       () => api("/api/tech-corpus/sources"),
   actors:            () => api("/api/actors"),
   profiles:          () => api("/api/profiles"),
   marketReview:      () => api("/api/market/review"),
@@ -2980,7 +3046,7 @@ const VIEW_DEPS = {
   monthly:           ["overview", "monthly", "market", "actors", "technologySignals", "collectionHealth"],
   market:            ["overview", "market", "marketScores", "marketSizing", "referenceMatrix", "demandSignals"],
   offers:            ["overview", "offers"],
-  techcorpus:        ["overview", "techCorpus"],
+  techcorpus:        ["overview", "techCorpus", "techSources"],
   // market/offers/documents ne servent pas à la grille elle-même mais à la fiche détail
   // (showActorDetail -> actorDetailContent), ouverte depuis cette grille : sans eux la fiche
   // s'afficherait sans capacités, marchés ni publications.
