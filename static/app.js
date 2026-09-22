@@ -1413,6 +1413,12 @@ const TC_TREND_MIN_VOLUME = 8;
 // dans la sélection, jamais d'une année écrite en dur : la page doit encore dire vrai dans
 // trois ans, et une sélection peut s'arrêter en 2019 (facette d'année, corpus filtré).
 const TC_TREND_RECENT_SPAN = 3;
+// Seuil PROPRE au classement des niches, et volontairement plus bas que celui de
+// l'accélération : là-bas on affiche un RATIO, qu'une poignée d'entrées rend absurde (2 sur 2
+// font 100 %) ; ici on affiche un COMPTE d'acteurs, qui ne s'emballe pas sur un petit volume.
+// Mesuré sur le corpus du 22/09/2026 : à 8 entrées, le classement perd Polissage (2 acteurs,
+// 7 entrées) et Saphir (3 acteurs, 7) -- exactement les niches qu'il est censé montrer.
+const TC_NICHE_MIN_VOLUME = 5;
 
 function tcEntryYear(row) {
   const year = Number(String(row.published_at || "").slice(0, 4));
@@ -1478,6 +1484,34 @@ function tcTrends(rows) {
       `${label} — ${entry.recent} entrée(s) depuis ${recentFrom} sur ${entry.total} datées`),
   ).join("");
 
+  // Combien d'acteurs DISTINCTS travaillent chaque famille -- la question que ni les facettes
+  // ni les deux classements ci-dessus ne posent. Elles disent ce qui est gros et ce qui monte ;
+  // aucune ne dit ce qui est VIDE, alors que c'est la lecture qui change une décision : un axe
+  // qui accélère avec quinze acteurs dessus est une mêlée, un axe actif à deux acteurs est une
+  // porte ouverte.
+  //
+  // Le volume est retenu à côté du compte, et la barre l'encode : c'est la lecture croisée qui
+  // vaut quelque chose. Barre longue + petit nombre = un sujet réel que peu de monde traite.
+  // Un compte d'acteurs seul ne distinguerait pas ce cas d'un axe simplement inexploré.
+  const nicheStats = new Map();
+  for (const row of rows) {
+    for (const label of new Set(Object.values(row.families || {}).flat())) {
+      const entry = nicheStats.get(label) || {volume: 0, actors: new Set()};
+      entry.volume += 1;
+      for (const actor of row.actors || []) if (actor) entry.actors.add(actor);
+      nicheStats.set(label, entry);
+    }
+  }
+  const niches = [...nicheStats.entries()]
+    .filter(([, entry]) => entry.volume >= TC_NICHE_MIN_VOLUME && entry.actors.size)
+    .map(([label, entry]) => [label, entry.actors.size, entry.volume])
+    .sort((a, b) => a[1] - b[1] || b[2] - a[2] || a[0].localeCompare(b[0]));
+  const nichePeak = niches.length ? Math.max(...niches.map(n => n[2])) : 1;
+  const nicheRows = niches.slice(0, 6).map(([label, count, volume]) =>
+    bar(label, `${count} acteur(s)`, volume / nichePeak,
+      `${label} — ${count} acteur(s) distinct(s) sur ${volume} entrée(s)`),
+  ).join("");
+
   return `<div class="ex-trends">
     <section class="ex-trend">
       <div class="ex-trend-head">
@@ -1497,6 +1531,16 @@ function tcTrends(rows) {
       ${familyRows || `<p class="ex-trend-empty">Aucune famille n'atteint ${TC_TREND_MIN_VOLUME} entrées datées dans cette sélection — en dessous, une part récente ne veut rien dire.</p>`}
       ${familyRows
         ? `<p class="ex-trend-foot">Part des entrées datées depuis ${recentFrom}, sur les familles d'au moins ${TC_TREND_MIN_VOLUME} entrées. ${dated.length} entrée(s) datée(s) sur ${rows.length}.</p>`
+        : ""}
+    </section>
+    <section class="ex-trend">
+      <div class="ex-trend-head">
+        <span class="ex-trend-title">Familles les moins disputées</span>
+        <span class="ex-trend-hint">acteurs distincts</span>
+      </div>
+      ${nicheRows || `<p class="ex-trend-empty">Aucune famille n'atteint ${TC_NICHE_MIN_VOLUME} entrées dans cette sélection.</p>`}
+      ${nicheRows
+        ? `<p class="ex-trend-foot">Familles d'au moins ${TC_NICHE_MIN_VOLUME} entrées, les moins peuplées d'abord. La barre montre le volume d'entrées, pas le nombre d'acteurs : barre longue et petit nombre = un sujet actif que peu d'acteurs traitent.</p>`
         : ""}
     </section>
   </div>`;
