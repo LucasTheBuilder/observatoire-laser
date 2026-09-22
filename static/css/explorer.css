@@ -47,8 +47,13 @@ main.ex-host {
 }
 
 .ex-page {
-  max-width: 1240px;
-  margin: 0 auto;
+  /* Plus de plafond : la page occupe toute la largeur disponible a droite du menu (demande du
+   * 22/09/2026). Le cap de 1240 px laissait des centaines de pixels inutilises sur un ecran
+   * large, et c'est ce qui forcait les cartes de tendance a se replier sur deux rangs alors que
+   * la place existait. Les blocs de PROSE gardent leur propre largeur (voir .ex-lede) : une
+   * ligne de texte de 1800 px ne se lit pas, alors qu'un tableau ou une grille de cartes, si. */
+  max-width: none;
+  margin: 0;
   background: var(--ex-surface);
   border: 1px solid rgba(0, 0, 0, .08);
   border-radius: 8px;

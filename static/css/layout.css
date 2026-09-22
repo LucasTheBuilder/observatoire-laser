@@ -24,7 +24,10 @@ nav{display:flex;flex-direction:column;gap:7px;margin-top:26px}
 .sidebar-foot>i{display:inline-block;width:7px;height:7px;border-radius:50%;background:#7ecf84;margin-right:8px;box-shadow:0 0 0 4px #244839}
 .sidebar-foot small{display:block;color:#708f9b;margin:5px 0 0 15px}
 
-main{grid-column:2;padding:54px clamp(28px,5vw,80px) 90px;max-width:1500px;width:100%}
+/* max-width retire le 22/09/2026 : <main> occupe toute la largeur a droite du menu. Les
+ * paragraphes d'introduction gardent le leur (.page-header p, 690px) -- c'est la PROSE
+ * qu'il faut brider, pas les tableaux ni les grilles de cartes. */
+main{grid-column:2;padding:54px clamp(28px,5vw,80px) 90px;width:100%;min-width:0}
 .page-header{display:flex;justify-content:space-between;gap:40px;align-items:flex-start;margin-bottom:46px}
 .page-header .header-actions{display:flex;gap:10px;flex-wrap:wrap}
 .eyebrow{margin:0 0 12px;text-transform:uppercase;letter-spacing:.16em;color:var(--teal)!important;font-size:11px!important;font-weight:850}
