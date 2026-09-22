@@ -168,6 +168,70 @@ main.ex-host {
   text-decoration: underline;
 }
 
+/* Les deux classements de tendance (voir app.js: tcTrends). Meme carte que .ex-histogram --
+ * ils se lisent ensemble, sous le meme titre mental "ce que dit le corpus" -- mais en barres
+ * HORIZONTALES : ce sont des rangs a libelles longs ("Manufacturing Technology Centre"), que
+ * des colonnes verticales tronqueraient. Une seule serie par carte, donc une seule teinte et
+ * aucune legende : le titre de la carte nomme ce qui est mesure. */
+.ex-trends { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.ex-trend {
+  flex: 1 1 320px;
+  min-width: 0;
+  border: 1px solid var(--ex-line);
+  border-radius: 7px;
+  padding: 14px 18px 12px;
+  background: var(--ex-surface);
+}
+.ex-trend-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.ex-trend-title { font-size: 13px; font-weight: 600; color: var(--ex-ink); }
+.ex-trend-hint { font-size: 11px; color: var(--ex-label); }
+.ex-trend-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  column-gap: 10px;
+  padding: 4px 0 0;
+}
+/* Le libelle et la valeur portent des jetons de TEXTE, jamais la teinte de la barre : c'est la
+ * barre qui encode, le texte qui se lit. */
+.ex-trend-label {
+  font-size: 12px;
+  color: var(--ex-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ex-trend-value { font-size: 12px; color: var(--ex-label); font-variant-numeric: tabular-nums; }
+.ex-trend-track {
+  grid-column: 1 / -1;
+  height: 5px;
+  margin-top: 3px;
+  border-radius: 3px;
+  background: var(--ex-subtle);
+  overflow: hidden;
+}
+/* Extremite arrondie, origine plate : la barre est ancree a la ligne de base, elle ne flotte
+ * pas. Trait fin plutot que pave plein, comme .ex-bar-fill. */
+.ex-trend-fill {
+  display: block;
+  height: 100%;
+  border-radius: 0 3px 3px 0;
+  background: var(--ex-accent);
+  opacity: .5;
+}
+.ex-trend-empty, .ex-trend-foot {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--ex-label);
+  line-height: 1.45;
+}
+
 .ex-bars { display: flex; align-items: flex-end; gap: 4px; }
 .ex-bar {
   flex: 1 1 0;
