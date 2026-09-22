@@ -2222,7 +2222,76 @@ def _init_tech_db() -> None:
                 ON documents(date_confidence,created_at);
             """
         )
+        _create_technology_signals_dated_view(db)
         _reconcile_orphaned_runs(db)
+
+
+# Le DOI nu, en minuscules, à partir d'une colonne qui peut porter l'une ou l'autre graphie.
+# `documents.doi` est déjà nu ("10.1002/admi.70562") mais `technology_signals.source_url` est
+# une URL résolvable, et pas toujours la même : doi.org pour 766 signaux, dx.doi.org (l'ancien
+# résolveur, toujours servi par certains éditeurs) pour 15 autres, mesuré le 15/09/2026. Les
+# comparer sans les ramener à la même forme perdait ces 15 lignes en silence.
+_DOI_FROM = (
+    "lower(replace(replace(replace(replace({col},'https://doi.org/',''),"
+    "'http://doi.org/',''),'https://dx.doi.org/',''),'http://dx.doi.org/',''))"
+)
+
+
+def _create_technology_signals_dated_view(db) -> None:
+    """`technology_signals_dated` : les signaux techniques, datés (15/09/2026).
+
+    `technology_signals` ne porte de date que pour les signaux issus d'un PROJET -- CORDIS,
+    ANR, UKRI renseignent `project_start`. Les signaux issus d'une PUBLICATION, qui sont
+    l'écrasante majorité du corpus (790 sur 806 au 15/09/2026), n'en ont aucune : leur seule
+    date vivait dans `documents.published_at`, à une jointure de distance que personne ne
+    faisait. Conséquence directe et vérifiée : aucune question de tendance n'était calculable
+    sur les signaux -- ni « combien de signaux par an », ni « quels axes accélèrent » --, alors
+    que la donnée était là depuis le début.
+
+    La jointure se fait sur le DOI (voir _DOI_FROM), pas sur l'URL brute, et couvre 790/806
+    signaux (98%). `created_at` n'est PAS un repli : c'est la date à laquelle le collecteur a
+    vu la ligne, pas celle de la science -- 800 des 806 signaux portent `created_at` en
+    2026-09, ce qui écraserait toute la chronologie sur un seul mois. Un signal non daté reste
+    donc à NULL, et `signal_date_source` dit lequel des deux chemins a fourni la date, pour
+    qu'un comptage puisse toujours séparer « projet démarré en 2024 » de « publié en 2024 ».
+
+    Vue et non colonne matérialisée : la date dérive de deux tables qui bougent à chaque
+    collecte (un document repêché plus tard date rétroactivement son signal), et une colonne
+    aurait demandé un backfill à chaque run. Recréée à chaque init plutôt que CREATE IF NOT
+    EXISTS -- c'est ce qui permet de la faire évoluer sans migration.
+    """
+    doi_from_signal = _DOI_FROM.format(col="s.source_url")
+    db.executescript(
+        f"""
+        -- Index sur EXPRESSION, et pas sur `doi` : la jointure compare lower(d.doi), ce qu'un
+        -- index ordinaire sur la colonne ne peut pas servir. Sans lui la vue se lisait en
+        -- boucle imbriquée (818 signaux x 304 documents, quatre replace() par comparaison) :
+        -- 137 ms par appel mesurés le 15/09/2026, et le produit grandit avec le corpus, qui
+        -- s'enrichit à chaque collecte. Avec, le plan passe en SEARCH ... USING INDEX et
+        -- l'appel tombe à 0,8 ms, à résultat identique.
+        CREATE INDEX IF NOT EXISTS documents_doi_lower_idx
+            ON documents(lower(doi)) WHERE doi IS NOT NULL;
+        DROP VIEW IF EXISTS technology_signals_dated;
+        CREATE VIEW technology_signals_dated AS
+        SELECT
+            s.*,
+            -- NULLIF avant COALESCE : une date vide ('') n'est pas une date. Sans lui, un
+            -- project_start vide gagnait le COALESCE et rendait signal_date ('') incohérent
+            -- avec signal_date_source ('publication'), qui teste la chaîne vide, lui.
+            COALESCE(NULLIF(s.project_start,''), NULLIF(d.published_at,''))            AS signal_date,
+            substr(COALESCE(NULLIF(s.project_start,''), NULLIF(d.published_at,'')),1,4) AS signal_year,
+            CASE
+                WHEN NULLIF(s.project_start,'') IS NOT NULL THEN 'project_start'
+                WHEN NULLIF(d.published_at,'')  IS NOT NULL THEN 'publication'
+            END                                                                        AS signal_date_source,
+            d.id         AS document_id,
+            d.actor_name AS document_actor_name
+        FROM technology_signals s
+        LEFT JOIN documents d
+               ON d.doi IS NOT NULL AND d.doi <> ''
+              AND lower(d.doi) = {doi_from_signal};
+        """
+    )
 
 
 def init_databases() -> None:
