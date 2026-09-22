@@ -294,7 +294,10 @@ function evidenceTable(rows, {hideMarketColumn = false, emptyMessage} = {}) {
 // « appels d'offres », l'accord portant sur le premier mot et non sur le dernier.
 const DEMAND_SIGNAL_KINDS = {
   tender: {label: "Appel d'offres", plural: "appels d'offres", link: "Voir l'avis ↗"},
-  cofunding: {label: "Cofinancement de projet", plural: "cofinancements de projet", link: "Voir le projet ↗"},
+  cofunding: {
+    label: "Cofinancement de projet", plural: "cofinancements de projet",
+    link: "Voir le projet ↗",
+  },
   hiring: {label: "Recrutement", plural: "recrutements", link: "Voir l'annonce ↗"},
 };
 
@@ -309,25 +312,71 @@ function demandSignalCard(item) {
   const kind = DEMAND_SIGNAL_KINDS[item.signal_type] || {label: item.signal_type, link: "Voir la source ↗"};
   return `<article class="vocab-card">
     <header><span>${esc(item.buyer_name || "Acheteur non précisé")} · ${esc(demandSignalDate(item.published_at))}</span><span>${esc(kind.label)} · ${esc(item.source)}</span></header>
-    <p class="dialog-operation">${esc(item.title)}</p>
+    <p class="dialog-operation">${esc(demandSignalReading(item.title).titre)}</p>
+    ${demandSignalReading(item.title).lecture ? `<small class="block-label">${esc(demandSignalReading(item.title).lecture)}</small>` : ""}
     <a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">${esc(kind.link)}</a>
   </article>`;
 }
 
+// Ce que le collecteur encode entre crochets à la fin du titre : « TEXTUR — Texturation de
+// moules [Texturation · Nanostructuration — Médical] ». On le redécoupe ici pour l'afficher
+// à part, parce que c'est la lecture du lexique et non le titre du projet -- et que c'est
+// elle qui dit de quel marché on parle.
+function demandSignalReading(title) {
+  const ouvrante = title.lastIndexOf(" [");
+  if (ouvrante < 0 || !title.endsWith("]")) return {titre: title, lecture: ""};
+  return {titre: title.slice(0, ouvrante), lecture: title.slice(ouvrante + 2, -1)};
+}
+
+// La carte des acheteurs : une ligne par organisation, pas une par avis. C'est LA question que
+// cette section pose -- qui achète -- et elle n'avait aucune réponse lisible : trente-cinq
+// cartes triées par date, où le premier cofinancement tombait à 6 500 pixels de défilement
+// parce qu'une édition d'appel à projets (« 2022 ») se range après une date complète.
+//
+// Elle couvre les DEUX types. Un CHU qui achète une chaîne femtoseconde est un client au même
+// titre qu'un mouliste qui cofinance un projet de texturation ; les séparer ici aurait refait,
+// en plus petit, l'erreur qu'on corrige.
+function demandBuyersMap(items) {
+  const parAcheteur = new Map();
+  for (const item of items) {
+    const nom = item.buyer_name || "Acheteur non précisé";
+    const entree = parAcheteur.get(nom) || {nom, signaux: 0, marches: new Set()};
+    entree.signaux += 1;
+    const lecture = demandSignalReading(item.title).lecture;
+    const marche = lecture.includes("—") ? lecture.split("—").pop().trim() : "";
+    for (const mot of marche.split(",").map(m => m.trim()).filter(Boolean)) entree.marches.add(mot);
+    parAcheteur.set(nom, entree);
+  }
+  const acheteurs = [...parAcheteur.values()].sort((a, b) => b.signaux - a.signaux || a.nom.localeCompare(b.nom));
+  if (!acheteurs.length) return "";
+  return `<div class="buyers-map">
+    <p class="block-label">${acheteurs.length} acheteur${acheteurs.length > 1 ? "s" : ""} identifié${acheteurs.length > 1 ? "s" : ""}</p>
+    <ul>${acheteurs.map(a => `<li>
+      <span class="buyer-name">${esc(a.nom)}</span>
+      <span class="buyer-markets">${esc([...a.marches].join(" · ") || "marché non nommé")}</span>
+      ${a.signaux > 1 ? `<b>${a.signaux}</b>` : "<b></b>"}
+    </li>`).join("")}</ul>
+  </div>`;
+}
+
 function demandSignalsPanel() {
   const items = state.demandSignals || [];
-  const parType = items.reduce((acc, item) => {
-    acc[item.signal_type] = (acc[item.signal_type] || 0) + 1;
-    return acc;
-  }, {});
-  const detail = Object.entries(parType)
-    .map(([type, n]) => {
-      const kind = DEMAND_SIGNAL_KINDS[type] || {};
-      return `${n} ${n > 1 ? (kind.plural || type) : (kind.label || type).toLowerCase()}`;
-    })
+  // Groupés par type, jamais mêlés : un cofinancement porte une ÉDITION d'appel à projets
+  // (« 2022 ») quand un avis porte une date complète, donc un tri unique par date range
+  // mécaniquement tous les cofinancements après tous les appels d'offres.
+  const groupes = Object.entries(DEMAND_SIGNAL_KINDS)
+    .map(([type, kind]) => [kind, items.filter(item => item.signal_type === type)])
+    .filter(([, liste]) => liste.length);
+  const detail = groupes
+    .map(([kind, liste]) => `${liste.length} ${liste.length > 1 ? kind.plural : kind.label.toLowerCase()}`)
     .join(" · ");
   return `<section><div class="section-title"><div><span>04</span><div><h2>Signaux de demande</h2><p>Ce que le marché ACHÈTE, par opposition à ce que les acteurs suivis disent faire : appels d'offres publics (TED, BOAMP) et entreprises cofinançant un projet ANR dont l'objet nomme une opération laser.${detail ? ` <b>${esc(detail)}</b>.` : ""}</p></div></div><b>${items.length}</b></div>
-    ${items.length ? `<div class="vocab-list">${items.map(demandSignalCard).join("")}</div>` : `<div class="empty">Aucun signal de demande sur la fenêtre couverte.</div>`}
+    ${demandBuyersMap(items)}
+    ${items.length ? groupes.map(([kind, liste]) => `
+      <div class="demand-group">
+        <div class="demand-group-title">${esc(liste.length > 1 ? kind.plural : kind.label)} <span>${liste.length}</span></div>
+        <div class="vocab-list">${liste.map(demandSignalCard).join("")}</div>
+      </div>`).join("") : `<div class="empty">Aucun signal de demande sur la fenêtre couverte.</div>`}
   </section>`;
 }
 
@@ -1356,6 +1405,103 @@ function tcYearHistogram(options, selected) {
   </div>`;
 }
 
+// Un axe ne devient une tendance qu'au-dessus de ce volume. En dessous, la part récente est
+// une coïncidence qu'on afficherait comme une accélération : deux entrées toutes deux de 2025
+// font 100 %, ce qui range un axe anecdotique devant "Verre" et ses 54 entrées.
+const TC_TREND_MIN_VOLUME = 8;
+// Combien d'années comptent comme "récent". Calculé à partir de la dernière année PRÉSENTE
+// dans la sélection, jamais d'une année écrite en dur : la page doit encore dire vrai dans
+// trois ans, et une sélection peut s'arrêter en 2019 (facette d'année, corpus filtré).
+const TC_TREND_RECENT_SPAN = 3;
+
+function tcEntryYear(row) {
+  const year = Number(String(row.published_at || "").slice(0, 4));
+  return Number.isFinite(year) && year > 1900 ? year : null;
+}
+
+// Les deux questions que le corpus sait réellement trancher, et qu'aucune facette ne répond :
+// qui signe le plus, et quelles familles accélèrent.
+//
+// Calculé sur la SÉLECTION COURANTE et pas sur le corpus entier -- contrairement aux KPI du
+// haut de page. C'est tout l'intérêt sur une page à facettes : filtrer sur "Verre" et lire qui
+// publie sur le verre répond à une question que le total, lui, noie. L'en-tête annonce le
+// périmètre pour que les deux blocs ne se lisent jamais comme le même compte.
+function tcTrends(rows) {
+  if (!rows.length) return "";
+
+  // Une entrée co-signée compte pour CHACUN de ses signataires : c'est un classement de
+  // participation, pas une partition du corpus. Le total des barres dépasse donc le nombre
+  // d'entrées, et la note le dit plutôt que de laisser croire à un découpage.
+  const byActor = new Map();
+  for (const row of rows) {
+    for (const actor of row.actors || []) {
+      if (actor) byActor.set(actor, (byActor.get(actor) || 0) + 1);
+    }
+  }
+  const actors = [...byActor.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const attributions = actors.reduce((total, [, count]) => total + count, 0);
+  const top3 = actors.slice(0, 3).reduce((total, [, count]) => total + count, 0);
+
+  // Les familles ne se comptent que sur les entrées DATÉES : une entrée sans date ne peut ni
+  // confirmer ni infirmer une accélération, et la garder au dénominateur écraserait la part
+  // récente d'autant.
+  const dated = rows.filter(row => tcEntryYear(row) !== null);
+  const lastYear = dated.length ? Math.max(...dated.map(tcEntryYear)) : null;
+  const recentFrom = lastYear === null ? null : lastYear - (TC_TREND_RECENT_SPAN - 1);
+  const byFamily = new Map();
+  for (const row of dated) {
+    const year = tcEntryYear(row);
+    for (const label of new Set(Object.values(row.families || {}).flat())) {
+      const entry = byFamily.get(label) || {total: 0, recent: 0};
+      entry.total += 1;
+      if (year >= recentFrom) entry.recent += 1;
+      byFamily.set(label, entry);
+    }
+  }
+  const families = [...byFamily.entries()]
+    .filter(([, entry]) => entry.total >= TC_TREND_MIN_VOLUME)
+    .map(([label, entry]) => [label, entry, entry.recent / entry.total])
+    .sort((a, b) => b[2] - a[2] || b[1].total - a[1].total || a[0].localeCompare(b[0]));
+
+  const bar = (label, value, ratio, hint) => `<div class="ex-trend-row" title="${esc(hint)}">
+      <span class="ex-trend-label">${esc(label)}</span>
+      <span class="ex-trend-value">${esc(value)}</span>
+      <span class="ex-trend-track"><span class="ex-trend-fill" style="width:${Math.max(2, Math.round(ratio * 100))}%"></span></span>
+    </div>`;
+
+  const actorRows = actors.slice(0, 6).map(([name, count]) =>
+    bar(name, count, count / actors[0][1], `${name} — ${count} entrée(s) dans la sélection`),
+  ).join("");
+
+  const familyRows = families.slice(0, 6).map(([label, entry, ratio]) =>
+    bar(label, `${Math.round(ratio * 100)} %`, ratio,
+      `${label} — ${entry.recent} entrée(s) depuis ${recentFrom} sur ${entry.total} datées`),
+  ).join("");
+
+  return `<div class="ex-trends">
+    <section class="ex-trend">
+      <div class="ex-trend-head">
+        <span class="ex-trend-title">Qui publie le plus</span>
+        <span class="ex-trend-hint">${actors.length} acteur(s) · ${attributions} signature(s)</span>
+      </div>
+      ${actorRows || `<p class="ex-trend-empty">Aucun acteur nommé dans cette sélection.</p>`}
+      ${actors.length >= 3
+        ? `<p class="ex-trend-foot">Les 3 premiers portent ${Math.round((top3 / attributions) * 100)} % des signatures. Une entrée co-signée compte pour chaque signataire.</p>`
+        : ""}
+    </section>
+    <section class="ex-trend">
+      <div class="ex-trend-head">
+        <span class="ex-trend-title">Familles en accélération</span>
+        <span class="ex-trend-hint">${recentFrom === null ? "aucune entrée datée" : `part depuis ${recentFrom}`}</span>
+      </div>
+      ${familyRows || `<p class="ex-trend-empty">Aucune famille n'atteint ${TC_TREND_MIN_VOLUME} entrées datées dans cette sélection — en dessous, une part récente ne veut rien dire.</p>`}
+      ${familyRows
+        ? `<p class="ex-trend-foot">Part des entrées datées depuis ${recentFrom}, sur les familles d'au moins ${TC_TREND_MIN_VOLUME} entrées. ${dated.length} entrée(s) datée(s) sur ${rows.length}.</p>`
+        : ""}
+    </section>
+  </div>`;
+}
+
 // La note sous le KPI "PROJETS FINANCÉS" : le total des aides quand elles sont connues, et
 // combien de projets le composent. Jamais un total muet -- dire "12,4 M€" sans préciser qu'il
 // ne couvre que 9 projets sur 13 laisserait lire une somme pour l'ensemble.
@@ -1480,6 +1626,8 @@ function renderTechCorpus() {
     </div>
 
     ${tcYearHistogram(options.year, state.techFacets.year || [])}
+
+    ${tcTrends(filtered)}
 
     <div class="ex-search">
       <span class="ex-search-icon" aria-hidden="true">⌕</span>

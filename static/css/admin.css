@@ -150,3 +150,37 @@
   .unlinked-ref{align-items:flex-start;text-align:left}
   .unlinked-ref a{max-width:none}
 }
+
+/* --- Signaux de demande : la carte des acheteurs ouvre chaque groupe ------------------------
+   Les deux types ne se mêlent plus. Un cofinancement porte une ÉDITION d'appel à projets
+   (« 2022 »), un avis une date complète : un tri unique par date rangeait mécaniquement tous
+   les cofinancements après tous les appels d'offres, soit plus de six mille pixels plus bas. */
+.demand-group + .demand-group { margin-top: 28px; }
+.demand-group-title {
+  display: flex; align-items: baseline; gap: 10px; font-size: .95rem; font-weight: 600;
+  color: var(--ink); padding-bottom: 8px; margin-bottom: 14px; border-bottom: 1px solid var(--line);
+}
+.demand-group-title span {
+  font-size: .78rem; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+
+.buyers-map {
+  border: 1px solid var(--line); border-radius: 13px; background: var(--paper);
+  padding: 16px 20px; margin-bottom: 16px;
+}
+.buyers-map ul {
+  list-style: none; margin: 10px 0 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 4px 28px;
+}
+.buyers-map li {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto 22px; gap: 10px;
+  align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: .86rem;
+}
+.buyers-map .buyer-name { color: var(--ink); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.buyers-map .buyer-markets { color: var(--muted); font-size: .78rem; text-align: right; }
+.buyers-map li b { color: var(--teal); font-variant-numeric: tabular-nums; text-align: right; }
+
+@media (max-width: 720px) {
+  .buyers-map li { grid-template-columns: minmax(0, 1fr) auto; }
+  .buyers-map .buyer-markets { grid-column: 1; text-align: left; }
+}
