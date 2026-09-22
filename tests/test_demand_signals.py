@@ -159,7 +159,7 @@ class CollectDemandSignalsTests(unittest.TestCase):
     def test_on_topic_ted_notice_is_added(self):
         FakeClient.ted_handler = staticmethod(lambda payload: {"notices": [_ted_notice()]})
         with patch.object(demand_signals.httpx, "Client", FakeClient):
-            result = collect_demand_signals()
+            result = collect_demand_signals(include_cofunding=False)
         self.assertGreaterEqual(result["ted_added"], 1)
         self.assertEqual(result["errors"], 0)
         with dbmod.connect(self.market_db) as db:
@@ -170,7 +170,7 @@ class CollectDemandSignalsTests(unittest.TestCase):
     def test_on_topic_boamp_record_is_added(self):
         FakeClient.boamp_handler = staticmethod(lambda params: {"records": [{"record": {"fields": _boamp_fields()}}]})
         with patch.object(demand_signals.httpx, "Client", FakeClient):
-            result = collect_demand_signals()
+            result = collect_demand_signals(include_cofunding=False)
         self.assertGreaterEqual(result["boamp_added"], 1)
         with dbmod.connect(self.market_db) as db:
             row = db.execute("SELECT source,buyer_name,published_at FROM demand_signals WHERE source='BOAMP'").fetchone()
@@ -180,7 +180,7 @@ class CollectDemandSignalsTests(unittest.TestCase):
     def test_off_topic_notice_is_not_added(self):
         FakeClient.ted_handler = staticmethod(lambda payload: {"notices": [_ted_notice(title="Supply of office paper and stationery")]})
         with patch.object(demand_signals.httpx, "Client", FakeClient):
-            result = collect_demand_signals()
+            result = collect_demand_signals(include_cofunding=False)
         self.assertEqual(result["ted_added"], 0)
         with dbmod.connect(self.market_db) as db:
             count = db.execute("SELECT COUNT(*) FROM demand_signals").fetchone()[0]
@@ -189,8 +189,8 @@ class CollectDemandSignalsTests(unittest.TestCase):
     def test_second_run_deduplicates_by_source_and_external_id(self):
         FakeClient.ted_handler = staticmethod(lambda payload: {"notices": [_ted_notice()]})
         with patch.object(demand_signals.httpx, "Client", FakeClient):
-            first = collect_demand_signals()
-            second = collect_demand_signals()
+            first = collect_demand_signals(include_cofunding=False)
+            second = collect_demand_signals(include_cofunding=False)
         self.assertGreaterEqual(first["ted_added"], 1)
         self.assertEqual(second["ted_added"], 0)
         with dbmod.connect(self.market_db) as db:
@@ -201,7 +201,7 @@ class CollectDemandSignalsTests(unittest.TestCase):
         FakeClient.ted_fails = True
         FakeClient.boamp_handler = staticmethod(lambda params: {"records": [{"record": {"fields": _boamp_fields()}}]})
         with patch.object(demand_signals.httpx, "Client", FakeClient):
-            result = collect_demand_signals()
+            result = collect_demand_signals(include_cofunding=False)
         self.assertGreater(result["errors"], 0)
         self.assertGreaterEqual(result["boamp_added"], 1)
 

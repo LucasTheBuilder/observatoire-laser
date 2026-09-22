@@ -287,17 +287,46 @@ function evidenceTable(rows, {hideMarketColumn = false, emptyMessage} = {}) {
 // micro-usinage femtoseconde est un signal d'achat, pas un signal de discours" -- appels
 // d'offres publics (TED/BOAMP) trouvés par demand_signals.py, le seul endroit de market.db qui
 // documente ce que le marché ACHÈTE plutôt que ce que les acteurs suivis DISENT faire.
+// Deux façons d'acheter, deux libellés. Un appel d'offres dit « je cherche un prestataire » ;
+// un cofinancement de projet dit « j'ai mis de l'argent dans cette technologie » -- le second
+// est plus engageant que le premier, et les confondre sous un mot unique serait dommage.
+// Le pluriel est écrit, jamais fabriqué en collant un « s » : « appel d'offres » donne
+// « appels d'offres », l'accord portant sur le premier mot et non sur le dernier.
+const DEMAND_SIGNAL_KINDS = {
+  tender: {label: "Appel d'offres", plural: "appels d'offres", link: "Voir l'avis ↗"},
+  cofunding: {label: "Cofinancement de projet", plural: "cofinancements de projet", link: "Voir le projet ↗"},
+  hiring: {label: "Recrutement", plural: "recrutements", link: "Voir l'annonce ↗"},
+};
+
+// L'ANR ne publie qu'une édition d'appel à projets (« 2022 »), pas une date. La passer à
+// dateLabel inventerait un jour et une heure ; même règle que le corpus technique.
+function demandSignalDate(value) {
+  if (!value) return "Date inconnue";
+  return /^\d{4}(-\d{2})?$/.test(value) ? value : dateLabel(value);
+}
+
 function demandSignalCard(item) {
+  const kind = DEMAND_SIGNAL_KINDS[item.signal_type] || {label: item.signal_type, link: "Voir la source ↗"};
   return `<article class="vocab-card">
-    <header><span>${esc(item.buyer_name || "Acheteur non précisé")} · ${dateLabel(item.published_at)}</span><span>${esc(item.source)}</span></header>
+    <header><span>${esc(item.buyer_name || "Acheteur non précisé")} · ${esc(demandSignalDate(item.published_at))}</span><span>${esc(kind.label)} · ${esc(item.source)}</span></header>
     <p class="dialog-operation">${esc(item.title)}</p>
-    <a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">Voir l'avis ↗</a>
+    <a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">${esc(kind.link)}</a>
   </article>`;
 }
 
 function demandSignalsPanel() {
   const items = state.demandSignals || [];
-  return `<section><div class="section-title"><div><span>04</span><div><h2>Signaux de demande</h2><p>Appels d'offres publics (TED, BOAMP) mentionnant du laser ultra-rapide -- un signal d'achat réel, pas une déclaration d'un acteur suivi.</p></div></div><b>${items.length}</b></div>
+  const parType = items.reduce((acc, item) => {
+    acc[item.signal_type] = (acc[item.signal_type] || 0) + 1;
+    return acc;
+  }, {});
+  const detail = Object.entries(parType)
+    .map(([type, n]) => {
+      const kind = DEMAND_SIGNAL_KINDS[type] || {};
+      return `${n} ${n > 1 ? (kind.plural || type) : (kind.label || type).toLowerCase()}`;
+    })
+    .join(" · ");
+  return `<section><div class="section-title"><div><span>04</span><div><h2>Signaux de demande</h2><p>Ce que le marché ACHÈTE, par opposition à ce que les acteurs suivis disent faire : appels d'offres publics (TED, BOAMP) et entreprises cofinançant un projet ANR dont l'objet nomme une opération laser.${detail ? ` <b>${esc(detail)}</b>.` : ""}</p></div></div><b>${items.length}</b></div>
     ${items.length ? `<div class="vocab-list">${items.map(demandSignalCard).join("")}</div>` : `<div class="empty">Aucun signal de demande sur la fenêtre couverte.</div>`}
   </section>`;
 }

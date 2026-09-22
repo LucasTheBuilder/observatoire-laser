@@ -1973,6 +1973,9 @@ def _init_market_db() -> None:
             "ai_input_tokens": "INTEGER NOT NULL DEFAULT 0",
             "ai_output_tokens": "INTEGER NOT NULL DEFAULT 0",
         })
+        # demand_signals accueille le cofinancement industriel depuis le 15/09/2026 --
+        # reconstruction de table, SQLite ne sait pas ALTER un CHECK (voir la fonction).
+        _widen_demand_signal_types(db)
         db.execute("UPDATE evidence SET fact_status=CASE WHEN review_status='accepted' THEN 'validated' WHEN review_status='rejected' THEN 'rejected' ELSE 'review' END WHERE fact_status IS NULL OR fact_status='' OR fact_status='review'")
         db.execute("UPDATE evidence SET last_seen_at=COALESCE(last_seen_at,updated_at,created_at)")
         db.execute("UPDATE offers SET last_seen_at=COALESCE(last_seen_at,updated_at,created_at)")
