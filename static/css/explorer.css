@@ -173,9 +173,19 @@ main.ex-host {
  * HORIZONTALES : ce sont des rangs a libelles longs ("Manufacturing Technology Centre"), que
  * des colonnes verticales tronqueraient. Une seule serie par carte, donc une seule teinte et
  * aucune legende : le titre de la carte nomme ce qui est mesure. */
-.ex-trends { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+/* Grille et non flex : en flex, une carte qui ne tenait pas sur la ligne basculait SEULE en
+ * dessous et s'y etirait sur toute la largeur -- observe a 1280 px, une largeur d'ecran
+ * courante, ou trois cartes a 320 px de base reclament 980 px pour ~870 disponibles. La
+ * troisieme se lisait alors comme un bloc a part, sans rapport avec les deux autres.
+ * auto-fit garde les colonnes EGALES quel qu'en soit le nombre : trois de front quand la place
+ * y est, deux puis une ensuite, et jamais une carte etiree seule. */
+.ex-trends {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
 .ex-trend {
-  flex: 1 1 320px;
   min-width: 0;
   border: 1px solid var(--ex-line);
   border-radius: 7px;
