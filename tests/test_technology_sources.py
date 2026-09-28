@@ -26,7 +26,10 @@ class TechnologySourcesTests(unittest.TestCase):
         les faire figurer sur cette page dirait faux."""
         listees = {s["id"] for s in technology_sources()}
         self.assertEqual(
-            {"crossref", "openalex", "cordis", "hal", "arxiv", "anr", "ukri_gtr", "epo_ops"},
+            {
+                "crossref", "openalex", "cordis", "hal", "arxiv", "anr", "ukri_gtr",
+                "epo_ops", "lens", "google_patents",
+            },
             listees,
         )
 

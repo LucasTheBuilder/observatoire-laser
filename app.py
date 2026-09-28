@@ -95,8 +95,10 @@ from demand_signals import collect_demand_signals
 from feedback_dossier import build_feedback_dossier
 from firmographics import collect_french_registry
 from gleif import collect_gleif_group_identity
+from google_patents import collect_google_patents
 from hal import collect_hal_publications
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
+from lens import collect_lens_patents
 from market_sizing import add_market_sizing, delete_market_sizing, list_market_sizing
 from national_projects import collect_national_projects
 from openalex import collect_openalex_publications, discover_global_actor_candidates
@@ -224,6 +226,8 @@ jobs: dict[str, dict[str, Any]] = {
     "actor_discovery": {"status": "idle", "result": None, "error": None},
     "openalex_global": {"status": "idle", "result": None, "error": None},
     "patents": {"status": "idle", "result": None, "error": None},
+    "lens_patents": {"status": "idle", "result": None, "error": None},
+    "google_patents": {"status": "idle", "result": None, "error": None},
     "gleif": {"status": "idle", "result": None, "error": None},
     "demand_signals": {"status": "idle", "result": None, "error": None},
     "wayback_retrodating": {"status": "idle", "result": None, "error": None},
@@ -237,23 +241,28 @@ jobs: dict[str, dict[str, Any]] = {
 
 
 def _collect_tech_corpus() -> dict:
-    """Rafraîchit les trois sources du corpus technique, et seulement elles.
+    """Rafraîchit les sources du corpus technique, et seulement elles.
 
     C'est ce que déclenche "Actualiser la veille" sur la page Technologie laser. Cette page
-    montre publications + brevets + projets ; or aucune collecte existante ne couvre les
-    quatre : `technology` et `openalex` ne ramènent que des publications, `patents` que des
-    brevets, `cordis` que des projets européens et `national_projects` que des projets
-    nationaux/régionaux. Y brancher `technology` seul aurait laissé croire que les brevets et
-    les projets venaient d'être réactualisés alors qu'ils n'auraient pas bougé.
+    montre publications + brevets + projets ; or aucune collecte existante ne couvre tout :
+    `technology` et `openalex` ne ramènent que des publications, `patents`/`lens_patents`/
+    `google_patents` que des brevets (trois sources indépendantes depuis le 22/09/2026, voir
+    patent.py/lens.py/google_patents.py -- EPO OPS ne voit que ce que l'EPO indexe, Lens.org et
+    Google Patents complètent avec d'autres offices), `cordis` que des projets européens et
+    `national_projects` que des projets nationaux/régionaux. Y brancher `technology` seul aurait
+    laissé croire que les brevets et les projets venaient d'être réactualisés alors qu'ils
+    n'auraient pas bougé.
 
-    Chaque collecteur est isolé : une source indisponible (identifiants EPO absents, CORDIS
-    injoignable) ne doit pas priver l'utilisateur des autres.
+    Chaque collecteur est isolé : une source indisponible (identifiants EPO/Lens absents, projet
+    GCP non configuré, CORDIS injoignable) ne doit pas priver l'utilisateur des autres.
     """
     report: dict[str, Any] = {}
     for name, collector in (
         ("technology", scrape_technology),
         ("openalex", collect_openalex_publications),
         ("patents", collect_patents),
+        ("lens_patents", collect_lens_patents),
+        ("google_patents", collect_google_patents),
         ("cordis", collect_cordis_all_programmes),
         ("national_projects", collect_national_projects),
     ):
@@ -283,6 +292,8 @@ def _collect_monthly() -> dict:
         "actor_discovery": discover_actor_candidates(),
         "openalex_global": discover_global_actor_candidates(),
         "patents": collect_patents(),
+        "lens_patents": collect_lens_patents(),
+        "google_patents": collect_google_patents(),
         "gleif": collect_gleif_group_identity(),
         "demand_signals": collect_demand_signals(),
         "wayback_retrodating": retrodate_evidence_sources(),
@@ -305,6 +316,8 @@ collectors: dict[str, Callable[[], dict]] = {
     "actor_discovery": discover_actor_candidates,
     "openalex_global": discover_global_actor_candidates,
     "patents": collect_patents,
+    "lens_patents": collect_lens_patents,
+    "google_patents": collect_google_patents,
     "gleif": collect_gleif_group_identity,
     "demand_signals": collect_demand_signals,
     "wayback_retrodating": retrodate_evidence_sources,
@@ -2053,7 +2066,18 @@ _TECHNOLOGY_SOURCE_COUNTS: dict[str, tuple[str, str]] = {
     ),
     "epo_ops": (
         "brevets",
-        "SELECT COUNT(*) FROM documents WHERE document_type='patent'",
+        "SELECT COUNT(*) FROM documents WHERE document_type='patent' AND source_url LIKE '%espacenet.com%'",
+    ),
+    # Deux sources brevets ajoutées le 22/09/2026 (lens.py, google_patents.py), qui écrivent
+    # dans la même table `documents` qu'EPO OPS -- même distinction par hôte que crossref/hal/
+    # arxiv juste au-dessus, et pour la même raison : aucune colonne ne nomme le collecteur.
+    "lens": (
+        "brevets",
+        "SELECT COUNT(*) FROM documents WHERE document_type='patent' AND source_url LIKE '%lens.org%'",
+    ),
+    "google_patents": (
+        "brevets",
+        "SELECT COUNT(*) FROM documents WHERE document_type='patent' AND source_url LIKE '%patents.google.com%'",
     ),
 }
 
@@ -2141,7 +2165,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "national_projects", "hal", "arxiv", "tech_corpus", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "lens_patents", "google_patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "national_projects", "hal", "arxiv", "tech_corpus", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -2156,7 +2180,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "national_projects", "hal", "arxiv", "tech_corpus", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "lens_patents", "google_patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "national_projects", "hal", "arxiv", "tech_corpus", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 

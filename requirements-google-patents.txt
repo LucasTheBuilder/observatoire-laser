@@ -1,0 +1,10 @@
+# Dépendance de google_patents.py (source brevets optionnelle, voir sa docstring) -- PAS dans
+# requirements.txt : google-cloud-bigquery entraîne une chaîne de paquets (google-auth,
+# google-api-core, grpcio, protobuf...) que les deux autres sources brevets (patent.py, lens.py)
+# n'ont pas besoin d'imposer à tout le monde. google_patents.collect_google_patents() détecte
+# son absence et renvoie status='not_configured' plutôt que de faire planter l'appli au
+# démarrage -- installer ce fichier n'est donc nécessaire que pour activer CETTE source :
+#
+#   pip install -r requirements-google-patents.txt
+#
+google-cloud-bigquery==3.27.0
