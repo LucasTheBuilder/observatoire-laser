@@ -1727,6 +1727,28 @@ def _init_market_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS offer_sources_fact_idx ON offer_sources(offer_id);
 
+            -- Offre NOMMÉE d'un acteur (« LightFab 3D Printer », « Laser Micro-Cutting ») telle
+            -- que son propre site la nomme -- voir named_offers.py. Complète `offers`, qui réduit
+            -- une capacité à une opération d'un lexique fermé. name/description sont verbatim.
+            CREATE TABLE IF NOT EXISTS named_offers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('page','section')),
+                description TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL,
+                page_type TEXT,
+                operations TEXT NOT NULL DEFAULT '[]',
+                review_status TEXT NOT NULL DEFAULT 'review' CHECK(review_status IN ('accepted','review','rejected')),
+                reviewed_by TEXT,
+                reviewed_at TEXT,
+                reject_reason TEXT,
+                fingerprint TEXT NOT NULL UNIQUE,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS named_offers_actor_idx ON named_offers(actor_name,review_status);
+
             -- Historique : à quelle date un fait evidence a changé de bucket de maturité
             -- (ex: radar -> existing), pour pouvoir tracer sa progression dans le temps.
             CREATE TABLE IF NOT EXISTS evidence_bucket_transitions (

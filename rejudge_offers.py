@@ -31,7 +31,7 @@ def rejudge_offers(*, dry_run: bool = False) -> dict:
 
     with connect(MARKET_DB) as db:
         offers = db.execute(
-            "SELECT id,actor_name,operation,page_type,quote,source_url,review_status "
+            "SELECT id,actor_name,operation,laser_process,page_type,quote,source_url,review_status "
             "FROM offers WHERE reviewed_at IS NULL"
         ).fetchall()
         source_counts = dict(db.execute(
@@ -47,6 +47,7 @@ def rejudge_offers(*, dry_run: bool = False) -> dict:
                 "page_type": row["page_type"],
                 "url": row["source_url"] or "",
                 "operation": row["operation"],
+                "process": row["laser_process"],
                 "official_url": official_urls.get(row["actor_name"]),
             }
             reasons = _offer_review_reasons(candidate, max(int(source_counts.get(row["id"], 0)), 1))

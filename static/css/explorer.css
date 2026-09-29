@@ -715,3 +715,59 @@ button.ex-row:last-child { border-bottom: 0; }
   color: var(--ex-ink-2);
   white-space: nowrap;
 }
+
+/* --- Offres & capacités : couverture et fiche offre (audit du 29/09/2026) ------------------ */
+.of-coverage {
+  margin-top: 10px;
+  border: 1px solid var(--ex-line);
+  border-radius: 7px;
+  padding: 12px 18px;
+  background: var(--ex-surface);
+}
+.of-coverage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.of-coverage-head > div { display: flex; flex-direction: column; gap: 3px; }
+.of-coverage-groups { display: grid; gap: 12px; margin-top: 12px; }
+.of-coverage-group p { margin: 0 0 6px; font-size: 12px; color: var(--ex-ink-2); }
+.of-coverage-group > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.of-cov-chip {
+  border: 1px solid var(--ex-line-control);
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: var(--ex-subtle);
+  font: inherit;
+  font-size: 12px;
+  color: var(--ex-ink);
+  cursor: pointer;
+}
+.of-cov-chip:hover { border-color: var(--ex-accent); background: var(--ex-accent-soft); }
+.of-cov-chip small { color: var(--ex-label); font-size: 10px; }
+
+.of-fiche {
+  margin-top: 10px;
+  border: 1px solid var(--ex-accent);
+  border-radius: 7px;
+  padding: 16px 18px;
+  background: var(--ex-surface);
+}
+.of-fiche-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.of-fiche-head h3 { margin: 2px 0 0; font-size: 18px; color: var(--ex-ink); }
+.of-fiche-actions { display: flex; gap: 8px; }
+.of-fiche-block { margin-top: 14px; }
+.of-fiche-block h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--ex-label);
+}
+.of-named { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.of-named li { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.of-named a { color: var(--ex-ink); text-decoration: none; }
+.of-named a:hover b { color: var(--ex-accent-dark); text-decoration: underline; }
+.of-named span { font-size: 12px; color: var(--ex-ink-3); line-height: 1.45; overflow-wrap: anywhere; }

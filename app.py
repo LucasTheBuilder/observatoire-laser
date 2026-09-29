@@ -101,6 +101,7 @@ from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from lens import collect_lens_patents
 from market_compilation import compile_market_page, source_glossary
 from market_sizing import add_market_sizing, delete_market_sizing, list_market_sizing
+from named_offers import collect_named_offers
 from national_projects import collect_national_projects
 from openalex import collect_openalex_publications, discover_global_actor_candidates
 from patent import collect_patents
@@ -117,7 +118,7 @@ from review_queue import (
     sample_review_queue,
 )
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
-from scrapers import MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
+from scrapers import EXPLORATION_PAGE_TYPES, MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
 from sources import list_sources, technology_sources
 from timeseries import capture_metric_snapshot
 from veille_metrics import VEILLE_METRICS_THRESHOLDS, capture_veille_metrics
@@ -233,6 +234,7 @@ jobs: dict[str, dict[str, Any]] = {
     "demand_signals": {"status": "idle", "result": None, "error": None},
     "wayback_retrodating": {"status": "idle", "result": None, "error": None},
     "capabilities": {"status": "idle", "result": None, "error": None},
+    "named_offers": {"status": "idle", "result": None, "error": None},
     "national_projects": {"status": "idle", "result": None, "error": None},
     "hal": {"status": "idle", "result": None, "error": None},
     "arxiv": {"status": "idle", "result": None, "error": None},
@@ -299,6 +301,7 @@ def _collect_monthly() -> dict:
         "demand_signals": collect_demand_signals(),
         "wayback_retrodating": retrodate_evidence_sources(),
         "capabilities": collect_capability_specs(),
+        "named_offers": collect_named_offers(),
         "national_projects": collect_national_projects(),
         "hal": collect_hal_publications(),
         "arxiv": collect_arxiv_preprints(),
@@ -323,6 +326,7 @@ collectors: dict[str, Callable[[], dict]] = {
     "demand_signals": collect_demand_signals,
     "wayback_retrodating": retrodate_evidence_sources,
     "capabilities": collect_capability_specs,
+    "named_offers": collect_named_offers,
     "national_projects": collect_national_projects,
     "hal": collect_hal_publications,
     "arxiv": collect_arxiv_preprints,
@@ -1728,34 +1732,129 @@ def reject_market_review(evidence_id: int, payload: RejectMarketReviewRequest):
     return {"id": evidence_id, "status": "rejected", "reject_reason": payload.reject_reason}
 
 
+# offer_type vient du type de la PAGE source (voir scrapers._offer_candidates) : une même
+# capacité vue sur une page "service" et sur une page "capability" donnait deux lignes -- 17
+# doublons sur 110 le 29/09/2026. /api/offers fusionne donc par (acteur, capacité) ; le type
+# affiché est le plus parlant du groupe, dans cet ordre.
+OFFER_TYPE_PRECEDENCE = ("service", "product", "capability", "technology")
+UNKNOWN_STAGE = "Maturité industrielle non déterminée"
+
+
+def _merge_offer_group(group: list[dict[str, Any]]) -> dict[str, Any]:
+    group = sorted(group, key=lambda row: (
+        OFFER_TYPE_PRECEDENCE.index(row["offer_type"]) if row["offer_type"] in OFFER_TYPE_PRECEDENCE else len(OFFER_TYPE_PRECEDENCE),
+        row["id"],
+    ))
+    merged = dict(group[0])
+    for field in ("operation", "laser_process", "material", "performance"):
+        merged[field] = next((row[field] for row in group if row[field]), None)
+    merged["industrial_stage"] = next(
+        (row["industrial_stage"] for row in group if row["industrial_stage"] and row["industrial_stage"] != UNKNOWN_STAGE),
+        merged["industrial_stage"],
+    )
+    merged["evidence_type"] = "proof" if any(row["evidence_type"] == "proof" for row in group) else merged["evidence_type"]
+    merged["offer_types"] = sorted({row["offer_type"] for row in group})
+    merged["merged_ids"] = [row["id"] for row in group]
+    return merged
+
+
 @app.get("/api/offers")
 def offers():
-    """Offres/capacités concurrentes validées (voir db.py: table `offers`), avec le nombre de
-    preuves et de langues distinctes qui les confirment."""
-    return rows(
+    """Offres/capacités concurrentes validées (voir db.py: table `offers`), fusionnées par
+    (acteur, capacité), avec le nombre de pages sources et de langues distinctes qui les
+    confirment."""
+    offer_rows = rows(
         MARKET_DB,
-        """SELECT o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,
-                  o.industrial_stage,o.evidence_type,o.page_type,COUNT(os.id) AS proofs,
-                  COUNT(DISTINCT COALESCE(os.language,'unknown')) AS languages
-           FROM offers o
-           LEFT JOIN offer_sources os ON os.offer_id=o.id
-           WHERE o.review_status='accepted'
-           GROUP BY o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.industrial_stage,o.evidence_type,o.page_type
-           ORDER BY o.actor_name,o.offer_type,o.capability""",
+        """SELECT id,actor_name,offer_type,capability,operation,laser_process,material,performance,
+                  industrial_stage,evidence_type,page_type
+           FROM offers WHERE review_status='accepted'""",
     )
+    sources = rows(
+        MARKET_DB,
+        """SELECT os.offer_id,os.source_url,COALESCE(os.language,'unknown') AS language
+           FROM offer_sources os JOIN offers o ON o.id=os.offer_id WHERE o.review_status='accepted'""",
+    )
+    urls_by_offer: dict[int, set[str]] = defaultdict(set)
+    languages_by_offer: dict[int, set[str]] = defaultdict(set)
+    for source in sources:
+        urls_by_offer[source["offer_id"]].add(source["source_url"])
+        languages_by_offer[source["offer_id"]].add(source["language"])
+
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in offer_rows:
+        groups[(row["actor_name"], row["capability"])].append(row)
+    result = []
+    for group in groups.values():
+        merged = _merge_offer_group(group)
+        merged["proofs"] = len(set().union(*(urls_by_offer[i] for i in merged["merged_ids"])))
+        merged["languages"] = len(set().union(*(languages_by_offer[i] for i in merged["merged_ids"])))
+        result.append(merged)
+    return sorted(result, key=lambda row: (row["actor_name"], row["offer_type"], row["capability"]))
 
 
 @app.get("/api/offers/{offer_id}/proofs")
 def offer_proofs(offer_id: int):
+    """Preuves de l'offre ET des offres acceptées fusionnées avec elle par /api/offers
+    (même acteur, même capacité)."""
     return rows(
         MARKET_DB,
         """SELECT o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.industrial_stage,o.evidence_type,
                   os.source_url,os.source_title,os.source_date,os.quote,os.is_verbatim,os.language,os.block_heading,os.extraction_mode,os.field_confidence
            FROM offers o JOIN offer_sources os ON os.offer_id=o.id
-           WHERE o.id=? AND o.review_status='accepted'
+           JOIN offers ref ON ref.id=? AND ref.actor_name=o.actor_name AND ref.capability=o.capability
+           WHERE o.review_status='accepted'
            ORDER BY os.created_at DESC""",
         (offer_id,),
     )
+
+
+@app.get("/api/named-offers")
+def named_offers():
+    """Offres nommées acceptées (voir named_offers.py) : ce que chaque acteur vend, sous son nom."""
+    result = rows(
+        MARKET_DB,
+        """SELECT id,actor_name,name,kind,description,source_url,page_type,operations
+           FROM named_offers WHERE review_status='accepted' ORDER BY actor_name,kind,name""",
+    )
+    for row in result:
+        row["operations"] = json.loads(row["operations"] or "[]")
+    return result
+
+
+@app.get("/api/offers/coverage")
+def offers_coverage():
+    """Couverture de la page Offres & capacités, par acteur actif vérifié : ce qui est affiché
+    (offres et offres nommées acceptées), ce qui attend en revue, et ce que le crawl a vu de ses
+    pages d'offre -- de quoi dire POURQUOI un acteur n'a rien à l'écran (audit du 29/09/2026 :
+    la page montrait 24 acteurs sur 73 sans jamais le dire)."""
+    placeholders = ",".join("?" * len(EXPLORATION_PAGE_TYPES))
+    actors = rows(
+        ACTORS_DB,
+        f"""SELECT a.id,a.name,a.competitive_class,p.status AS profile_status,
+                   SUM(CASE WHEN s.page_type IN ({placeholders}) THEN 1 ELSE 0 END) AS offer_pages,
+                   SUM(CASE WHEN s.page_type IN ({placeholders}) AND s.last_checked_at IS NOT NULL THEN 1 ELSE 0 END) AS offer_pages_fetched
+            FROM actors a
+            LEFT JOIN site_profiles p ON p.actor_id=a.id
+            LEFT JOIN actor_sources s ON s.actor_id=a.id AND s.active=1
+            WHERE a.active=1 AND a.review_status='verified'
+            GROUP BY a.id ORDER BY a.name""",
+        (*EXPLORATION_PAGE_TYPES, *EXPLORATION_PAGE_TYPES),
+    )
+    offer_counts = {
+        (row["actor_name"], row["review_status"]): row["n"]
+        for row in rows(MARKET_DB, "SELECT actor_name,review_status,COUNT(*) AS n FROM offers GROUP BY 1,2")
+    }
+    named_counts = {
+        row["actor_name"]: row["n"]
+        for row in rows(MARKET_DB, "SELECT actor_name,COUNT(*) AS n FROM named_offers WHERE review_status='accepted' GROUP BY 1")
+    }
+    for actor in actors:
+        actor["offers_accepted"] = offer_counts.get((actor["name"], "accepted"), 0)
+        actor["offers_in_review"] = offer_counts.get((actor["name"], "review"), 0)
+        actor["named_offers"] = named_counts.get(actor["name"], 0)
+        actor["offer_pages"] = int(actor["offer_pages"] or 0)
+        actor["offer_pages_fetched"] = int(actor["offer_pages_fetched"] or 0)
+    return actors
 
 
 # Intelligence techno (P0 audit item): science->industry readiness signals are transverse --
@@ -2189,7 +2288,7 @@ def _run_job(kind: str) -> None:
 
 
 @app.post("/api/scrape/{kind}")
-def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "lens_patents", "google_patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "national_projects", "hal", "arxiv", "tech_corpus", "monthly"]):
+def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "lens_patents", "google_patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "named_offers", "national_projects", "hal", "arxiv", "tech_corpus", "monthly"]):
     """Démarre une collecte en tâche de fond (voir _run_job) et rend la main immédiatement.
 
     Le front est censé ensuite sonder GET /api/scrape/{kind} régulièrement pour connaître
@@ -2204,7 +2303,7 @@ def start_scrape(kind: Literal["actors", "market", "technology", "cordis", "firm
 
 
 @app.get("/api/scrape/{kind}")
-def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "lens_patents", "google_patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "national_projects", "hal", "arxiv", "tech_corpus", "monthly"]):
+def scrape_status(kind: Literal["actors", "market", "technology", "cordis", "firmographics", "openalex", "press", "actor_feeds", "actor_discovery", "openalex_global", "patents", "lens_patents", "google_patents", "gleif", "demand_signals", "wayback_retrodating", "capabilities", "named_offers", "national_projects", "hal", "arxiv", "tech_corpus", "monthly"]):
     """Consulte l'état (idle/running/completed/failed) du dernier job de ce type."""
     return _jobs_snapshot()[kind]
 

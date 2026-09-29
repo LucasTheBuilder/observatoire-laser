@@ -38,6 +38,12 @@ const state = {
   offerFacets: {family: [], actor: [], operation: [], material: [], process: [], stage: [], evidence: []},
   offerExpanded: [],
   offerLimit: 12,
+  // Fiche offre d'un acteur (audit du 29/09/2026, reco 4) : ouverte depuis la liste de
+  // couverture, ou implicitement quand la facette ACTEUR ne retient qu'un seul acteur.
+  offerFicheActor: null,
+  offerCoverageOpen: false,
+  namedOffers: [],
+  offersCoverage: [],
   marketDrill: null,
   marketProduct: null,
   actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
@@ -1020,6 +1026,86 @@ function ofTrends(rows) {
   </div>`;
 }
 
+// Couverture (audit du 29/09/2026, reco 1) : la page montrait 110 capacités chez 24 acteurs sans
+// jamais dire « sur 73 suivis ». Un acteur est couvert dès qu'il a une capacité OU une offre
+// nommée acceptée ; les autres sont rangés par la première raison qui explique leur absence,
+// dans l'ordre où le pipeline les rencontre (site -> pages -> téléchargement -> relecture).
+const OF_COVERAGE_REASONS = [
+  ["degraded", "Site non exploitable par le crawler", a => a.profile_status === "degraded"],
+  ["no_pages", "Aucune page d’offre découverte", a => !a.offer_pages],
+  ["not_fetched", "Pages d’offre jamais téléchargées", a => !a.offer_pages_fetched],
+  ["in_review", "Offres extraites, en attente de relecture", a => a.offers_in_review > 0],
+  ["nothing", "Pages lues, aucune offre extraite", () => true],
+];
+
+function ofIsCovered(actor) {
+  return actor.offers_accepted > 0 || actor.named_offers > 0;
+}
+
+function ofCoverage(coverage) {
+  if (!coverage.length) return "";
+  const covered = coverage.filter(ofIsCovered);
+  const missing = coverage.filter(actor => !ofIsCovered(actor));
+  const groups = OF_COVERAGE_REASONS.map(([key, label]) => [key, label, []]);
+  for (const actor of missing) {
+    const index = OF_COVERAGE_REASONS.findIndex(([, , test]) => test(actor));
+    groups[index][2].push(actor);
+  }
+  const chip = actor => `<button type="button" class="of-cov-chip" data-of-fiche="${esc(actor.name)}"
+      title="${esc(actor.name)} — ${actor.offer_pages_fetched}/${actor.offer_pages} page(s) d’offre téléchargée(s), ${actor.offers_in_review} offre(s) en relecture">${esc(actor.name)}${actor.competitive_class ? ` <small>${esc(actor.competitive_class)}</small>` : ""}</button>`;
+  const pagesSeen = coverage.reduce((total, actor) => total + actor.offer_pages_fetched, 0);
+  const pagesKnown = coverage.reduce((total, actor) => total + actor.offer_pages, 0);
+  return `<section class="of-coverage">
+    <div class="of-coverage-head">
+      <div>
+        <span class="ex-trend-title">Couverture : ${covered.length} acteurs sur ${coverage.length} suivis</span>
+        <span class="ex-trend-hint">${missing.length} sans aucune offre à l’écran · ${pagesSeen} pages d’offre lues sur ${pagesKnown} découvertes</span>
+      </div>
+      <button type="button" class="ex-linkish" data-of-coverage-toggle>${state.offerCoverageOpen ? "masquer" : "voir chaque acteur et ce qui manque"}</button>
+    </div>
+    ${state.offerCoverageOpen ? `<div class="of-coverage-groups">${[["covered", "Couverts — cliquer pour ouvrir la fiche offre", covered], ...groups]
+      .filter(([, , actors]) => actors.length).map(([, label, actors]) => `
+      <div class="of-coverage-group"><p>${esc(label)} <b>${actors.length}</b></p><div>${actors.map(chip).join("")}</div></div>`).join("")}</div>` : ""}
+  </section>`;
+}
+
+// Fiche offre d'un acteur (reco 4) : tout ce que la base sait de ce qu'il vend, au même endroit
+// -- offres nommées (named_offers.py), capacités de la page, specs chiffrées, certifications,
+// marchés validés. Aucune donnée nouvelle : chaque ligne renvoie à sa source.
+function ofActorFiche(name) {
+  const actor = (state.actors || []).find(a => a.name === name);
+  const named = (state.namedOffers || []).filter(row => row.actor_name === name);
+  const capabilities = (state.offers || []).filter(row => row.actor_name === name);
+  const operations = [...new Set(capabilities.map(normalizedOperation).filter(Boolean))];
+  const processes = [...new Set(capabilities.map(row => row.laser_process).filter(Boolean))];
+  const markets = [...new Set([...(state.market?.existing || []), ...(state.market?.radar || [])]
+    .filter(row => row.actor_name === name).map(row => row.market).filter(Boolean))];
+  const specs = actor ? capabilitySpecRows(actor) : [];
+  const certifications = actor ? certificationFacts(actor) : [];
+  const differentiators = actor ? differentiatorFacts(actor) : [];
+  const section = (title, body) => body ? `<div class="of-fiche-block"><h4>${esc(title)}</h4>${body}</div>` : "";
+  const chips = values => values.length ? `<div class="subtheme-chips">${values.map(v => `<span class="subtheme-chip">${esc(v)}</span>`).join("")}</div>` : "";
+
+  return `<section class="of-fiche">
+    <div class="of-fiche-head">
+      <div><p class="ex-eyebrow">FICHE OFFRE</p><h3>${esc(name)}</h3></div>
+      <div class="of-fiche-actions">
+        ${actor ? `<button type="button" class="ex-btn" data-of-full-fiche="${Number(actor.id)}">Fiche complète</button>` : ""}
+        <button type="button" class="ex-btn" data-of-fiche-close>Fermer ✕</button>
+      </div>
+    </div>
+    ${section(`Offres nommées (${named.length})`, named.length ? `<ul class="of-named">${named.map(row => `<li>
+        <a href="${esc(row.source_url)}" target="_blank" rel="noopener"><b>${esc(row.name)}</b> ↗</a>
+        ${row.description ? `<span>${esc(row.description)}</span>` : ""}</li>`).join("")}</ul>` : `<p class="ex-trend-empty">Aucune offre nommée acceptée sur les pages service/produit lues.</p>`)}
+    ${section("Opérations revendiquées", chips(operations))}
+    ${section("Procédés", chips(processes))}
+    ${section("Capacités chiffrées", specs.length ? `<ul class="fact-list">${specs.map(([label, value, url]) => `<li><b>${esc(label)}</b> : ${esc(value)}${url ? ` <a href="${esc(url)}" target="_blank" rel="noopener" class="fact-source">↗</a>` : ""}</li>`).join("")}</ul>` : "")}
+    ${section("Certifications", certifications.length ? `<ul class="fact-list">${certifications.map(factLine).join("")}</ul>` : "")}
+    ${section("Différenciateurs", differentiators.length ? `<ul class="fact-list">${differentiators.map(factLine).join("")}</ul>` : "")}
+    ${section("Marchés validés", chips(markets))}
+  </section>`;
+}
+
 // Un seul endroit qui décrit la forme des facettes vides : la réinitialisation et l'état
 // initial ne peuvent pas diverger (un groupe oublié ferait planter toggleFacet).
 function emptyOfferFacets() {
@@ -1058,6 +1144,12 @@ function renderOffers() {
   const materials = new Set(offers.filter(row => row.material).map(row => row.material)).size;
   const withoutMaterial = offers.filter(row => !row.material).length;
 
+  const coverage = state.offersCoverage || [];
+  const named = state.namedOffers || [];
+  const namedActors = new Set(named.map(row => row.actor_name)).size;
+  const ficheActor = state.offerFicheActor
+    || ((state.offerFacets.actor || []).length === 1 ? state.offerFacets.actor[0] : null);
+
   const facetsActive = activeFacetCount(state.offerFacets);
   const countLabel = state.offerQuery.trim()
     ? `${filtered.length} résultat(s) pour « ${esc(state.offerQuery.trim())} »`
@@ -1078,11 +1170,16 @@ function renderOffers() {
     </div>
 
     <div class="ex-kpis">
-      <div class="ex-kpi"><div class="ex-kpi-label">CAPACITÉS</div><div class="ex-kpi-value">${offers.length}</div><div class="ex-kpi-note">chez ${actors} acteur${actors > 1 ? "s" : ""}</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">CAPACITÉS</div><div class="ex-kpi-value">${offers.length}</div><div class="ex-kpi-note">chez ${actors} acteur${actors > 1 ? "s" : ""}${coverage.length ? ` sur ${coverage.length} suivis` : ""}</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">OFFRES NOMMÉES</div><div class="ex-kpi-value">${named.length}</div><div class="ex-kpi-note">chez ${namedActors} acteur${namedActors > 1 ? "s" : ""}</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">OPÉRATIONS</div><div class="ex-kpi-value">${actorsByOperation.size}</div><div class="ex-kpi-note">${soloOperations} tenue${soloOperations > 1 ? "s" : ""} par un seul acteur</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">MATÉRIAUX</div><div class="ex-kpi-value">${materials}</div><div class="ex-kpi-note">${withoutMaterial} sans matériau précisé</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">DÉMONTRÉES</div><div class="ex-kpi-value">${demonstrated}</div><div class="ex-kpi-note">${claimed} déclaratives</div></div>
     </div>
+
+    ${ofCoverage(coverage)}
+
+    ${ficheActor ? ofActorFiche(ficheActor) : ""}
 
     ${ofOperationBand(options.operation, state.offerFacets.operation || [])}
 
@@ -1166,6 +1263,21 @@ function renderOffers() {
     state.offerLimit += OF_PAGE_SIZE;
     renderOffers();
   });
+  document.querySelector("[data-of-coverage-toggle]")?.addEventListener("click", () => {
+    state.offerCoverageOpen = !state.offerCoverageOpen;
+    renderOffers();
+  });
+  document.querySelectorAll("[data-of-fiche]").forEach(el => el.addEventListener("click", () => {
+    state.offerFicheActor = el.dataset.ofFiche;
+    renderOffers();
+    document.querySelector(".of-fiche")?.scrollIntoView({behavior: "smooth", block: "start"});
+  }));
+  document.querySelector("[data-of-fiche-close]")?.addEventListener("click", rerender(() => {
+    state.offerFicheActor = null;
+    state.offerFacets = {...state.offerFacets, actor: []};
+  }));
+  document.querySelector("[data-of-full-fiche]")?.addEventListener("click", el =>
+    showActorDetail(Number(el.currentTarget.dataset.ofFullFiche)));
   document.querySelectorAll("[data-of-open]").forEach(el => el.addEventListener("click",
     () => showOfferProofs(Number(el.dataset.ofOpen))));
   document.querySelector("[data-of-export]")?.addEventListener("click", () => downloadCSV(
@@ -3564,6 +3676,8 @@ const LOADERS = {
   monthly:           () => api("/api/monthly?days=30"),
   market:            () => api("/api/market"),
   offers:            () => api("/api/offers"),
+  namedOffers:       () => api("/api/named-offers"),
+  offersCoverage:    () => api("/api/offers/coverage"),
   technologySignals: () => api("/api/technology-signals"),
   documents:         () => api("/api/documents?limit=500"),
   techCorpus:        () => api("/api/tech-corpus"),
@@ -3594,7 +3708,8 @@ const LOADERS = {
 const VIEW_DEPS = {
   monthly:           ["overview", "monthly", "market", "actors", "technologySignals", "collectionHealth"],
   market:            ["overview", "market", "marketScores", "marketCompilation", "demandSignals"],
-  offers:            ["overview", "offers"],
+  // actors/market : la fiche offre reprend specs chiffrées, certifications et marchés servis.
+  offers:            ["overview", "offers", "namedOffers", "offersCoverage", "actors", "market"],
   techcorpus:        ["overview", "techCorpus", "techSources"],
   // market/offers/documents ne servent pas à la grille elle-même mais à la fiche détail
   // (showActorDetail -> actorDetailContent), ouverte depuis cette grille : sans eux la fiche

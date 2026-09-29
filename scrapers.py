@@ -2607,7 +2607,10 @@ def _offer_review_reasons(candidate: dict, source_count_after: int) -> list[str]
         reasons.append("page_type_null")
     if urlparse(candidate["url"]).path in ("", "/"):
         reasons.append("homepage_citation")
-    if not candidate.get("operation"):
+    # Une capacité "procédé" (SLE, LIPSS, burst...) n'a jamais d'opération : _offer_candidates
+    # la crée précisément à partir du procédé seul. Exiger l'opération bloquait les 88 offres à
+    # procédé (mesuré le 29/09/2026) -- la facette PROCÉDÉ de la page restait vide à 100 %.
+    if not candidate.get("operation") and not candidate.get("process"):
         reasons.append("operation_null")
     if source_count_after <= 1 and not _is_first_party_offer_page(candidate):
         reasons.append("single_unconfirmed_source")
