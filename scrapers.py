@@ -123,7 +123,7 @@ from lexicon import (  # noqa: F401  (reexports pour les importateurs historique
     is_laser_the_instrument,
     is_on_topic,
 )
-from site_profiles import SITE_OVERRIDES, crawl_budget, get_site_profile, seed_urls
+from site_profiles import SITE_OVERRIDES, crawl_budget, explore_budget, get_site_profile, seed_urls
 
 AiClient = OllamaClient | AnthropicClient
 
@@ -1596,11 +1596,18 @@ def _dedupe_candidates(candidates: list[dict]) -> list[dict]:
 
 
 # === Bloc 5/6 : le crawler (scrape_actors) et sa file de priorité "coverage-first" ===
-def adaptive_decision(priority: bool, document_count: int, block_count: int, errors: int, source_count: int) -> tuple[str, bool]:
+def adaptive_decision(
+    priority: bool, document_count: int, block_count: int, errors: int, source_count: int, unchanged_count: int = 0,
+) -> tuple[str, bool]:
     """Décide, après un crawl, si cet acteur doit passer en stratégie "adaptive" (IA de secours
     activée lors de la prochaine collecte marché) : soit parce qu'il est marqué priority, soit
-    parce que le crawl a été manifestement anormal (0 document, 0 bloc, ou trop d'erreurs)."""
-    anomaly = document_count == 0 or block_count == 0 or errors >= max(1, source_count // 2)
+    parce que le crawl a été manifestement anormal (0 document, 0 bloc, ou trop d'erreurs).
+
+    ``unchanged_count`` : pages revenues en 304 (inchangées depuis un fetch réussi). Elles ne
+    produisent aucun document ce tour-ci, mais ne sont pas une anomalie -- avant le 29/09/2026,
+    un site entièrement en 304 passait "degraded" (KMLT, 3D-Micromac : 13 échecs d'affilée)."""
+    healthy_pages = document_count + unchanged_count
+    anomaly = healthy_pages == 0 or (unchanged_count == 0 and block_count == 0) or errors >= max(1, source_count // 2)
     return ("adaptive" if priority or anomaly else "generic", anomaly)
 
 
@@ -1668,15 +1675,51 @@ def _pop_crawl_item(
     return chosen[4], chosen[1]
 
 
+# Types de page qui portent une offre ou une capacité, dans l'ordre du tourniquet
+# d'exploration : d'abord ceux où l'acteur déclare lui-même ce qu'il vend (voir
+# FIRST_PARTY_OFFER_PAGE_TYPES), puis les preuves d'exécution.
+EXPLORATION_PAGE_TYPES = ("service", "capability", "product", "equipment", "case_study", "application", "technology")
+
+
+def _exploration_queue(sources: list[dict]) -> list[dict]:
+    """Pages d'offre jamais téléchargées (last_checked_at NULL), à visiter en plus du budget
+    normal. Tourniquet par type (un service, une capability, un produit..., puis on recommence)
+    pour qu'un site riche en pages technology ne consomme pas tout le budget d'exploration ;
+    meilleur source_score d'abord au sein d'un type."""
+    by_type: dict[str, list[dict]] = defaultdict(list)
+    for source in sources:
+        page_type = normalize_page_type(source.get("page_type"))
+        if source.get("last_checked_at") is None and page_type in EXPLORATION_PAGE_TYPES:
+            by_type[page_type].append(source)
+    lanes = [
+        sorted(by_type[page_type], key=lambda s: (-int(s.get("source_score") or 0), int(s["id"])))
+        for page_type in EXPLORATION_PAGE_TYPES
+    ]
+    queue: list[dict] = []
+    for row in itertools.zip_longest(*lanes):
+        for source in row:
+            if source is not None:
+                queue.append({
+                    "source_id": source["id"],
+                    "url": source["url"],
+                    "page_type": normalize_page_type(source.get("page_type")),
+                    "score": int(source.get("source_score") or 0),
+                    "depth": int(source.get("discovery_depth") or 0),
+                    "parent_url": source.get("parent_url"),
+                    "reason": "exploration",
+                })
+    return queue
+
+
 def _source_coverage(actor_id: int, profile: dict | None = None) -> dict[str, dict[str, int | str]]:
     """État de couverture par type de page pour un acteur (combien découvertes, combien
-    "prêtes" i.e. répondant en 2xx sans être ambiguës), utilisé à la fois pour piloter le
+    "prêtes" i.e. répondant en 2xx -- ou 304, inchangée depuis un 2xx -- sans être ambiguës), utilisé à la fois pour piloter le
     crawl (voir _effective_crawl_score) et pour l'afficher dans /api/profiles."""
     coverage: dict[str, dict[str, int | str]] = {}
     with connect(ACTORS_DB) as db:
         rows = db.execute(
             """SELECT page_type, COUNT(*) AS discovered,
-                      SUM(CASE WHEN last_http_status BETWEEN 200 AND 299 AND ambiguous=0 THEN 1 ELSE 0 END) AS ready
+                      SUM(CASE WHEN (last_http_status BETWEEN 200 AND 299 OR last_http_status=304) AND ambiguous=0 THEN 1 ELSE 0 END) AS ready
                FROM actor_sources WHERE actor_id=? AND active=1 AND page_type IS NOT NULL
                GROUP BY page_type""",
             (actor_id,),
@@ -1908,12 +1951,23 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
             actor_errors = 0
             successful_visits = 0
             attempts = 0
-            max_attempts = max(budget * 3, budget + 4)
+            unchanged_visits = 0
+            # Un plafond explicite (max_pages_per_actor) reste un plafond : pas d'exploration.
+            exploration = [] if max_pages_per_actor else _exploration_queue([dict(row) for row in initial_sources])
+            total_budget = budget + min(explore_budget(site_profile), len(exploration))
+            max_attempts = max(total_budget * 3, total_budget + 4)
 
-            while heap and successful_visits < budget and attempts < max_attempts:
-                popped = _pop_crawl_item(heap, queued_scores, visited, visited_by_type, site_profile)
-                if not popped:
-                    break
+            while successful_visits < total_budget and attempts < max_attempts:
+                # Le budget normal suit la file par score (pages clés revisitées, suivi des
+                # changements) ; au-delà, on dépile les pages d'offre jamais téléchargées.
+                popped = None
+                if successful_visits < budget and heap:
+                    popped = _pop_crawl_item(heap, queued_scores, visited, visited_by_type, site_profile)
+                if popped is None:
+                    if not exploration:
+                        break
+                    explored = exploration.pop(0)
+                    popped = (explored, int(explored["score"]))
                 item, score = popped
                 url = item["url"]
                 depth = int(item.get("depth", 0))
@@ -1962,6 +2016,7 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
                             )
                         scanned += 1
                         successful_visits += 1
+                        unchanged_visits += 1
                         continue
 
                     if is_pdf_response(response.headers.get("content-type", ""), resolved_url):
@@ -2118,7 +2173,9 @@ def scrape_actors(max_pages_per_actor: int | None = None, actor_names: list[str]
             profile, generated_by, confidence = build_profile(actor, documents, ollama, coverage=coverage, site_profile=site_profile)
             encoded, digest = profile_json(profile)
             block_count = sum(len(document.blocks) for _, document in documents)
-            strategy, anomaly = adaptive_decision(bool(actor["priority"]), len(documents), block_count, actor_errors, max(1, len(visited)))
+            strategy, anomaly = adaptive_decision(
+                bool(actor["priority"]), len(documents), block_count, actor_errors, max(1, len(visited)), unchanged_visits,
+            )
             fallback += int(anomaly and not actor["priority"])
 
             strategic_names = list(site_profile.get("coverage_targets", {}).keys())
@@ -2197,8 +2254,10 @@ def _source_family(page_type: str | None) -> str:
 # Chantier 2 item 4 : la collecte marché plafonnait à 120 pages au total pour tous les
 # acteurs (3,4 pages/acteur/passe selon l'audit), un budget calibré pour un pilote plutôt
 # qu'un observatoire. scrape_market() calcule maintenant son budget par défaut comme
-# MARKET_PAGES_PER_ACTOR * nb d'acteurs actifs (ex: 10 x 35 = 350) au lieu d'une constante fixe.
-MARKET_PAGES_PER_ACTOR = 10
+# MARKET_PAGES_PER_ACTOR * nb d'acteurs actifs au lieu d'une constante fixe. Passé de 10 à 30
+# le 29/09/2026 avec l'explore_budget du crawl (20 pages nouvelles/acteur/collecte, voir
+# site_profiles) : à 10, la passe marché n'aurait pas absorbé les pages que le crawl rapporte.
+MARKET_PAGES_PER_ACTOR = 30
 
 
 def _select_market_sources(max_pages: int = 350) -> list[dict]:

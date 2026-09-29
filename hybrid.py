@@ -239,6 +239,25 @@ def _is_cmp_zone(tag: Tag) -> bool:
     return strong_attr or (interactive and consent_terms >= 2)
 
 
+def _is_page_container(tag: Tag) -> bool:
+    """Un thème peut poser une classe d'état "cookie"/"consent" sur <html> ou <body> (Enfold :
+    `av-cookies-consent-...`) : supprimer ce tag vidait la page entière -- mesuré le
+    29/09/2026 sur photonicfab.de et 3d-micromac.com, 0 bloc extrait, faussement signalés
+    render_required. Un bandeau de consentement ne contient jamais le contenu principal."""
+    return tag.name in {"html", "body", "main"} or tag.find("main") is not None
+
+
+def _is_aem_component(tag: Tag) -> bool:
+    """Adobe Experience Manager préfixe TOUS ses composants par `cmp-` (cmp-container,
+    cmp-text, cmp-teaser__title...) : `[class*=cmp]` supprimait tout le contenu de coherent.com.
+    Les CMP de consentement (cmpbox, qc-cmp2-container, cmplz-...) n'utilisent pas ce préfixe."""
+    classes = [str(value).lower() for value in (tag.get("class") or [])]
+    cmp_classes = [value for value in classes if "cmp" in value]
+    return bool(cmp_classes) and all(value.startswith("cmp-") for value in cmp_classes) and not re.search(
+        r"cookie|consent", " ".join(classes) + " " + str(tag.get("id") or "").lower()
+    )
+
+
 def _remove_noise_zones(soup: BeautifulSoup) -> int:
     """Remove navigation/chrome plus entire CMP roots before editorial extraction.
 
@@ -260,7 +279,9 @@ def _remove_noise_zones(soup: BeautifulSoup) -> int:
     )
     for selector in selectors:
         for tag in list(soup.select(selector)):
-            if tag.parent is not None:
+            if tag.parent is not None and not _is_page_container(tag) and not (
+                "cmp" in selector and _is_aem_component(tag)
+            ):
                 tag.decompose(); removed += 1
     for element in list(soup.find_all(["div", "section", "dialog"], attrs={"role": ["dialog", "alertdialog"]})):
         if isinstance(element, Tag) and element.parent is not None and _is_cmp_zone(element):

@@ -41,6 +41,12 @@ DEFAULT_SITE_PROFILE: dict[str, Any] = {
     "crawl": {
         "priority_budget": 12,   # nb de pages max visitées si l'acteur est "priority"
         "standard_budget": 6,    # nb de pages max visitées sinon
+        # Pages JAMAIS téléchargées visitées EN PLUS du budget ci-dessus, à chaque collecte
+        # (voir scrapers._exploration_queue). Sans ce budget, la file triée par score repart
+        # identique à chaque collecte et revisite les mêmes 6 pages : mesuré le 29/09/2026,
+        # 928 des 3 575 pages service/capability/product/... découvertes avaient été
+        # téléchargées une seule fois, 42 des 674 pages produit.
+        "explore_budget": 20,
         "max_depth": 2,          # profondeur max de liens suivis depuis les pages de départ
         "max_links_per_page": 160,
         # Coverage-first: an uncovered strategic family receives a large temporary boost.
@@ -347,6 +353,12 @@ def crawl_budget(profile: dict[str, Any], priority: bool) -> int:
     """Nombre max de pages à visiter pour un acteur : plus élevé si l'acteur est "priority"."""
     crawl = profile.get("crawl", {})
     return int(crawl.get("priority_budget" if priority else "standard_budget", 12 if priority else 6))
+
+
+def explore_budget(profile: dict[str, Any]) -> int:
+    """Nombre de pages jamais téléchargées à visiter en plus de crawl_budget (voir
+    scrapers._exploration_queue)."""
+    return int(profile.get("crawl", {}).get("explore_budget", 20))
 
 
 def seed_urls(profile: dict[str, Any], official_url: str) -> list[str]:
