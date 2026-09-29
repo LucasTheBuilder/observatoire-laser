@@ -45,12 +45,35 @@
 .subtheme-chip{padding:5px 10px;border-radius:20px;background:#eef2f1;color:#41515d;font-size:11px;font-weight:700}
 .subtheme-chip b{color:var(--coral);font-weight:800;margin-left:4px}
 
+/* Compilation marché & produit : offres et documents techniques rattachés à un marché ou à un
+   produit nommé (voir market_compilation.py). Même carte que .evidence-table pour que les
+   quatre tableaux de la page se lisent comme une seule famille. */
+.mc-counts{margin:-6px 0 10px;color:var(--muted);font-size:11.5px;font-weight:700}
+.mc-table{overflow:hidden;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 10px 32px #18313d0a}
+.mc-head,.mc-row{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.8fr) minmax(0,1.4fr) 60px;align-items:center;gap:20px}
+.mc-head{padding:12px 20px;background:#eef2f1;color:#77848e;text-transform:uppercase;letter-spacing:.08em;font-size:10px;font-weight:850}
+.mc-row{padding:13px 20px;border-top:1px solid #edf0f1;font-size:13px}
+.mc-row small{display:block;margin-top:3px;color:var(--muted);font-size:11px}
+.mc-row a{color:inherit;text-decoration:none}
+.mc-row a:hover{color:var(--teal);text-decoration:underline}
+.mc-kind{font-size:11px;font-weight:800;color:#41515d;text-transform:uppercase;letter-spacing:.05em}
+.mc-tags{display:flex;flex-wrap:wrap;gap:5px}
+.mc-tag{padding:3px 8px;border-radius:12px;background:#eef2f1;color:#41515d;font-size:10.5px;font-weight:700}
+.mc-tag.market{background:#fdeeec;color:#b04a33}
+.mc-product-filter{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:14px 0 40px}
+.mc-product-filter>span{margin-right:6px;color:var(--muted);font-size:10px;font-weight:850;letter-spacing:.08em;text-transform:uppercase}
+.mc-product-chip{padding:5px 11px;border:1px solid var(--line);border-radius:20px;background:#fff;color:#41515d;font:inherit;font-size:11.5px;font-weight:700;cursor:pointer}
+.mc-product-chip b{margin-left:5px;color:var(--coral)}
+.mc-product-chip.active{border-color:var(--teal);background:#e6f2f0;color:#0a6f64}
+
 @media(max-width:1100px){
   .evidence-head,.evidence-row{grid-template-columns:1fr 1.4fr 1.4fr 60px}
   .evidence-table.no-market-col .evidence-head,.evidence-table.no-market-col .evidence-row{grid-template-columns:1.6fr 1.6fr 60px}
 }
 @media(max-width:760px){
-  .evidence-head{display:none}
+  .evidence-head,.mc-head{display:none}
+  .mc-row{position:relative;grid-template-columns:1fr;gap:8px;padding:16px 18px;padding-right:70px}
+  .mc-row .proof-pill{position:absolute;right:18px;top:14px}
   .evidence-row{position:relative;grid-template-columns:1fr;gap:9px;padding:18px}
   .proof-pill{position:absolute;right:18px;top:15px}
 }

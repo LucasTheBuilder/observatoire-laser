@@ -99,6 +99,7 @@ from google_patents import collect_google_patents
 from hal import collect_hal_publications
 from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from lens import collect_lens_patents
+from market_compilation import compile_market_page, source_glossary
 from market_sizing import add_market_sizing, delete_market_sizing, list_market_sizing
 from national_projects import collect_national_projects
 from openalex import collect_openalex_publications, discover_global_actor_candidates
@@ -1424,6 +1425,29 @@ def proofs(bucket: str, market: str, component: str, operation: str):
            ORDER BY COALESCE(es.source_date,es.created_at) DESC""",
         (bucket, market, component, operation),
     )
+
+
+@app.get("/api/market/compilation")
+def market_compilation() -> dict[str, Any]:
+    """Les offres acceptées et le corpus technique rattachés à un marché ou à un produit nommé
+    (voir market_compilation.py pour la règle), plus le glossaire des sources de la page.
+
+    Séparé de /api/market parce que ce dernier dit une chose précise -- les faits où marché,
+    pièce et opération sont reliés dans une même phrase -- et que le Synthèse, le scoring et
+    l'export CSV le lisent dans ce sens-là.
+    """
+    compiled = compile_market_page(MARKET_DB, TECH_DB)
+    facts = market()
+    demand_counts = Counter(row["source"] for row in rows(MARKET_DB, "SELECT source FROM demand_signals"))
+    return {
+        **compiled,
+        "sources": source_glossary(
+            evidence_count=len(facts["existing"]) + len(facts["radar"]),
+            offers=compiled["offers"],
+            technology=compiled["technology"],
+            demand_counts=dict(demand_counts),
+        ),
+    }
 
 
 @app.get("/api/demand-signals")

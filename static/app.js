@@ -21,8 +21,7 @@ const state = {
   schedulerStatus: null,
   veilleMetrics: null,
   demandSignals: [],
-  marketSizing: [],
-  referenceMatrix: [],
+  marketCompilation: {offers: [], technology: [], sources: []},
   dataQuality: null,
   goldenFacts: [],
   network: {nodes: [], edges: []},
@@ -40,6 +39,7 @@ const state = {
   offerExpanded: [],
   offerLimit: 12,
   marketDrill: null,
+  marketProduct: null,
   actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
   marketReviewFilters: {origin: "", factStatus: "", actor: ""},
   // Échantillon d'audit : chargé à la demande, parce qu'il dépend d'une
@@ -112,19 +112,6 @@ function marketIcon(label) {
 
 // --- Classification helpers (client-side grouping, no backend schema change) -----
 
-function groupByMarket(rows) {
-  const map = new Map();
-  for (const row of rows) {
-    const market = row.market || "Non classé";
-    if (!map.has(market)) map.set(market, {total: 0, subthemes: new Map()});
-    const bucket = map.get(market);
-    bucket.total += 1;
-    const sub = row.component || row.operation || "Autre";
-    bucket.subthemes.set(sub, (bucket.subthemes.get(sub) || 0) + 1);
-  }
-  return [...map.entries()].sort((a, b) => b[1].total - a[1].total);
-}
-
 // Score d'intensité concurrentielle par marché (audit Horizon 2 #14, voir scoring.py:
 // compute_competitive_intensity_scores ; renommé depuis "attractivité" le 30/08/2026, audit
 // veille §10.4 -- ce score ne mesure que l'offre concurrente déjà présente, un marché encombré
@@ -148,25 +135,181 @@ function intensityBadge(market) {
     <small class="block-label">${entry.existing} existant · ${entry.radar} radar · ${entry.actors_count} acteur${entry.actors_count > 1 ? "s" : ""} · ${Math.round(entry.production_share * 100)}% industrialisé</small>`;
 }
 
-function marketFamilyCards(rows) {
-  const groups = groupByMarket(rows);
-  if (!groups.length) return `<div class="empty">Pas encore assez de faits pour une lecture par marché.</div>`;
+// --- Compilation marché & produit -----------------------------------------------------------
+// Trois lectures du même marché, réduites à une forme commune {kind, markets, products, row} :
+// les faits (/api/market, marché + pièce + opération reliés dans une phrase), les offres et le
+// corpus technique (/api/market/compilation, rattachés quand une phrase de leur source nomme le
+// marché ou le produit -- voir market_compilation.py). Rien n'est rattaché par déduction : une
+// offre qui ne nomme aucun marché reste sur Offres & capacités, pas ici.
+const MC_KIND_WORDS = {
+  fait: ["fait", "faits"],
+  offre: ["offre", "offres"],
+  tech: ["document technique", "documents techniques"],
+};
+const MC_TECH_KINDS = {pub: "Publication", projet: "Projet", brevet: "Brevet"};
+
+function mcEntries() {
+  const market = state.market || {existing: [], radar: []};
+  const compiled = state.marketCompilation || {offers: [], technology: []};
+  return [
+    ...[...market.existing, ...market.radar].map(row => ({kind: "fait", markets: [row.market], products: row.component ? [row.component] : [], row})),
+    ...(compiled.offers || []).map(row => ({kind: "offre", markets: row.markets, products: row.products, row})),
+    ...(compiled.technology || []).map(row => ({kind: "tech", markets: row.markets, products: row.products, row})),
+  ];
+}
+
+function mcMatches(entry, market, product) {
+  return (!market || entry.markets.includes(market)) && (!product || entry.products.includes(product));
+}
+
+function mcEmptyCounts() {
+  return {fait: 0, offre: 0, tech: 0};
+}
+
+// Un marché porte ses produits : un produit s'affiche sous un marché quand une MÊME entrée
+// nomme les deux. Un produit qu'aucune entrée ne relie à un marché a sa propre carte plus bas,
+// au lieu d'être rangé sous un marché qu'aucune source ne cite.
+function mcGroups(entries) {
+  const markets = new Map();
+  const orphans = new Map();
+  for (const entry of entries) {
+    for (const market of entry.markets) {
+      const bucket = markets.get(market) || {counts: mcEmptyCounts(), total: 0, products: new Map()};
+      bucket.counts[entry.kind] += 1;
+      bucket.total += 1;
+      for (const product of entry.products) bucket.products.set(product, (bucket.products.get(product) || 0) + 1);
+      markets.set(market, bucket);
+    }
+    if (entry.markets.length) continue;
+    for (const product of entry.products) {
+      const bucket = orphans.get(product) || {counts: mcEmptyCounts(), total: 0};
+      bucket.counts[entry.kind] += 1;
+      bucket.total += 1;
+      orphans.set(product, bucket);
+    }
+  }
+  const byTotal = (a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0]);
+  return {markets: [...markets.entries()].sort(byTotal), orphans: [...orphans.entries()].sort(byTotal)};
+}
+
+function mcCountsLine(counts) {
+  return Object.entries(MC_KIND_WORDS)
+    .filter(([kind]) => counts[kind])
+    .map(([kind, [one, many]]) => `${counts[kind]} ${counts[kind] > 1 ? many : one}`)
+    .join(" · ");
+}
+
+function mcMarketCards(groups) {
+  if (!groups.length) return `<div class="empty">Aucune entrée ne nomme encore de marché.</div>`;
   return `<div class="market-fam-grid">${groups.map(([market, bucket]) => {
-    const chips = [...bucket.subthemes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
+    const chips = [...bucket.products.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
       .map(([label, count]) => `<span class="subtheme-chip">${esc(label)}<b>${count}</b></span>`).join("");
-    return `<button class="market-fam-card market-fam-card-link" data-drill-market="${esc(market)}"><header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${bucket.total} faits</b></div></header>${intensityBadge(market)}<div class="subtheme-chips">${chips}</div></button>`;
+    return `<button class="market-fam-card market-fam-card-link" data-drill-market="${esc(market)}">
+      <header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${bucket.total}</b></div></header>
+      <p class="mc-counts">${esc(mcCountsLine(bucket.counts))}</p>
+      ${intensityBadge(market)}<div class="subtheme-chips">${chips}</div></button>`;
   }).join("")}</div>`;
 }
 
-// Fil d'Ariane à un seul niveau : jamais plus que "Tous les marchés" ou "Tous les
-// marchés › {market}", mais reprend le même motif visuel que le reste des vues à paliers.
-function marketBreadcrumb(selected) {
-  if (!selected) return "";
-  return `<nav class="drill-breadcrumb" tabindex="-1">
-    <button class="drill-crumb" data-drill-market="">Tous les marchés</button><span class="drill-sep">›</span>
-    <span class="drill-crumb current">${esc(selected)}</span>
-  </nav>`;
+function mcProductCards(groups) {
+  return `<div class="market-fam-grid">${groups.map(([product, bucket]) => `
+    <button class="market-fam-card market-fam-card-link" data-drill-product="${esc(product)}">
+      <header><div><h3>${esc(product)}</h3><b>${bucket.total}</b></div></header>
+      <p class="mc-counts">${esc(mcCountsLine(bucket.counts))}</p></button>`).join("")}</div>`;
 }
+
+// Fil d'Ariane à deux niveaux au plus : marché, puis produit. Un produit sans marché nommé
+// s'ouvre directement sous « Tous les marchés ».
+function marketBreadcrumb(market, product) {
+  const crumbs = [`<button class="drill-crumb" data-drill-market="">Tous les marchés</button>`];
+  if (market) {
+    crumbs.push(product
+      ? `<button class="drill-crumb" data-drill-market="${esc(market)}">${esc(market)}</button>`
+      : `<span class="drill-crumb current">${esc(market)}</span>`);
+  }
+  if (product) crumbs.push(`<span class="drill-crumb current">${esc(product)}</span>`);
+  return `<nav class="drill-breadcrumb" tabindex="-1">${crumbs.join(`<span class="drill-sep">›</span>`)}</nav>`;
+}
+
+// Les produits du marché ouvert, pour resserrer encore la lecture. Seuls ceux qu'une entrée de
+// CE marché nomme -- jamais la liste complète du lexique.
+function mcProductFilter(entries, market, product) {
+  const counts = new Map();
+  for (const entry of entries) {
+    if (!entry.markets.includes(market)) continue;
+    for (const label of entry.products) counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  if (!counts.size) return "";
+  const chips = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([label, count]) => `<button class="mc-product-chip ${label === product ? "active" : ""}" data-drill-product="${esc(label)}">${esc(label)}<b>${count}</b></button>`).join("");
+  return `<div class="mc-product-filter"><span>Produits nommés</span>
+    <button class="mc-product-chip ${product ? "" : "active"}" data-drill-product="">Tous</button>${chips}</div>`;
+}
+
+function mcTags(row, {hideMarket, hideProduct} = {}) {
+  return [
+    ...row.markets.filter(label => label !== hideMarket).map(label => `<span class="mc-tag market">${esc(label)}</span>`),
+    ...row.products.filter(label => label !== hideProduct).map(label => `<span class="mc-tag">${esc(label)}</span>`),
+  ].join("");
+}
+
+function mcOffersTable(rows, context) {
+  if (!rows.length) return `<div class="empty">Aucune offre acceptée ne nomme ce marché ou ce produit.</div>`;
+  return `<div class="mc-table">
+    <div class="mc-head"><span>Acteur</span><span>Capacité</span><span>Marchés · produits nommés</span><span>Preuve</span></div>
+    ${rows.map(row => `<div class="mc-row">
+      <strong>${esc(row.actor)}</strong>
+      <div>${esc(row.capability || "")}${row.operation ? `<small>${esc(normalizedOperation(row))}</small>` : ""}</div>
+      <div class="mc-tags">${mcTags(row, context)}</div>
+      <button class="proof-pill" data-mc-proof="${esc(row.uid)}" title="Voir la phrase de la source">${row.proofs.length}</button>
+    </div>`).join("")}
+  </div>`;
+}
+
+function mcTechTable(rows, context) {
+  if (!rows.length) return `<div class="empty">Aucune publication ni aucun projet ne nomme ce marché ou ce produit.</div>`;
+  return `<div class="mc-table">
+    <div class="mc-head"><span>Type</span><span>Titre</span><span>Marchés · produits nommés</span><span>Preuve</span></div>
+    ${rows.map(row => `<div class="mc-row">
+      <span class="mc-kind">${esc(MC_TECH_KINDS[row.kind] || row.kind)}${row.date ? `<small>${esc(String(row.date).slice(0, 4))}</small>` : ""}</span>
+      <div><a href="${esc(row.source_url || "#")}" target="_blank" rel="noopener">${esc(row.title || "Sans titre")}</a>${row.actors.length ? `<small>${esc(row.actors.join(", "))}</small>` : ""}</div>
+      <div class="mc-tags">${mcTags(row, context)}</div>
+      <button class="proof-pill" data-mc-proof="${esc(row.uid)}" title="Voir la phrase de la source">${row.proofs.length}</button>
+    </div>`).join("")}
+  </div>`;
+}
+
+// La preuve d'un rattachement est la phrase elle-même : c'est elle qui nomme le marché ou le
+// produit, et c'est tout ce que le rattachement affirme.
+function showMarketCompilationProof(uid) {
+  const compiled = state.marketCompilation || {offers: [], technology: []};
+  const row = [...(compiled.offers || []), ...(compiled.technology || [])].find(item => item.uid === uid);
+  if (!row) return;
+  const title = row.title || row.capability || "";
+  const meta = row.actor ? row.actor : row.actors.join(", ");
+  document.querySelector("#proof-content").innerHTML = `<div class="ex-proof-head">
+      <p class="ex-proof-meta">${esc(row.actor ? "Offre & capacité" : (MC_TECH_KINDS[row.kind] || ""))}${meta ? ` · <b>${esc(meta)}</b>` : ""}</p>
+      <h2>${esc(title)}</h2>
+    </div>
+    <div class="ex-proof-section">CE QUE LA SOURCE NOMME</div>
+    ${row.proofs.map(proof => `<div class="ex-proof-item">
+      <div><span class="ex-proof-axis">${proof.dimension === "market" ? "Marché" : "Produit"} · ${esc(proof.label)}</span></div>
+      <blockquote>${esc(proof.sentence)}</blockquote>
+    </div>`).join("")}
+    ${row.source_url ? `<a class="ex-proof-link" href="${esc(row.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a>` : ""}`;
+  dialog.classList.remove("wide");
+  dialog.showModal();
+}
+
+// Le glossaire de bas de page : même bloc que la page Technologie laser, rangé selon ce que
+// chaque source apporte à CETTE page.
+const MC_SOURCE_ROLES = [
+  {role: "Pages des acteurs suivis", plural: "Pages des acteurs suivis"},
+  {role: "Publications scientifiques", plural: "Publications scientifiques"},
+  {role: "Projets financés", plural: "Projets financés"},
+  {role: "Brevets", plural: "Brevets"},
+  {role: "Signaux de demande", plural: "Signaux de demande"},
+];
 
 // Capacity families: an operation/capability is matched against every keyword family
 // (usinage / fonctionnalisation / structuration interne) independently -- a capability
@@ -265,7 +408,7 @@ function proofMeta(row) {
 }
 
 // hideMarketColumn drops the now-redundant "Marché" column once the reader has already picked
-// a market via marketFamilyCards -- same idea as offers' hideMaterialSuffix: don't repeat what
+// a market via mcMarketCards -- same idea as offers' hideMaterialSuffix: don't repeat what
 // the breadcrumb already says.
 function evidenceTable(rows, {hideMarketColumn = false, emptyMessage} = {}) {
   if (!rows.length) {
@@ -370,7 +513,7 @@ function demandSignalsPanel() {
   const detail = groupes
     .map(([kind, liste]) => `${liste.length} ${liste.length > 1 ? kind.plural : kind.label.toLowerCase()}`)
     .join(" · ");
-  return `<section><div class="section-title"><div><span>04</span><div><h2>Signaux de demande</h2><p>Ce que le marché ACHÈTE, par opposition à ce que les acteurs suivis disent faire : appels d'offres publics (TED, BOAMP) et entreprises cofinançant un projet ANR dont l'objet nomme une opération laser.${detail ? ` <b>${esc(detail)}</b>.` : ""}</p></div></div><b>${items.length}</b></div>
+  return `<section><div class="section-title"><div><span>06</span><div><h2>Signaux de demande</h2><p>Ce que le marché ACHÈTE, par opposition à ce que les acteurs suivis disent faire : appels d'offres publics (TED, BOAMP) et entreprises cofinançant un projet ANR dont l'objet nomme une opération laser.${detail ? ` <b>${esc(detail)}</b>.` : ""}</p></div></div><b>${items.length}</b></div>
     ${demandBuyersMap(items)}
     ${items.length ? groupes.map(([kind, liste]) => `
       <div class="demand-group">
@@ -380,169 +523,65 @@ function demandSignalsPanel() {
   </section>`;
 }
 
-// §4.B.2 audit veille (30/08/2026, Lot 4 §14) : "les chiffres de marché laser publiés mélangent
-// allègrement machines, services et composants -- jamais moyennée entre sources, toujours
-// affichée avec son périmètre." CRUD sourcé, jamais de collecteur (market_sizing.py) -- vide
-// tant qu'un humain n'a pas saisi une vraie figure depuis un rapport/communiqué réel.
-function marketSizingCard(item) {
-  return `<article class="vocab-card">
-    <header><span>${esc(item.market)} · ${item.year}</span><span>${esc(item.currency)} ${item.value.toLocaleString('fr-FR')}${item.cagr != null ? ` · CAGR ${(item.cagr * 100).toFixed(1)}%` : ""}</span></header>
-    <p class="dialog-operation">${esc(item.scope)}</p>
-    ${item.method ? `<small class="block-label">Méthode : ${esc(item.method)}</small>` : ""}
-    <div class="vocab-dims" style="margin-top:12px"><button class="vocab-reject" data-delete-market-sizing="${item.id}">✕ Retirer</button></div>
-    <a class="signal-link" href="${esc(item.source_url)}" target="_blank" rel="noopener">Voir la source ↗</a>
-  </article>`;
-}
-
-function marketSizingPanel() {
-  const items = state.marketSizing || [];
-  return `<section><div class="section-title"><div><span>05</span><div><h2>Taille de marché</h2><p>Saisie sourcée depuis des rapports publics/communiqués d'analystes -- jamais moyennée entre sources, toujours affichée avec son périmètre exact.</p></div></div><b>${items.length}</b></div>
-    <button class="export-btn" data-open-market-sizing-add>+ Ajouter une taille de marché</button>
-    ${items.length ? `<div class="vocab-list" style="margin-top:14px">${items.map(marketSizingCard).join("")}</div>` : `<div class="empty">Aucune taille de marché saisie.</div>`}
-  </section>`;
-}
-
-function showMarketSizingAdd() {
-  document.querySelector("#proof-content").innerHTML = `<p class="eyebrow">Nouvelle entrée</p>
-    <h2>Ajouter une taille de marché</h2>
-    <form id="market-sizing-add-form" class="detail-form">
-      <label>Marché<input type="text" name="market" placeholder="ex: Médical" required></label>
-      <label>Périmètre exact<input type="text" name="scope" placeholder="ex: machines uniquement, hors services" required></label>
-      <label>Valeur<input type="number" step="any" name="value" required></label>
-      <label>Devise<input type="text" name="currency" value="EUR" required></label>
-      <label>Année<input type="number" name="year" required></label>
-      <label>CAGR (optionnel, ex: 0.08 pour 8%)<input type="number" step="any" name="cagr"></label>
-      <label>Méthode (optionnel)<input type="text" name="method"></label>
-      <label>URL source<input type="url" name="source_url" placeholder="https://..." required></label>
-      <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Ajouter</button></div>
-    </form>`;
-  dialog.classList.remove("wide");
-  dialog.showModal();
-  document.querySelector("#market-sizing-add-form").addEventListener("submit", async e => {
-    e.preventDefault();
-    const data = new FormData(e.target);
-    try {
-      await api("/api/market-sizing", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({
-          market: data.get("market"), scope: data.get("scope"), value: Number(data.get("value")),
-          currency: data.get("currency"), year: Number(data.get("year")),
-          cagr: data.get("cagr") ? Number(data.get("cagr")) : null,
-          method: data.get("method") || null, source_url: data.get("source_url"),
-        }),
-      });
-      toast("Taille de marché ajoutée.");
-      dialog.close();
-      state.marketSizing = await api("/api/market-sizing");
-      renderMarket();
-    } catch (error) { toast(error.message); }
-  });
-  document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
-}
-
-async function deleteMarketSizing(entryId) {
-  try {
-    await api(`/api/market-sizing/${entryId}`, {method: "DELETE"});
-    toast("Entrée retirée.");
-    state.marketSizing = await api("/api/market-sizing");
-    renderMarket();
-  } catch (error) { toast(error.message); }
-}
-
-// §4.B.1 audit veille (Lot 4 §13) : une cellule déclarée ici est une AMBITION humaine
-// (marché x composant x opération qui DEVRAIT exister), indépendante de ce qu'evidence a
-// réellement observé -- reference_matrix.py calcule la couverture en comparant les deux.
-function referenceCellRow(cell) {
-  return `<article class="dup-row"><div><strong>${esc(cell.market)}</strong> · ${esc(cell.component)} · ${esc(cell.operation)}</div><span>${cell.covered ? `✓ Couverte (${cell.covered_bucket === "existing" ? "existant" : "radar"})` : "○ Zone blanche"}${cell.rationale ? ` · ${esc(cell.rationale)}` : ""} <button class="vocab-reject" data-delete-reference-cell="${cell.id}" style="margin-left:8px">✕</button></span></article>`;
-}
-
-function referenceMatrixPanel() {
-  const cells = state.referenceMatrix || [];
-  const covered = cells.filter(c => c.covered).length;
-  const whiteSpace = cells.filter(c => !c.covered);
-  return `<section><div class="section-title"><div><span>06</span><div><h2>Matrice de référence & zones blanches</h2><p>Cellules marché x composant x opération déclarées comme pertinentes par le métier -- indépendant de ce qui a déjà été observé.</p></div></div><b>${cells.length ? `${covered}/${cells.length}` : 0}</b></div>
-    <button class="export-btn" data-open-reference-cell-add>+ Déclarer une cellule</button>
-    ${cells.length ? `<div class="dup-list" style="margin-top:14px">${cells.map(referenceCellRow).join("")}</div>` : `<div class="empty">Aucune cellule de référence déclarée.</div>`}
-    ${whiteSpace.length ? `<p class="actor-summary-counts" style="margin-top:10px">${whiteSpace.length} zone${whiteSpace.length > 1 ? "s" : ""} blanche${whiteSpace.length > 1 ? "s" : ""} -- déclarée${whiteSpace.length > 1 ? "s" : ""} mais sans fait observé.</p>` : ""}
-  </section>`;
-}
-
-function showReferenceCellAdd() {
-  document.querySelector("#proof-content").innerHTML = `<p class="eyebrow">Nouvelle cellule</p>
-    <h2>Déclarer une cellule de référence</h2>
-    <form id="reference-cell-add-form" class="detail-form">
-      <label>Marché<input type="text" name="market" placeholder="ex: Médical" required></label>
-      <label>Composant<input type="text" name="component" placeholder="ex: Stents" required></label>
-      <label>Opération<input type="text" name="operation" placeholder="ex: Microperçage" required></label>
-      <label>Justification (optionnel)<textarea name="rationale" rows="3"></textarea></label>
-      <div class="detail-form-actions"><button type="button" data-close-dialog>Annuler</button><button type="submit" class="primary">Déclarer</button></div>
-    </form>`;
-  dialog.classList.remove("wide");
-  dialog.showModal();
-  document.querySelector("#reference-cell-add-form").addEventListener("submit", async e => {
-    e.preventDefault();
-    const data = new FormData(e.target);
-    try {
-      await api("/api/reference-matrix", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({
-          market: data.get("market"), component: data.get("component"), operation: data.get("operation"),
-          rationale: data.get("rationale") || null,
-        }),
-      });
-      toast("Cellule déclarée.");
-      dialog.close();
-      state.referenceMatrix = await api("/api/reference-matrix");
-      renderMarket();
-    } catch (error) { toast(error.message); }
-  });
-  document.querySelector("[data-close-dialog]")?.addEventListener("click", () => dialog.close());
-}
-
-async function deleteReferenceCell(cellId) {
-  try {
-    await api(`/api/reference-matrix/${cellId}`, {method: "DELETE"});
-    toast("Cellule retirée.");
-    state.referenceMatrix = await api("/api/reference-matrix");
-    renderMarket();
-  } catch (error) { toast(error.message); }
-}
-
 function renderMarket() {
-  const market = state.market || {existing:[], radar:[]};
-  const allRows = [...market.existing, ...market.radar];
-  const selected = state.marketDrill;
-  const existingRows = selected ? market.existing.filter(row => row.market === selected) : market.existing;
-  const radarRows = selected ? market.radar.filter(row => row.market === selected) : market.radar;
+  const entries = mcEntries();
+  const market = state.marketDrill;
+  const product = state.marketProduct;
+  const visible = entries.filter(entry => mcMatches(entry, market, product));
+  const facts = visible.filter(entry => entry.kind === "fait").map(entry => entry.row);
+  const existingRows = facts.filter(row => row.bucket === "existing");
+  const radarRows = facts.filter(row => row.bucket === "radar");
+  const offerRows = visible.filter(entry => entry.kind === "offre").map(entry => entry.row);
+  const techRows = visible.filter(entry => entry.kind === "tech").map(entry => entry.row);
+  const context = {hideMarket: market, hideProduct: product};
+  const scope = product || market;
 
-  // Same idea as Offres & capacités: the family-card overview is the entry point; once a market
-  // is picked it steps aside for a breadcrumb, and the two fact tables below narrow to it with
-  // their now-redundant "Marché" column dropped.
-  const section01 = selected
-    ? marketBreadcrumb(selected)
-    : `<div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché, avec ses sous-thèmes (pièce / composant) les plus documentés. Cliquer un marché filtre les deux tableaux ci-dessous.</p></div></div><b>${allRows.length} faits</b></div>${marketFamilyCards(allRows)}`;
+  // Même idée que Offres & capacités : les cartes sont l'entrée ; une fois un marché ou un
+  // produit choisi, elles laissent la place au fil d'Ariane et tout ce qui suit se resserre.
+  let section01;
+  if (scope) {
+    section01 = marketBreadcrumb(market, product) + (market ? mcProductFilter(entries, market, product) : "");
+  } else {
+    const groups = mcGroups(entries);
+    section01 = `<div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché nommé par un fait, une offre ou un document technique, avec les produits que ces mêmes sources nomment. Cliquer un marché resserre toute la page.</p></div></div><b>${groups.markets.length} marchés</b></div>${mcMarketCards(groups.markets)}
+      ${groups.orphans.length ? `<div class="section-title"><div><span>01·b</span><div><h2>Produits sans marché nommé</h2><p>La source nomme la pièce mais aucun marché : elle reste rangée sous son produit, jamais sous un marché déduit.</p></div></div><b>${groups.orphans.length} produits</b></div>${mcProductCards(groups.orphans)}` : ""}`;
+  }
 
   content.innerHTML = header(
-    "Lecture marché",
+    "Lecture marché & produit",
     "Applications femtoseconde",
-    "Uniquement les faits où marché, pièce/composant et opération laser sont explicitement reliés. Les versions linguistiques d’un même fait sont regroupées comme preuves.",
+    "Les faits où marché, pièce et opération laser sont reliés, plus les offres et les travaux techniques dont une phrase de la source nomme un marché ou un produit. Rien n’est rattaché par déduction.",
     `<div class="header-actions"><button class="export-btn" data-export="market">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser l’analyse</button></div>`
   ) +
   `<section id="market-drill-root">${section01}</section>
-   <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${existingRows.length} faits</b></div>${evidenceTable(existingRows, {hideMarketColumn: !!selected, emptyMessage: selected ? `Aucune application existante documentée pour ${selected}.` : undefined})}</section>
-   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${radarRows.length} faits</b></div>${evidenceTable(radarRows, {hideMarketColumn: !!selected, emptyMessage: selected ? `Aucune application radar documentée pour ${selected}.` : undefined})}</section>
+   <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${existingRows.length} faits</b></div>${evidenceTable(existingRows, {hideMarketColumn: !!market, emptyMessage: scope ? `Aucune application existante documentée pour ${scope}.` : undefined})}</section>
+   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${radarRows.length} faits</b></div>${evidenceTable(radarRows, {hideMarketColumn: !!market, emptyMessage: scope ? `Aucune application radar documentée pour ${scope}.` : undefined})}</section>
+   <section><div class="section-title"><div><span>04</span><div><h2>Offres & capacités</h2><p>Capacités acceptées dont une phrase de la source nomme un marché ou un produit. Les autres restent sur la page Offres & capacités.</p></div></div><b>${offerRows.length} offres</b></div>${mcOffersTable(offerRows, context)}</section>
+   <section><div class="section-title"><div><span>05</span><div><h2>Technologie</h2><p>Publications et projets du corpus Technologie laser dont le titre, le résumé ou l’objet nomme un marché ou un produit.</p></div></div><b>${techRows.length} documents</b></div>${mcTechTable(techRows, context)}</section>
    ${demandSignalsPanel()}
-   ${marketSizingPanel()}
-   ${referenceMatrixPanel()}`;
+   <section>${tcSourcesBlock(state.marketCompilation?.sources || [], MC_SOURCE_ROLES)}</section>`;
   wireActions();
   document.querySelectorAll("[data-drill-market]").forEach(el => el.addEventListener("click", () => {
     state.marketDrill = el.dataset.drillMarket || null;
+    state.marketProduct = null;
     renderMarket();
   }));
+  document.querySelectorAll("[data-drill-product]").forEach(el => el.addEventListener("click", () => {
+    state.marketProduct = el.dataset.drillProduct || null;
+    renderMarket();
+  }));
+  document.querySelectorAll("[data-mc-proof]").forEach(el => el.addEventListener("click", () => showMarketCompilationProof(el.dataset.mcProof)));
   const exportBtn = document.querySelector('[data-export="market"]');
-  if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("marche.csv", selected ? [...existingRows, ...radarRows] : allRows, [
-    {key: "market", label: "Marché"}, {key: "component", label: "Composant"},
-    {key: "operation", label: "Opération"}, {key: "languages", label: "Langues"},
+  if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("marche.csv", visible.map(entry => ({
+    type: entry.kind === "fait" ? (entry.row.bucket === "existing" ? "Fait existant" : "Fait radar") : entry.kind === "offre" ? "Offre" : (MC_TECH_KINDS[entry.row.kind] || "Document"),
+    markets: entry.markets.join(" | "),
+    products: entry.products.join(" | "),
+    actor: entry.kind === "tech" ? entry.row.actors.join(" | ") : entry.row.actor_name || entry.row.actor || "",
+    label: entry.kind === "fait" ? entry.row.operation : entry.kind === "offre" ? entry.row.capability : entry.row.title,
+    source: entry.kind === "fait" ? "" : entry.row.source_url || "",
+  })), [
+    {key: "type", label: "Type"}, {key: "markets", label: "Marché(s)"}, {key: "products", label: "Produit(s)"},
+    {key: "actor", label: "Acteur(s)"}, {key: "label", label: "Opération / capacité / titre"}, {key: "source", label: "Source"},
   ]));
 }
 
@@ -1317,9 +1356,9 @@ const TC_SOURCE_ROLES = [
   {role: "brevet", plural: "Brevets"},
 ];
 
-function tcSourcesBlock(sources) {
+function tcSourcesBlock(sources, roles = TC_SOURCE_ROLES) {
   if (!sources.length) return "";
-  const groups = TC_SOURCE_ROLES
+  const groups = roles
     .map(({role, plural}) => [plural, sources.filter(s => s.role === role).sort((a, b) => (b.count || 0) - (a.count || 0))])
     .filter(([, list]) => list.length);
   const rows = groups.map(([plural, list]) => `
@@ -3350,10 +3389,6 @@ function wireActions(){
   document.querySelectorAll("[data-actor-edit]").forEach(el=>el.addEventListener("click",()=>showActorEdit(Number(el.dataset.actorEdit))));
   document.querySelectorAll("[data-actor-toggle-priority]").forEach(el=>el.addEventListener("click",()=>toggleActorPriority(Number(el.dataset.actorTogglePriority), el.dataset.nextPriority==="1")));
   document.querySelectorAll("[data-actor-delete]").forEach(el=>el.addEventListener("click",()=>deleteActorWithConfirm(Number(el.dataset.actorDelete), el.dataset.actorName)));
-  document.querySelector("[data-open-market-sizing-add]")?.addEventListener("click", showMarketSizingAdd);
-  document.querySelectorAll("[data-delete-market-sizing]").forEach(button=>button.addEventListener("click",()=>deleteMarketSizing(Number(button.dataset.deleteMarketSizing))));
-  document.querySelector("[data-open-reference-cell-add]")?.addEventListener("click", showReferenceCellAdd);
-  document.querySelectorAll("[data-delete-reference-cell]").forEach(button=>button.addEventListener("click",()=>deleteReferenceCell(Number(button.dataset.deleteReferenceCell))));
   document.querySelector("[data-open-golden-fact-add]")?.addEventListener("click", showGoldenFactAdd);
   document.querySelectorAll("[data-delete-golden-fact]").forEach(button=>button.addEventListener("click",()=>deleteGoldenFact(Number(button.dataset.deleteGoldenFact))));
 }
@@ -3395,8 +3430,7 @@ const LOADERS = {
   schedulerStatus:   () => api("/api/scheduler"),
   veilleMetrics:     () => apiOrNull("/api/veille-metrics"),
   demandSignals:     () => api("/api/demand-signals"),
-  marketSizing:      () => api("/api/market-sizing"),
-  referenceMatrix:   () => api("/api/reference-matrix"),
+  marketCompilation: () => api("/api/market/compilation"),
   dataQuality:       () => api("/api/data-quality"),
   goldenFacts:       () => api("/api/golden-facts"),
   rejectReasons:     () => api("/api/reject-reasons"),
@@ -3407,7 +3441,7 @@ const LOADERS = {
 // il porte les compteurs de files et l'état des collectes utilisés par les en-têtes.
 const VIEW_DEPS = {
   monthly:           ["overview", "monthly", "market", "actors", "technologySignals", "collectionHealth"],
-  market:            ["overview", "market", "marketScores", "marketSizing", "referenceMatrix", "demandSignals"],
+  market:            ["overview", "market", "marketScores", "marketCompilation", "demandSignals"],
   offers:            ["overview", "offers"],
   techcorpus:        ["overview", "techCorpus", "techSources"],
   // market/offers/documents ne servent pas à la grille elle-même mais à la fiche détail
