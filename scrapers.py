@@ -2550,9 +2550,32 @@ def _offer_review_reasons(candidate: dict, source_count_after: int) -> list[str]
         reasons.append("homepage_citation")
     if not candidate.get("operation"):
         reasons.append("operation_null")
-    if source_count_after <= 1:
+    if source_count_after <= 1 and not _is_first_party_offer_page(candidate):
         reasons.append("single_unconfirmed_source")
     return reasons
+
+
+# Pages où l'acteur déclare lui-même ce qu'il vend. technology/application en sont exclues
+# volontairement : mesuré le 29/09/2026 sur les 123 offres bloquées par le seul motif
+# single_unconfirmed_source, ces deux types mêlent livres blancs PDF, articles pédagogiques
+# ("ce que vous devez savoir") et projets financés -- pas une déclaration d'offre.
+FIRST_PARTY_OFFER_PAGE_TYPES = frozenset({"service", "capability", "product", "equipment"})
+
+
+def _host(url: str | None) -> str:
+    return (urlparse(url or "").hostname or "").lower().removeprefix("www.")
+
+
+def _is_first_party_offer_page(candidate: dict) -> bool:
+    """Une offre citée sur une page service/capability/product/equipment du propre domaine de
+    l'acteur n'a pas besoin d'une seconde URL : c'est l'acteur qui déclare son offre, une
+    deuxième page du même site n'y ajoute aucune indépendance. Le seuil "2 sources" reste pour
+    tout le reste (pages hors domaine, technology/application/news...). Sous-domaine du site
+    officiel accepté, domaine parent non (lasermicronics.lpkf.com ≠ lpkf.com, la maison mère)."""
+    if candidate.get("page_type") not in FIRST_PARTY_OFFER_PAGE_TYPES:
+        return False
+    official, cited = _host(candidate.get("official_url")), _host(candidate.get("url"))
+    return bool(official) and (cited == official or cited.endswith("." + official))
 
 
 def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
@@ -2825,6 +2848,7 @@ def scrape_market(max_pages: int | None = None, actor_names: list[str] | None = 
                         market_added += fact_added
                         sources_added += proof_added
                     for candidate in offer_candidates:
+                        candidate["official_url"] = source.get("official_url")
                         fact_added, proof_added = _upsert_offer_candidate(db, candidate)
                         offers_added += fact_added
                         sources_added += proof_added
