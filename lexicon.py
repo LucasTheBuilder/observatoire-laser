@@ -164,7 +164,16 @@ COMPONENTS: Lexicon = {
 OPERATIONS: Lexicon = {
     "Micro-usinage": {"any_of": ("micromachining", "micro-machining", "micro machining")},
     "Microdécoupe": {"any_of": ("microcutting", "micro-cutting", "laser cutting", "microdécoupe", "découpe laser", "tube cutting",
-                            "cutting quality", "laser singulation", "singulation", "slicing", "laser slicing")},
+                            "cutting quality", "laser singulation", "singulation", "slicing", "laser slicing",
+                            # La découpe dans la langue des brevets (29/09/2026) : TRUMPF écrit
+                            # « separating », ALPHANOV « cutting materials ». Des tournures
+                            # entières, jamais « cutting » seul (« cutting tools », « cutting-edge »).
+                            # Mesuré : 30 brevets Lens sur 109 et 4 publications sur 304, toutes de
+                            # découpe de verre.
+                            "glass cutting", "cutting materials", "cutting a material",
+                            "cutting of brittle materials", "separating a workpiece", "separating workpieces",
+                            "separating a material", "separating a transparent", "separating ultrathin glass",
+                            "separating ultra-thin glass")},
     # Le vocabulaire TGV est ici plutôt que dans une opération à lui : un via traversant est un
     # TROU, et le percer est une opération de perçage. L'architecture "TGV" reste par ailleurs
     # dans APPLICATION_ARCHITECTURES -- un même document parle des deux, la structure obtenue et
@@ -209,6 +218,9 @@ OPERATIONS: Lexicon = {
     "Soudage": {"any_of": (
         "welding", "soudage", "micro-welding", "microwelding",
         "weld glass", "transparent welding", "dissimilar bonding",
+        # Le soudage dans la langue des brevets TRUMPF (29/09/2026) : 10 brevets Lens sur 109,
+        # aucune publication.
+        "joining partners", "parts to be joined",
     )},
     # "etching" manquait : le lexique ne connaissait que "engraving"/"gravure", donc aucun
     # titre en "laser-induced chemical etching" ou "selective etching" n'était classé -- alors

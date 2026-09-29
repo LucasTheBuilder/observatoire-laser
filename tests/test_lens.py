@@ -203,6 +203,30 @@ class CollectLensPatentsTests(unittest.TestCase):
         self.assertEqual(1, result["off_topic"])
         self.assertEqual([], self._documents())
 
+    def test_a_laser_source_patent_is_not_written(self):
+        """Titre et résumé réels d'un brevet Amplitude ramené par la collecte du 29/09/2026 :
+        is_on_topic() le laissait passer, il ne nomme ni opération ni pièce."""
+        result = self._collecte(_lens_document(
+            doc_number="5555555", applicants=("TESTLASER SARL",),
+            title_en="STABILIZED FEMTOSECOND PULSED LASER AND STABILIZATION METHOD",
+            abstract_en=(
+                "The present invention relates to a high-power femtosecond pulsed laser, said laser "
+                "comprising: a source able to generate a series of input laser pulses having an "
+                "envelope frequency and a carrier frequency; chirped pulse amplification means"
+            ),
+        ))
+        self.assertEqual(1, result["off_topic"])
+        self.assertEqual([], self._documents())
+
+    def test_a_machining_patent_in_patent_wording_is_kept(self):
+        """« separating » est la découpe des brevets : absente du lexique des publications."""
+        result = self._collecte(_lens_document(
+            doc_number="6666666", applicants=("TESTLASER SARL",),
+            title_en="METHOD FOR SEPARATING ULTRATHIN GLASS",
+            abstract_en="Ultrashort laser pulses are focused into the glass along a separation line.",
+        ))
+        self.assertEqual(1, result["patents_added"])
+
     def test_no_actor_candidate_is_created_from_patents_any_more(self):
         self._collecte(_lens_document(
             doc_number="4444444", applicants=("TESTLASER SARL", "SMITH JOHN"),

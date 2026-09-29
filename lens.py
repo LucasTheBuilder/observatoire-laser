@@ -35,8 +35,9 @@ sources ».
 
 Le raisonnement qui avait écarté la requête par acteur (« 55+ requêtes par passe, plus d'une
 heure ») ne tient pas à la mesure : c'est UNE requête par acteur, ~9 par minute sur ce compte,
-soit une dizaine de minutes pour le roster -- une collecte périodique, pas un appel interactif. Vérifié en
-direct le 29/09/2026 : ALPHANOV 32 brevets ultra-rapides, Amplitude 96, TRUMPF 359, LASEA 3.
+soit une dizaine de minutes pour le roster -- une collecte périodique, pas un appel
+interactif. Vérifié en direct le 29/09/2026 : ALPHANOV 32 brevets ultra-rapides, Amplitude 96,
+TRUMPF 359, LASEA 3.
 
 Trois gardes, dans cet ordre, et chacune a sa raison :
 
@@ -45,9 +46,10 @@ Trois gardes, dans cet ordre, et chacune a sa raison :
 2. le déposant renvoyé doit CONTENIR l'alias de l'acteur interrogé (national_projects.match_alias)
    -- la recherche plein texte de Lens sur `applicant.name` est floue, et « Amplitude » ne doit
    pas attribuer à l'acteur suivi le brevet d'une autre société qui porte ce mot ;
-3. is_on_topic() sur titre + résumé, comme pour toute publication : c'est lui qui écarte le
-   brevet qui décrit la SOURCE laser elle-même (oscillateur, amplificateur) plutôt qu'un usinage,
-   et celui où le laser n'est qu'un instrument de mesure.
+3. is_on_topic() sur titre + résumé, comme pour toute publication, puis _describes_machining() :
+   le brevet doit nommer une opération ou une pièce travaillée. Le second écarte le brevet qui
+   décrit la SOURCE laser elle-même (amplificateur, cristal, compresseur), qu'is_on_topic() seul
+   laissait passer -- voir PATENT_WORKPIECE_CUES pour la mesure.
 
 Un brevet retenu est ensuite classé par upsert_document_technology_signal, exactement comme une
 publication : opération, matériau, marché, pièce, chacun avec la phrase du résumé qui le porte.
@@ -69,7 +71,7 @@ import httpx
 from cordis import _contains_whole_phrase, _normalize_org_text
 from db import ACTORS_DB, TECH_DB, connect, upsert_document
 from http_client import connector_client
-from lexicon import is_on_topic
+from lexicon import APPLICATION_ARCHITECTURES, OPERATIONS, _contains_term, _match_all_labels, is_on_topic
 from national_projects import match_alias
 from scrapers import upsert_document_technology_signal
 
@@ -159,6 +161,32 @@ def _signed_by(applicants: list[str], actor_name: str) -> bool:
     """
     alias = match_alias(actor_name)
     return any(_contains_whole_phrase(_normalize_org_text(nom), alias) for nom in applicants)
+
+
+# Ce qu'un brevet d'USINAGE nomme et qu'un brevet de SOURCE ne nomme pas : la pièce, ou le geste
+# fait sur elle, dans la langue des brevets. Nécessaire parce qu'is_on_topic() laisse passer les
+# brevets de source : leur vocabulaire (« chirped pulse amplification », « frequency-conversion
+# crystal », « pulse compressor ») n'est pas celui des publications sur lequel
+# LASER_AS_SOURCE_CUES a été mesurée. Et l'exigence d'une opération du lexique seule écartait de
+# vrais brevets d'usinage, que les brevets écrivent « separating », « joining », « cutting ».
+# Mesuré le 29/09/2026 sur les 166 brevets de la première collecte par acteur : 57 écartés, tous
+# de source, de faisceau ou de microscopie (Amplitude « Stabilized femtosecond pulsed laser »,
+# Coherent « Frequency-conversion crystal », TRUMPF « STED microscope ») ; 109 gardés, tous
+# d'usinage (TRUMPF « Method for separating ultrathin glass », ALPHANOV « Method and appliance
+# for cutting materials by multi-beam femtosecond laser »).
+PATENT_WORKPIECE_CUES = (
+    "workpiece", "workpieces", "machining", "cutting", "separating", "separation of",
+    "joining", "chamfering", "material processing", "materials processing",
+    "processing a material", "processing materials", "processing of materials",
+    "laser processing", "surface treatment", "hardening", "curing", "substrate", "substrates",
+)
+
+
+def _describes_machining(text: str) -> bool:
+    """Vrai quand le brevet nomme une opération du lexique ou une pièce travaillée."""
+    if _match_all_labels(text, OPERATIONS) or _match_all_labels(text, APPLICATION_ARCHITECTURES):
+        return True
+    return any(_contains_term(text, cue) for cue in PATENT_WORKPIECE_CUES)
 
 
 def _titles(doc: dict) -> str | None:
@@ -313,7 +341,8 @@ def collect_lens_patents() -> dict:
             if not _signed_by(doc["applicants"], actor_name):
                 report["not_signed"] += 1
                 continue
-            if not is_on_topic(f"{doc['title']} {doc.get('abstract') or ''}"):
+            texte = f"{doc['title']} {doc.get('abstract') or ''}"
+            if not is_on_topic(texte) or not _describes_machining(texte):
                 report["off_topic"] += 1
                 continue
             actors_matched.add(actor_name)
