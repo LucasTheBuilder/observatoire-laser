@@ -837,8 +837,10 @@ const OF_PAGE_SIZE = 12;
 
 const OF_EVIDENCE_LABELS = {proof: "Démontrée", claim: "Déclarative", third_party: "Tierce partie"};
 
-function ofOperation(row) { return normalizedOperation(row) || "Opération non précisée"; }
-function ofMaterial(row) { return row.material || "Matériau non précisé"; }
+const OF_NO_OPERATION = "Opération non précisée";
+const OF_NO_MATERIAL = "Matériau non précisé";
+function ofOperation(row) { return normalizedOperation(row) || OF_NO_OPERATION; }
+function ofMaterial(row) { return row.material || OF_NO_MATERIAL; }
 function ofProcess(row) { return row.laser_process || "Procédé non précisé"; }
 function ofStage(row) { return row.industrial_stage || "Maturité non renseignée"; }
 function ofEvidence(row) { return OF_EVIDENCE_LABELS[row.evidence_type] || "Non qualifiée"; }
@@ -890,6 +892,134 @@ function ofOfferRow(row) {
   </button>`;
 }
 
+// Pas d'histogramme par année ici, contrairement à Technologie laser : une capacité n'a pas de
+// date à elle. `offer_sources.source_date` est la date de publication de la PAGE qui la décrit
+// -- mesuré le 29/09/2026, 11 lignes de Laser Micromachining Ltd datent de 2002 parce qu'elles
+// citent des articles de 2002 remis en ligne en 2017 --, et `created_at` ne date que la
+// collecte. Un axe temporel dirait « capacités apparues en 2002 », ce qui est faux.
+//
+// La bande porte donc l'OPÉRATION, la dimension que toutes les capacités renseignent : une
+// colonne par opération, cliquable, la même facette que la colonne de gauche -- comme la bande
+// des années sur Technologie laser, seul l'affichage diffère.
+function ofOperationBand(options, selected) {
+  const entries = (options || []).filter(([value]) => value !== OF_NO_OPERATION);
+  if (entries.length < 2) return "";
+  const peak = Math.max(...entries.map(([, count]) => count), 1);
+  const bars = entries.map(([operation, count]) => {
+    const on = selected.includes(operation);
+    return `<button type="button" class="ex-bar${on ? " is-active" : ""}${count ? "" : " is-empty"}"
+      data-of-operation="${esc(operation)}" aria-pressed="${on}"${count || on ? "" : " disabled"}
+      title="${esc(operation)} — ${count} capacité(s)">
+      <span class="ex-bar-count">${count || ""}</span>
+      <span class="ex-bar-fill" style="height:${count ? Math.max(3, Math.round((count / peak) * 46)) : 0}px"></span>
+      <span class="ex-bar-name">${esc(operation)}</span>
+    </button>`;
+  }).join("");
+
+  return `<div class="ex-histogram">
+    <div class="ex-histogram-head">
+      <span class="ex-histogram-title">Capacités par opération</span>
+      <span class="ex-histogram-hint">${selected.length
+        ? `${selected.length} opération(s) filtrée(s) — <button type="button" class="ex-linkish" data-of-operation-reset>tout afficher</button>`
+        : "cliquer une opération pour filtrer"}</span>
+    </div>
+    <div class="ex-bars">${bars}</div>
+  </div>`;
+}
+
+// Les trois lectures concurrentielles que les facettes ne donnent pas : qui revendique le plus,
+// quelles opérations presque personne ne revendique, et qui travaille quel matériau.
+//
+// Calculé sur la SÉLECTION COURANTE, comme tcTrends : filtrer sur « Verre » et lire qui s'y
+// positionne répond à une question que le total noie. Chaque capacité a UN acteur (pas de
+// co-signature comme dans le corpus technique), donc les barres de la première carte forment
+// une vraie partition de la sélection.
+function ofTrends(rows) {
+  if (!rows.length) return "";
+
+  const bar = (label, value, ratio, hint) => `<div class="ex-trend-row" title="${esc(hint)}">
+      <span class="ex-trend-label">${esc(label)}</span>
+      <span class="ex-trend-value">${esc(value)}</span>
+      <span class="ex-trend-track"><span class="ex-trend-fill" style="width:${Math.max(2, Math.round(ratio * 100))}%"></span></span>
+    </div>`;
+
+  const byActor = new Map();
+  for (const row of rows) byActor.set(row.actor_name, (byActor.get(row.actor_name) || 0) + 1);
+  const actors = [...byActor.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "fr"));
+  const top3 = actors.slice(0, 3).reduce((total, [, count]) => total + count, 0);
+  const actorRows = actors.slice(0, 6).map(([name, count]) =>
+    bar(name, count, count / actors[0][1], `${name} — ${count} capacité(s) dans la sélection`),
+  ).join("");
+
+  // Acteurs distincts et volume par valeur d'une dimension, hors libellé de repli : « Matériau
+  // non précisé » n'est pas un créneau, c'est un manque d'extraction.
+  const spread = (valueOf, unset) => {
+    const stats = new Map();
+    for (const row of rows) {
+      const value = valueOf(row);
+      if (value === unset) continue;
+      const entry = stats.get(value) || {volume: 0, actors: new Set()};
+      entry.volume += 1;
+      entry.actors.add(row.actor_name);
+      stats.set(value, entry);
+    }
+    return [...stats.entries()].map(([label, entry]) => [label, entry.actors.size, entry.volume]);
+  };
+
+  // Même lecture que « Familles les moins disputées » sur Technologie laser, sans seuil de
+  // volume : une capacité est une offre relue et acceptée, pas une publication parmi 300 --
+  // un seul acteur suivi qui revendique le soudage est déjà l'information.
+  const niches = spread(ofOperation, OF_NO_OPERATION)
+    .sort((a, b) => a[1] - b[1] || b[2] - a[2] || a[0].localeCompare(b[0], "fr"));
+  const nichePeak = niches.length ? Math.max(...niches.map(n => n[2])) : 1;
+  const nicheRows = niches.slice(0, 6).map(([label, count, volume]) =>
+    bar(label, `${count} acteur(s)`, volume / nichePeak,
+      `${label} — ${count} acteur(s) distinct(s) sur ${volume} capacité(s)`),
+  ).join("");
+
+  const materials = spread(ofMaterial, OF_NO_MATERIAL)
+    .sort((a, b) => b[1] - a[1] || b[2] - a[2] || a[0].localeCompare(b[0], "fr"));
+  const materialPeak = materials.length ? materials[0][1] : 1;
+  const materialRows = materials.slice(0, 6).map(([label, count, volume]) =>
+    bar(label, `${count} acteur(s)`, count / materialPeak,
+      `${label} — ${count} acteur(s) distinct(s) sur ${volume} capacité(s)`),
+  ).join("");
+  const withoutMaterial = rows.filter(row => !row.material).length;
+
+  return `<div class="ex-trends">
+    <section class="ex-trend">
+      <div class="ex-trend-head">
+        <span class="ex-trend-title">Qui offre le plus</span>
+        <span class="ex-trend-hint">${actors.length} acteur${actors.length > 1 ? "s" : ""} · ${rows.length} capacité${rows.length > 1 ? "s" : ""}</span>
+      </div>
+      ${actorRows}
+      ${actors.length >= 3
+        ? `<p class="ex-trend-foot">Les 3 premiers portent ${Math.round((top3 / rows.length) * 100)} % des capacités de la sélection.</p>`
+        : ""}
+    </section>
+    <section class="ex-trend">
+      <div class="ex-trend-head">
+        <span class="ex-trend-title">Opérations les moins disputées</span>
+        <span class="ex-trend-hint">acteurs distincts</span>
+      </div>
+      ${nicheRows || `<p class="ex-trend-empty">Aucune opération précisée dans cette sélection.</p>`}
+      ${nicheRows
+        ? `<p class="ex-trend-foot">Les moins peuplées d'abord. La barre montre le nombre de capacités, pas d'acteurs : barre longue et petit nombre = une opération offerte, mais par peu d'acteurs suivis.</p>`
+        : ""}
+    </section>
+    <section class="ex-trend">
+      <div class="ex-trend-head">
+        <span class="ex-trend-title">Matériaux travaillés</span>
+        <span class="ex-trend-hint">acteurs distincts</span>
+      </div>
+      ${materialRows || `<p class="ex-trend-empty">Aucun matériau précisé dans cette sélection.</p>`}
+      ${materialRows && withoutMaterial
+        ? `<p class="ex-trend-foot">${withoutMaterial} capacité(s) sans matériau précisé ne sont pas comptées.</p>`
+        : ""}
+    </section>
+  </div>`;
+}
+
 // Un seul endroit qui décrit la forme des facettes vides : la réinitialisation et l'état
 // initial ne peuvent pas diverger (un groupe oublié ferait planter toggleFacet).
 function emptyOfferFacets() {
@@ -914,8 +1044,17 @@ function renderOffers() {
   const actors = new Set(offers.map(row => row.actor_name)).size;
   const demonstrated = offers.filter(row => row.evidence_type === "proof").length;
   const claimed = offers.filter(row => row.evidence_type === "claim").length;
-  const inProduction = offers.filter(row => row.industrial_stage === "Production").length;
-  const upstream = offers.filter(row => ["R&D", "Prototype", "Pré-industrialisation"].includes(row.industrial_stage)).length;
+  // OPÉRATIONS remplace l'ancien « EN PRODUCTION » : sur les 55 capacités du 29/09/2026, 38
+  // portent « Maturité industrielle non déterminée », et la note « 3 en amont » laissait lire
+  // 11 + 3 comme la totalité. La maturité reste une facette ; le bandeau dit ce qui est couvert.
+  const actorsByOperation = new Map();
+  for (const row of offers) {
+    const operation = normalizedOperation(row);
+    if (!operation) continue;
+    if (!actorsByOperation.has(operation)) actorsByOperation.set(operation, new Set());
+    actorsByOperation.get(operation).add(row.actor_name);
+  }
+  const soloOperations = [...actorsByOperation.values()].filter(set => set.size === 1).length;
   const materials = new Set(offers.filter(row => row.material).map(row => row.material)).size;
   const withoutMaterial = offers.filter(row => !row.material).length;
 
@@ -940,10 +1079,14 @@ function renderOffers() {
 
     <div class="ex-kpis">
       <div class="ex-kpi"><div class="ex-kpi-label">CAPACITÉS</div><div class="ex-kpi-value">${offers.length}</div><div class="ex-kpi-note">chez ${actors} acteur${actors > 1 ? "s" : ""}</div></div>
-      <div class="ex-kpi"><div class="ex-kpi-label">DÉMONTRÉES</div><div class="ex-kpi-value">${demonstrated}</div><div class="ex-kpi-note">${claimed} déclaratives</div></div>
-      <div class="ex-kpi"><div class="ex-kpi-label">EN PRODUCTION</div><div class="ex-kpi-value">${inProduction}</div><div class="ex-kpi-note">${upstream} en amont</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">OPÉRATIONS</div><div class="ex-kpi-value">${actorsByOperation.size}</div><div class="ex-kpi-note">${soloOperations} tenue${soloOperations > 1 ? "s" : ""} par un seul acteur</div></div>
       <div class="ex-kpi"><div class="ex-kpi-label">MATÉRIAUX</div><div class="ex-kpi-value">${materials}</div><div class="ex-kpi-note">${withoutMaterial} sans matériau précisé</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">DÉMONTRÉES</div><div class="ex-kpi-value">${demonstrated}</div><div class="ex-kpi-note">${claimed} déclaratives</div></div>
     </div>
+
+    ${ofOperationBand(options.operation, state.offerFacets.operation || [])}
+
+    ${ofTrends(filtered)}
 
     <div class="ex-search">
       <span class="ex-search-icon" aria-hidden="true">⌕</span>
@@ -1008,6 +1151,11 @@ function renderOffers() {
   }));
   document.querySelectorAll("[data-ex-facet]").forEach(el => el.addEventListener("click",
     rerender(() => { state.offerFacets = toggleFacet(state.offerFacets, el.dataset.exFacet, el.dataset.exValue); })));
+  // Une colonne de la bande est la facette OPÉRATION, affichée autrement.
+  document.querySelectorAll("[data-of-operation]").forEach(el => el.addEventListener("click",
+    rerender(() => { state.offerFacets = toggleFacet(state.offerFacets, "operation", el.dataset.ofOperation); })));
+  document.querySelector("[data-of-operation-reset]")?.addEventListener("click",
+    rerender(() => { state.offerFacets = {...state.offerFacets, operation: []}; }));
   document.querySelectorAll("[data-ex-expand]").forEach(el => el.addEventListener("click", () => {
     const key = el.dataset.exExpand;
     state.offerExpanded = state.offerExpanded.includes(key)

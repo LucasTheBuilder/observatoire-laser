@@ -293,6 +293,23 @@ main.ex-host {
   width: 100%;
   padding-top: 4px;
 }
+/* Le libelle d'une colonne quand l'axe porte des mots et non des annees (Offres & capacites :
+ * une colonne par operation). Meme filet que .ex-bar-year, mais en texte courant et tronque :
+ * « Fonctionnalisation de surface » ne tient pas sous une colonne, le title de la barre le
+ * donne en entier. */
+.ex-bar-name {
+  font-size: 10.5px;
+  color: var(--ex-ink-3);
+  line-height: 1.2;
+  border-top: 1px solid var(--ex-line);
+  width: 100%;
+  padding: 4px 2px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ex-bar.is-active .ex-bar-name { color: var(--ex-ink); font-weight: 600; }
+.ex-bar.is-empty .ex-bar-name { color: var(--ex-disabled); }
 
 /* --- Barre de recherche ----------------------------------------------------------------- */
 
