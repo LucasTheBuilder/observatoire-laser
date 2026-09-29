@@ -11,13 +11,8 @@ commentaire dans app.py.
 Verifie le 28/09/2026 contre un vrai compte (jeton d'essai fourni par l'utilisateur), ce qui a
 change la forme de ce module par rapport a patent.py :
 
-- PAS de distinction actor-scoped/topic-scoped par une requete par acteur (comme patent.py).
-  Mesure en direct : ce compte tient ~9-10 requetes/minute, tres en dessous des 55+ requetes
-  qu'une boucle par acteur suivi aurait demandees en une passe (voir google_patents.py, qui
-  applique deja ce raisonnement pour une toute autre raison -- le cout BigQuery). Une seule
-  requete ramene les brevets CPC B23K26 les plus RECENTS (triee par date_published desc), et
-  c'est le code Python qui les repartit ensuite entre acteur suivi et candidat -- meme logique
-  que la passe topic-scoped de patent.py, seulement pour la totalite des resultats.
+- Rate-limit mesure en direct : ce compte tient ~9-10 requetes/minute (la premiere version en
+  avait conclu qu'il fallait UNE requete globale -- abandonne le 29/09/2026, voir plus bas).
 - Noms de champs corriges par rapport a la premiere version (jamais confrontee a une vraie
   reponse) : la reponse porte "kind", pas "kind_symbol" ; un declarant est
   {"extracted_name": {"value": "NOM"}}, pas {"applicant_name": "NOM"} -- "extracted_name" est un
@@ -28,6 +23,35 @@ change la forme de ce module par rapport a patent.py :
   nom different du chemin de la reponse ("biblio.classifications_cpc.classifications[].symbol"),
   comme "applicant.name" (recherche) differe deja de "biblio.parties.applicants[]" (reponse).
 
+**Refonte du 29/09/2026 : une requête par acteur suivi, et le périmètre appliqué.** La version
+précédente ramenait les 100 brevets CPC B23K26 les plus récents du monde, tous procédés laser
+confondus, et les écrivait tous dans le corpus. Mesuré sur les 100 écrits : 0 portait un acteur
+suivi, 0 un résumé, 0 un terme femtoseconde ou ultra-rapide -- « Removing mill scale from a
+tubular », « Welding flux composition », une découpeuse laser pour sacs tissés. Deux règles de
+Lucas étaient enfreintes d'un coup : le corpus ne contient que ce qu'un acteur suivi signe
+(13/09/2026), et seulement le laser femto et ultra-rapide (10/09/2026). Et comme rien n'était
+classé, ces brevets s'affichaient sans famille ni citation -- « les brevets n'ont pas de
+sources ».
+
+Le raisonnement qui avait écarté la requête par acteur (« 55+ requêtes par passe, plus d'une
+heure ») ne tient pas à la mesure : c'est UNE requête par acteur, ~9 par minute sur ce compte,
+soit une dizaine de minutes pour le roster -- une collecte périodique, pas un appel interactif. Vérifié en
+direct le 29/09/2026 : ALPHANOV 32 brevets ultra-rapides, Amplitude 96, TRUMPF 359, LASEA 3.
+
+Trois gardes, dans cet ordre, et chacune a sa raison :
+
+1. la requête exige un terme ultra-rapide dans le titre ou le résumé -- sans quoi un grand
+   déposant renvoie tout son portefeuille, laser continu et machines comprises ;
+2. le déposant renvoyé doit CONTENIR l'alias de l'acteur interrogé (national_projects.match_alias)
+   -- la recherche plein texte de Lens sur `applicant.name` est floue, et « Amplitude » ne doit
+   pas attribuer à l'acteur suivi le brevet d'une autre société qui porte ce mot ;
+3. is_on_topic() sur titre + résumé, comme pour toute publication : c'est lui qui écarte le
+   brevet qui décrit la SOURCE laser elle-même (oscillateur, amplificateur) plutôt qu'un usinage,
+   et celui où le laser n'est qu'un instrument de mesure.
+
+Un brevet retenu est ensuite classé par upsert_document_technology_signal, exactement comme une
+publication : opération, matériau, marché, pièce, chacun avec la phrase du résumé qui le porte.
+
 Authentification : jeton porteur (Bearer), lu depuis LENS_API_KEY -- jamais codé en dur, même
 schéma que EPO_OPS_KEY dans patent.py. Un jeton Lens s'obtient gratuitement sur lens.org/lens/user
 (inscription académique/non-commerciale) et se génère depuis l'onglet "API & Data" du profil.
@@ -37,56 +61,104 @@ Sans cette variable, collect_lens_patents() renvoie status='not_configured'.
 from __future__ import annotations
 
 import os
+import re
+import time
 
 import httpx
 
-from actor_discovery import _known_actor_names_and_domains, _normalize_name, upsert_actor_candidate
+from cordis import _contains_whole_phrase, _normalize_org_text
 from db import ACTORS_DB, TECH_DB, connect, upsert_document
 from http_client import connector_client
+from lexicon import is_on_topic
+from national_projects import match_alias
+from scrapers import upsert_document_technology_signal
 
 LENS_API_KEY = os.getenv("LENS_API_KEY", "").strip()
 
 LENS_SEARCH_URL = "https://api.lens.org/patent/search"
 
-# Travail au laser (perçage, découpe, texturation, soudage...) -- même classe que patent.py,
-# voir son commentaire CPC_CLASS pour le détail du périmètre couvert.
-CPC_CLASS = "B23K26"
 
-MIN_APPLICANT_NAME_LENGTH = 4
-
-# Combien de brevets récents une seule requête ramène. Vérifié le 28/09/2026 : l'API refuse
-# "size" au-delà de 100 (HTTP 400, "Parameter 'size' shouldn't be greater than 100") -- pas de
-# pagination/scroll ici, une seule page suffit très largement pour un flux de veille récente.
+# Taille d'une page. Vérifié le 28/09/2026 : l'API refuse "size" au-delà de 100 (HTTP 400,
+# "Parameter 'size' shouldn't be greater than 100"). Un gros déposant dépasse une page (TRUMPF :
+# 359 brevets ultra-rapides le 29/09/2026), d'où la pagination par "from", bornée par
+# MAX_PATENTS_PER_ACTOR pour qu'un seul acteur ne mange pas toute la passe.
 RESULTS_LIMIT = 100
+MAX_PATENTS_PER_ACTOR = 500
 
-# Champs demandés à l'API (paramètre "include") : de quoi peupler documents + actor_candidates
-# sans redemander la fiche complète du brevet, qu'on ne consomme pas ici.
+# Champs demandés à l'API (paramètre "include"). Le RÉSUMÉ en fait partie depuis le 29/09/2026 :
+# sans lui, un brevet ne pouvait être ni filtré sur le périmètre ni classé avec une preuve -- son
+# titre de brevet (« Processing method and processing system ») ne dit presque jamais rien.
 _INCLUDE_FIELDS = [
     "lens_id", "jurisdiction", "doc_number", "kind", "date_published",
-    "biblio.invention_title", "biblio.parties.applicants",
+    "biblio.invention_title", "biblio.parties.applicants", "abstract",
 ]
+
+# Ce qui fait d'un brevet laser un brevet ULTRA-RAPIDE, demandé à Lens sur le titre et le résumé.
+# Aligné sur lexicon.LASER_RULES ; volontairement large, is_on_topic() reste seul juge derrière.
+# « picosecond » y figure : les brevets industriels disent souvent « ps/fs » et le picoseconde est
+# du laser à impulsions ultra-courtes au sens du métier.
+ULTRAFAST_TERMS = (
+    '(femtosecond OR "femto second" OR ultrafast OR "ultra-fast" OR ultrashort OR "ultra-short" '
+    'OR picosecond OR "USP laser" OR femtoseconde OR ultracourte OR ultrakurzpuls)'
+)
+
+# Cadence : ce compte tient ~9-10 requêtes par minute (mesuré le 28/09/2026). Une pause de 7 s
+# garde une marge : le roster (80 acteurs actifs le 29/09/2026) tient en une dizaine de minutes.
+REQUEST_INTERVAL_SECONDS = 7.0
 
 
 def _is_configured() -> bool:
     return bool(LENS_API_KEY)
 
 
-def _fetch_recent_patents(client: httpx.Client) -> dict:
+def _fetch_actor_patents(client: httpx.Client, actor_name: str, offset: int = 0) -> dict:
+    """Une page des brevets ultra-rapides dont `actor_name` est déposant, les plus récents d'abord.
+
+    Le nom est passé entre guillemets et nettoyé de ceux qu'il porterait : Lens le lit en syntaxe
+    query_string, où un guillemet ou une parenthèse non fermés font échouer toute la requête.
+    """
+    # Le sigle entre parenthèses part : « Manufacturing Technology Centre (MTC) » n'est écrit
+    # ainsi sur aucune demande de brevet.
+    nom = re.sub(r"\([^)]*\)", " ", actor_name)
+    nom = " ".join(nom.replace('"', " ").replace("\\", " ").split())
+    requete = f'applicant.name:"{nom}" AND (title:{ULTRAFAST_TERMS} OR abstract:{ULTRAFAST_TERMS})'
     response = client.post(
         LENS_SEARCH_URL,
         json={
-            # query_string + joker : seule forme vérifiée qui matche réellement des brevets
-            # CPC B23K26 sur ce compte -- voir docstring du module.
-            "query": {"query_string": {"query": f"class_cpc.symbol:{CPC_CLASS}*"}},
+            "query": {"query_string": {"query": requete}},
             "sort": [{"date_published": "desc"}],
             "include": _INCLUDE_FIELDS,
             "size": RESULTS_LIMIT,
-            "from": 0,
+            "from": offset,
         },
         headers={"Authorization": f"Bearer {LENS_API_KEY}"},
     )
     response.raise_for_status()
     return response.json()
+
+
+def _abstract(doc: dict) -> str:
+    """Le résumé, en anglais ou en français d'abord -- les deux langues que lit le lexique."""
+    resumes = doc.get("abstract") or []
+    if not isinstance(resumes, list):
+        return ""
+    for langue in ("en", "fr"):
+        for entry in resumes:
+            if isinstance(entry, dict) and entry.get("lang") == langue and entry.get("text"):
+                return str(entry["text"]).strip()
+    return ""
+
+
+def _signed_by(applicants: list[str], actor_name: str) -> bool:
+    """Vrai quand l'un des déposants renvoyés CONTIENT l'alias de l'acteur interrogé.
+
+    La recherche de Lens sur `applicant.name` est plein texte, donc floue : interroger
+    « Amplitude » peut ramener une autre société qui porte ce mot. On revérifie donc sur la
+    réponse, avec l'appariement déjà utilisé pour les registres de financement
+    (national_projects.match_alias) -- sigle et forme juridique retirés, phrase entière exigée.
+    """
+    alias = match_alias(actor_name)
+    return any(_contains_whole_phrase(_normalize_org_text(nom), alias) for nom in applicants)
 
 
 def _titles(doc: dict) -> str | None:
@@ -148,6 +220,7 @@ def _parse_result(doc: dict) -> dict | None:
     return {
         "patent_number": patent_number,
         "title": _titles(doc) or patent_number,
+        "abstract": _abstract(doc),
         "published_at": published_at,
         "applicants": _applicant_names(doc),
         # Lien de fiche Lens par lens_id quand il est connu (résout toujours vers le bon
@@ -172,80 +245,88 @@ def _upsert_lens_patent(db, actor_name: str | None, doc: dict) -> tuple[int, int
         actor_name=actor_name,
         published_at=doc["published_at"],
         patent_number=doc["patent_number"],
+        abstract=doc.get("abstract") or None,
     )
 
 
 def collect_lens_patents() -> dict:
-    """Point d'entrée (voir app.py: collectors["lens_patents"])."""
+    """Point d'entrée (voir app.py: collectors["lens_patents"]).
+
+    Une requête par acteur suivi (paginée), puis les gardes du docstring du module. Chaque brevet
+    écrit porte donc un acteur du roster, relève du laser ultra-rapide, et sort classé avec ses
+    preuves -- jamais un brevet orphelin dans le corpus.
+
+    Plus d'inscription de candidats acteurs depuis Lens : la version précédente en créait à partir
+    de n'importe quel déposant de brevet laser du monde (83 d'un coup le 28/09/2026), et les
+    co-déposants d'un brevet américain sont le plus souvent les inventeurs, des personnes.
+    """
+    vide = {
+        "actors_queried": 0, "actors_matched": 0, "patents_seen": 0, "patents_added": 0,
+        "patents_attributed": 0, "off_topic": 0, "not_signed": 0, "technology_signals_added": 0,
+        "errors": 0,
+    }
     if not _is_configured():
         return {
-            "status": "not_configured",
+            **vide, "status": "not_configured",
             "message": "LENS_API_KEY absente -- jeton gratuit sur lens.org/lens/user (onglet API & Data)",
-            "actors_matched": 0, "patents_added": 0, "patents_attributed": 0,
-            "topic_scoped_candidates_added": 0, "errors": 0,
         }
 
     with connect(ACTORS_DB) as db:
-        known_names, _known_domains = _known_actor_names_and_domains(db)
-        # Nom d'affichage par nom normalisé, même principe que google_patents.py : attribuer
-        # documents.actor_name avec la graphie suivie plutôt qu'avec le déposant tel qu'écrit
-        # par l'office de brevets.
-        display_name = {
-            _normalize_name(row["name"]): row["name"]
-            for row in db.execute("SELECT name FROM actors WHERE active=1").fetchall()
-        }
+        actors = [row["name"] for row in db.execute(
+            "SELECT name FROM actors WHERE active=1 ORDER BY name"
+        ).fetchall()]
 
-    actors_matched_names: set[str] = set()
-    patents_added = patents_attributed = candidates_added = 0
+    report = dict(vide)
+    actors_matched: set[str] = set()
+    trouves: list[tuple[str, dict]] = []
 
-    try:
-        with connector_client("slow") as client:
-            payload = _fetch_recent_patents(client)
-    except Exception as exc:
-        return {
-            "status": "error", "message": str(exc)[:300],
-            "actors_matched": 0, "patents_added": 0, "patents_attributed": 0,
-            "topic_scoped_candidates_added": 0, "errors": 1,
-        }
+    # Tout le réseau d'abord, l'écriture ensuite : une transaction SQLite ouverte pendant les
+    # minutes de requêtes bloquerait les autres écrivains (même raison que cordis.py).
+    premiere_requete = True
+    derniere_erreur = ""
+    with connector_client("slow") as client:
+        for actor_name in actors:
+            report["actors_queried"] += 1
+            offset = 0
+            while offset < MAX_PATENTS_PER_ACTOR:
+                if not premiere_requete:
+                    time.sleep(REQUEST_INTERVAL_SECONDS)
+                premiere_requete = False
+                try:
+                    payload = _fetch_actor_patents(client, actor_name, offset)
+                except Exception as exc:
+                    report["errors"] += 1
+                    derniere_erreur = str(exc)[:300]
+                    break
+                resultats = (payload.get("data") if isinstance(payload, dict) else None) or []
+                for doc in (_parse_result(row) for row in resultats):
+                    if doc:
+                        trouves.append((actor_name, doc))
+                offset += RESULTS_LIMIT
+                total = payload.get("total") if isinstance(payload, dict) else None
+                if len(resultats) < RESULTS_LIMIT or not isinstance(total, int) or offset >= total:
+                    break
 
-    results = payload.get("data") if isinstance(payload, dict) else None
-    documents = [doc for doc in (_parse_result(row) for row in (results or [])) if doc]
-
-    with connect(TECH_DB) as tech_db, connect(ACTORS_DB) as actors_db:
-        for doc in documents:
-            # Un brevet peut avoir plusieurs déposants (co-dépôt) : le premier déposant SUIVI
-            # trouvé porte l'attribution (documents.actor_name est une seule colonne, même
-            # limite que patent.py), les autres restent lisibles dans le déposant brut.
-            tracked = next(
-                (name for name in doc["applicants"] if _normalize_name(name) in display_name),
-                None,
-            )
-            actor_name = display_name.get(_normalize_name(tracked)) if tracked else None
-            if actor_name:
-                actors_matched_names.add(actor_name)
-
-            added, attributed = _upsert_lens_patent(tech_db, actor_name, doc)
-            patents_added += added
-            patents_attributed += attributed
-
-            if actor_name:
+    with connect(TECH_DB) as tech_db:
+        for actor_name, doc in trouves:
+            report["patents_seen"] += 1
+            if not _signed_by(doc["applicants"], actor_name):
+                report["not_signed"] += 1
                 continue
-            for applicant in doc["applicants"]:
-                if len(_normalize_name(applicant)) < MIN_APPLICANT_NAME_LENGTH:
-                    continue
-                if _normalize_name(applicant) in known_names:
-                    continue
-                candidates_added += upsert_actor_candidate(
-                    actors_db, applicant, "patent",
-                    context=f"Brevet CPC {CPC_CLASS} {doc['patent_number']} (Lens.org)",
-                    source_url=doc["url"],
-                )
+            if not is_on_topic(f"{doc['title']} {doc.get('abstract') or ''}"):
+                report["off_topic"] += 1
+                continue
+            actors_matched.add(actor_name)
+            added, attributed = _upsert_lens_patent(tech_db, actor_name, doc)
+            report["patents_added"] += added
+            report["patents_attributed"] += attributed
+            report["technology_signals_added"] += upsert_document_technology_signal(
+                tech_db, doc["title"], doc.get("abstract") or "", doc["url"], actor_name,
+            )
 
-    return {
-        "status": "ok",
-        "actors_matched": len(actors_matched_names),
-        "patents_added": patents_added,
-        "patents_attributed": patents_attributed,
-        "topic_scoped_candidates_added": candidates_added,
-        "errors": 0,
-    }
+    report["actors_matched"] = len(actors_matched)
+    # Toutes les requêtes en échec, c'est la source qui est en panne (jeton révoqué, quota
+    # épuisé), pas un acteur au nom malcommode : le dire, plutôt qu'un « ok » à zéro brevet.
+    if report["actors_queried"] and report["errors"] == report["actors_queried"]:
+        return {**report, "status": "error", "message": derniere_erreur}
+    return {**report, "status": "ok"}

@@ -1,6 +1,6 @@
 """Tests pour le connecteur brevets Lens.org (lens.py).
 
-`_fetch_recent_patents` (la seule fonction qui parle réellement au réseau) est toujours patchée
+`_fetch_actor_patents` (la seule fonction qui parle réellement au réseau) est toujours patchée
 ici -- jamais d'appel réseau réel. Les formes de réponse ci-dessous (champ "kind", pas
 "kind_symbol" ; "extracted_name" en objet {"value": ...}) reproduisent ce qui a été observé le
 28/09/2026 contre un vrai compte Lens (voir lens.py docstring) -- ce ne sont plus des suppositions.
@@ -26,6 +26,7 @@ def _lens_document(
     *, jurisdiction="EP", doc_number="7654321", kind="A1", date_published="2025-03-20",
     title_en="Method for femtosecond laser drilling", applicants=("TESTLASER SARL",),
     lens_id="123-456-789-012-345",
+    abstract_en="A femtosecond laser drills micro-holes in a stainless steel fuel injector nozzle.",
 ) -> dict:
     return {
         "lens_id": lens_id,
@@ -33,6 +34,7 @@ def _lens_document(
         "doc_number": doc_number,
         "kind": kind,
         "date_published": date_published,
+        "abstract": [{"lang": "en", "text": abstract_en}] if abstract_en else [],
         "biblio": {
             "invention_title": [
                 {"lang": "en", "text": title_en},
@@ -57,6 +59,17 @@ class ParseResultTests(unittest.TestCase):
         self.assertEqual(doc["published_at"], "2025-03-20")
         self.assertEqual(doc["applicants"], ["TESTLASER SARL"])
         self.assertIn("lens.org/lens/patent/123-456-789-012-345", doc["url"])
+
+    def test_the_abstract_is_kept_english_first(self):
+        raw = _lens_document(abstract_en="")
+        raw["abstract"] = [
+            {"lang": "de", "text": "Ein Femtosekundenlaser bohrt Löcher."},
+            {"lang": "en", "text": "A femtosecond laser drills holes."},
+        ]
+        self.assertEqual("A femtosecond laser drills holes.", _parse_result(raw)["abstract"])
+
+    def test_a_patent_without_abstract_parses_to_an_empty_one(self):
+        self.assertEqual("", _parse_result(_lens_document(abstract_en=""))["abstract"])
 
     def test_falls_back_to_any_title_when_no_english_one(self):
         raw = _lens_document()
@@ -91,6 +104,9 @@ class ParseResultTests(unittest.TestCase):
 
 
 class CollectLensPatentsTests(unittest.TestCase):
+    """La collecte du 29/09/2026 : une requête par acteur suivi, et seul ce qu'un acteur suivi
+    signe ET qui relève de l'usinage ultra-rapide entre dans le corpus -- classé, avec preuve."""
+
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         tmp_path = Path(self.tmpdir.name)
@@ -99,21 +115,37 @@ class CollectLensPatentsTests(unittest.TestCase):
             dbmod.init_databases()
         self.actors_db = actors_db
         self.tech_db = tech_db
-        self.actors_patch = patch.object(lens, "ACTORS_DB", actors_db)
-        self.tech_patch = patch.object(lens, "TECH_DB", tech_db)
-        self.actors_patch.start()
-        self.tech_patch.start()
-        self.addCleanup(self.actors_patch.stop)
-        self.addCleanup(self.tech_patch.stop)
+        for cible, valeur in (
+            ("ACTORS_DB", actors_db), ("TECH_DB", tech_db), ("LENS_API_KEY", "k"),
+            ("REQUEST_INTERVAL_SECONDS", 0),
+        ):
+            patcher = patch.object(lens, cible, valeur)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.addCleanup(self.tmpdir.cleanup)
         with dbmod.connect(actors_db) as db:
+            # init_databases() sème le roster réel : on le met de côté, sans quoi chaque test
+            # interrogerait (et compterait) une quarantaine d'acteurs.
+            db.execute("UPDATE actors SET active=0")
             db.execute(
                 "INSERT INTO actors(name,country,role,priority,official_url,updated_at,active) VALUES(?,?,?,?,?,?,1)",
                 ("TESTLASER SARL", "France", "Centre technologique", 1, "https://www.testlaser.example", dbmod.utc_now()),
             )
-        self.key_patch = patch.object(lens, "LENS_API_KEY", "k")
-        self.key_patch.start()
-        self.addCleanup(self.key_patch.stop)
+        self.requetes: list[tuple[str, int]] = []
+
+    def _collecte(self, *documents: dict, total: int | None = None) -> dict:
+        def fetch(client, actor_name, offset=0):
+            self.requetes.append((actor_name, offset))
+            reponse = _search_response(*documents)
+            if total is not None:
+                reponse["total"] = total
+            return reponse
+        with patch.object(lens, "_fetch_actor_patents", fetch):
+            return collect_lens_patents()
+
+    def _documents(self):
+        with dbmod.connect(self.tech_db) as db:
+            return db.execute("SELECT actor_name,document_type,patent_number,source_url,abstract FROM documents").fetchall()
 
     def test_returns_not_configured_without_credentials(self):
         with patch.object(lens, "LENS_API_KEY", ""):
@@ -121,49 +153,119 @@ class CollectLensPatentsTests(unittest.TestCase):
         self.assertEqual(result["status"], "not_configured")
         self.assertEqual(result["patents_added"], 0)
 
-    def test_tracked_applicant_is_attributed_and_stored(self):
-        with patch.object(lens, "_fetch_recent_patents", lambda client: _search_response(
-            _lens_document(doc_number="1111111", applicants=("TESTLASER SARL",)),
-        )):
-            result = collect_lens_patents()
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["actors_matched"], 1)
-        self.assertEqual(result["patents_added"], 1)
-        with dbmod.connect(self.tech_db) as db:
-            row = db.execute("SELECT actor_name,document_type,patent_number,source_url FROM documents").fetchone()
-        self.assertEqual(row["actor_name"], "TESTLASER SARL")
-        self.assertEqual(row["document_type"], "patent")
-        self.assertEqual(row["patent_number"], "EP1111111A1")
+    def test_each_tracked_actor_is_queried_by_name(self):
+        self._collecte()
+        self.assertEqual([("TESTLASER SARL", 0)], self.requetes)
+
+    def test_an_ultrafast_machining_patent_signed_by_the_actor_is_stored_with_its_proof(self):
+        result = self._collecte(_lens_document(
+            doc_number="1111111", applicants=("TESTLASER SAS",),
+            abstract_en="A femtosecond laser drills cooling holes in a nickel superalloy turbine blade.",
+        ))
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(1, result["actors_matched"])
+        self.assertEqual(1, result["patents_added"])
+        [row] = self._documents()
+        self.assertEqual("TESTLASER SARL", row["actor_name"])
+        self.assertEqual("patent", row["document_type"])
+        self.assertEqual("EP1111111A1", row["patent_number"])
         self.assertIn("lens.org", row["source_url"])
+        self.assertIn("turbine blade", row["abstract"])
+        self.assertGreater(result["technology_signals_added"], 0)
+        with dbmod.connect(self.tech_db) as db:
+            preuves = db.execute(
+                "SELECT quote FROM technology_signal_sources WHERE source_url LIKE '%lens.org%'"
+            ).fetchall()
+        self.assertTrue(preuves, "un brevet retenu sort classé, chaque étiquette avec sa citation")
 
-    def test_untracked_applicant_becomes_a_candidate(self):
-        with patch.object(lens, "_fetch_recent_patents", lambda client: _search_response(
-            _lens_document(doc_number="2222222", applicants=("UNTRACKED LASER LAB INC",)),
-        )):
-            result = collect_lens_patents()
-        self.assertEqual(result["actors_matched"], 0)
-        self.assertEqual(result["topic_scoped_candidates_added"], 1)
+    def test_a_patent_the_actor_does_not_sign_is_not_written(self):
+        """La recherche de Lens sur le déposant est floue : on revérifie sur la réponse."""
+        result = self._collecte(_lens_document(
+            doc_number="2222222", applicants=("OTHER PHOTONICS INC",),
+            abstract_en="A femtosecond laser drills holes in glass.",
+        ))
+        self.assertEqual(1, result["not_signed"])
+        self.assertEqual([], self._documents())
+
+    def test_the_actor_name_must_match_as_a_whole_word(self):
+        result = self._collecte(_lens_document(
+            doc_number="2222223", applicants=("SUPERTESTLASER GMBH",),
+            abstract_en="A femtosecond laser drills holes in glass.",
+        ))
+        self.assertEqual(1, result["not_signed"])
+
+    def test_an_off_perimeter_patent_is_not_written(self):
+        """Signé par l'acteur, mais sans rien d'ultra-rapide : hors périmètre (règle du 10/09)."""
+        result = self._collecte(_lens_document(
+            doc_number="3333333", applicants=("TESTLASER SARL",),
+            title_en="Welding flux composition", abstract_en="A flux for submerged arc welding of steel.",
+        ))
+        self.assertEqual(1, result["off_topic"])
+        self.assertEqual([], self._documents())
+
+    def test_no_actor_candidate_is_created_from_patents_any_more(self):
+        self._collecte(_lens_document(
+            doc_number="4444444", applicants=("TESTLASER SARL", "SMITH JOHN"),
+            abstract_en="A femtosecond laser drills holes in glass.",
+        ))
         with dbmod.connect(self.actors_db) as db:
-            row = db.execute("SELECT name,review_status FROM actor_candidates").fetchone()
-            source = db.execute("SELECT source_type FROM actor_candidate_sources").fetchone()
-        self.assertEqual(row["name"], "UNTRACKED LASER LAB INC")
-        self.assertEqual(row["review_status"], "pending")
-        self.assertEqual(source["source_type"], "patent")
+            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM actor_candidates").fetchone()[0])
 
-    def test_already_tracked_applicant_is_not_a_candidate(self):
-        with patch.object(lens, "_fetch_recent_patents", lambda client: _search_response(
-            _lens_document(doc_number="3333333", applicants=("TESTLASER SARL",)),
-        )):
+    def test_a_large_filer_is_paginated(self):
+        pleine_page = [
+            _lens_document(doc_number=str(9000000 + i), applicants=("TESTLASER SARL",))
+            for i in range(lens.RESULTS_LIMIT)
+        ]
+        self._collecte(*pleine_page, total=250)
+        self.assertEqual([0, 100, 200], [offset for _nom, offset in self.requetes])
+
+    def test_one_failing_actor_does_not_fail_the_run(self):
+        with dbmod.connect(self.actors_db) as db:
+            db.execute(
+                "INSERT INTO actors(name,country,role,priority,official_url,updated_at,active) VALUES(?,?,?,?,?,?,1)",
+                ("SECOND LASER", "France", "Fabricant", 1, "https://second.example", dbmod.utc_now()),
+            )
+
+        def fetch(client, actor_name, offset=0):
+            if actor_name == "SECOND LASER":
+                raise RuntimeError("400 Bad Request")
+            return _search_response()
+        with patch.object(lens, "_fetch_actor_patents", fetch):
             result = collect_lens_patents()
-        self.assertEqual(result["topic_scoped_candidates_added"], 0)
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(1, result["errors"])
 
-    def test_query_failure_is_reported_as_error_status(self):
-        def boom(client):
+    def test_every_query_failing_is_reported_as_error_status(self):
+        def boom(client, actor_name, offset=0):
             raise RuntimeError("429 Too Many Requests")
-        with patch.object(lens, "_fetch_recent_patents", boom):
+        with patch.object(lens, "_fetch_actor_patents", boom):
             result = collect_lens_patents()
         self.assertEqual(result["status"], "error")
         self.assertIn("429", result["message"])
+
+
+class ActorQueryTests(unittest.TestCase):
+    def test_the_query_names_the_actor_and_requires_an_ultrafast_term(self):
+        envoye: dict = {}
+
+        class Reponse:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"total": 0, "data": []}
+
+        class Client:
+            def post(self, url, json, headers):
+                envoye.update(json)
+                return Reponse()
+
+        lens._fetch_actor_patents(Client(), 'Manufacturing Technology Centre (MTC) "x"', 200)
+        requete = envoye["query"]["query_string"]["query"]
+        self.assertIn('applicant.name:"Manufacturing Technology Centre x"', requete)
+        self.assertIn("femtosecond", requete)
+        self.assertIn("abstract", envoye["include"])
+        self.assertEqual(200, envoye["from"])
 
 
 class UpsertLensPatentTests(unittest.TestCase):
