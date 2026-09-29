@@ -8,32 +8,35 @@ distingue ensuite ce que chaque source a apporté par le domaine de `documents.s
 (lens.org ici, espacenet.com pour patent.py) -- même mécanique que crossref/hal/arxiv, voir son
 commentaire dans app.py.
 
-Même distinction actor-scoped / topic-scoped que patent.py (voir son docstring) :
-- _fetch_actor_patents  : par déposant (``applicant.name``), une requête par acteur suivi,
-  croisée avec la classe CPC B23K26 (travail au laser). Attribue les brevets trouvés à l'acteur.
-- _fetch_topic_scoped_patents : par classe CPC seule, fait remonter les déposants récurrents
-  absents de la base comme actor_candidates (source_type='patent'), même rôle que le pendant EPO.
+Verifie le 28/09/2026 contre un vrai compte (jeton d'essai fourni par l'utilisateur), ce qui a
+change la forme de ce module par rapport a patent.py :
+
+- PAS de distinction actor-scoped/topic-scoped par une requete par acteur (comme patent.py).
+  Mesure en direct : ce compte tient ~9-10 requetes/minute, tres en dessous des 55+ requetes
+  qu'une boucle par acteur suivi aurait demandees en une passe (voir google_patents.py, qui
+  applique deja ce raisonnement pour une toute autre raison -- le cout BigQuery). Une seule
+  requete ramene les brevets CPC B23K26 les plus RECENTS (triee par date_published desc), et
+  c'est le code Python qui les repartit ensuite entre acteur suivi et candidat -- meme logique
+  que la passe topic-scoped de patent.py, seulement pour la totalite des resultats.
+- Noms de champs corriges par rapport a la premiere version (jamais confrontee a une vraie
+  reponse) : la reponse porte "kind", pas "kind_symbol" ; un declarant est
+  {"extracted_name": {"value": "NOM"}}, pas {"applicant_name": "NOM"} -- "extracted_name" est un
+  OBJET, pas une chaine. Le filtre CPC ne matche RIEN en "term"/"match" sur
+  "classifications_cpc.symbol" (verifie : 0 resultat meme sur un symbole exact connu) ; le
+  champ de RECHERCHE reellement documente (docs.api.lens.org, confirme en direct) est
+  "class_cpc.symbol" via une requete "query_string" avec joker ("class_cpc.symbol:B23K26*") --
+  nom different du chemin de la reponse ("biblio.classifications_cpc.classifications[].symbol"),
+  comme "applicant.name" (recherche) differe deja de "biblio.parties.applicants[]" (reponse).
 
 Authentification : jeton porteur (Bearer), lu depuis LENS_API_KEY -- jamais codé en dur, même
 schéma que EPO_OPS_KEY dans patent.py. Un jeton Lens s'obtient gratuitement sur lens.org/lens/user
 (inscription académique/non-commerciale) et se génère depuis l'onglet "API & Data" du profil.
 Sans cette variable, collect_lens_patents() renvoie status='not_configured'.
-
-AVERTISSEMENT DE VÉRIFICATION : la forme de requête (POST /patent/search, DSL {"query":
-{"bool": {"must": [...]}}}, jeu de champs "include") et les noms de champs de réponse ci-dessous
-suivent la documentation publique de l'API (docs.api.lens.org, github.com/cambialens/lens-api-doc)
-telle que consultée le 22/09/2026 -- mais, comme pour patent.py, le PARSING n'a pas encore été
-confronté à une vraie réponse (aucun jeton disponible au moment où ce module a été écrit). Le
-parsing des champs de réponse est donc délibérément tolérant (un champ absent ou renommé donne un
-document ignoré ou partiel, jamais une exception) -- à confronter à une vraie réponse et à
-resserrer dès qu'un jeton est disponible, avant de considérer ce chantier terminé (voir
-tests/test_lens.py, qui documente cette réserve sur ses fixtures).
 """
 
 from __future__ import annotations
 
 import os
-import time
 
 import httpx
 
@@ -49,43 +52,41 @@ LENS_SEARCH_URL = "https://api.lens.org/patent/search"
 # voir son commentaire CPC_CLASS pour le détail du périmètre couvert.
 CPC_CLASS = "B23K26"
 
-# Même garde-fou que patent.MIN_APPLICANT_NAME_LENGTH, dupliqué plutôt qu'importé (aucun autre
-# lien entre les deux modules -- ils ne partagent que db.py/actor_discovery.py).
 MIN_APPLICANT_NAME_LENGTH = 4
 
-# Lens applique aussi un quota "fair use" sur son offre gratuite -- même politesse qu'EPO OPS.
-LENS_REQUEST_DELAY_SECONDS = 1.0
-
-RESULTS_PER_ACTOR = 25
-RESULTS_TOPIC_SCOPED = 25
+# Combien de brevets récents une seule requête ramène. Vérifié le 28/09/2026 : l'API refuse
+# "size" au-delà de 100 (HTTP 400, "Parameter 'size' shouldn't be greater than 100") -- pas de
+# pagination/scroll ici, une seule page suffit très largement pour un flux de veille récente.
+RESULTS_LIMIT = 100
 
 # Champs demandés à l'API (paramètre "include") : de quoi peupler documents + actor_candidates
 # sans redemander la fiche complète du brevet, qu'on ne consomme pas ici.
 _INCLUDE_FIELDS = [
-    "lens_id", "jurisdiction", "doc_number", "kind_symbol", "date_published",
+    "lens_id", "jurisdiction", "doc_number", "kind", "date_published",
     "biblio.invention_title", "biblio.parties.applicants",
 ]
 
 
-def _search_biblio(client: httpx.Client, query: dict, size: int) -> dict:
+def _is_configured() -> bool:
+    return bool(LENS_API_KEY)
+
+
+def _fetch_recent_patents(client: httpx.Client) -> dict:
     response = client.post(
         LENS_SEARCH_URL,
-        json={"query": query, "include": _INCLUDE_FIELDS, "size": size, "from": 0},
+        json={
+            # query_string + joker : seule forme vérifiée qui matche réellement des brevets
+            # CPC B23K26 sur ce compte -- voir docstring du module.
+            "query": {"query_string": {"query": f"class_cpc.symbol:{CPC_CLASS}*"}},
+            "sort": [{"date_published": "desc"}],
+            "include": _INCLUDE_FIELDS,
+            "size": RESULTS_LIMIT,
+            "from": 0,
+        },
         headers={"Authorization": f"Bearer {LENS_API_KEY}"},
     )
     response.raise_for_status()
     return response.json()
-
-
-def _applicant_query(actor_name: str) -> dict:
-    return {"bool": {"must": [
-        {"match": {"applicant.name": actor_name}},
-        {"term": {"classifications_cpc.symbol": CPC_CLASS}},
-    ]}}
-
-
-def _topic_query() -> dict:
-    return {"term": {"classifications_cpc.symbol": CPC_CLASS}}
 
 
 def _titles(doc: dict) -> str | None:
@@ -112,7 +113,12 @@ def _applicant_names(doc: dict) -> list[str]:
     for entry in applicants:
         if not isinstance(entry, dict):
             continue
-        name = entry.get("applicant_name") or entry.get("extracted_name") or entry.get("name")
+        # "extracted_name" est un OBJET ({"value": "NOM"}), vérifié le 28/09/2026 -- une chaîne
+        # nue reste acceptée en repli (couvre une forme de réponse plus ancienne/différente,
+        # jamais observée mais pas à exclure sans preuve).
+        extracted = entry.get("extracted_name")
+        name = extracted.get("value") if isinstance(extracted, dict) else extracted
+        name = name or entry.get("applicant_name") or entry.get("name")
         if name:
             names.append(str(name))
     return names
@@ -120,21 +126,22 @@ def _applicant_names(doc: dict) -> list[str]:
 
 def _parse_result(doc: dict) -> dict | None:
     """Un résultat de recherche Lens -> {patent_number,title,published_at,applicants,url}, ou
-    None si l'identifiant du document est absent. Tolérant par construction -- voir
-    l'avertissement de vérification en tête de module."""
+    None si l'identifiant du document est absent. Tolérant par construction : un champ encore
+    renommé demain donne un document partiel, jamais une exception."""
     if not isinstance(doc, dict):
         return None
     doc_number = doc.get("doc_number")
     if not doc_number:
         return None
     jurisdiction = doc.get("jurisdiction") or ""
-    kind = doc.get("kind_symbol") or ""
+    kind = doc.get("kind") or ""
     patent_number = f"{jurisdiction}{doc_number}{kind}"
 
     published_raw = doc.get("date_published")
     published_at = None
     if published_raw and isinstance(published_raw, str) and len(published_raw) >= 10:
-        # Format ISO documenté ("YYYY-MM-DD") -- contrairement au AAAAMMJJ compact d'EPO OPS.
+        # Format ISO ("YYYY-MM-DD"), vérifié le 28/09/2026 -- contrairement au AAAAMMJJ
+        # compact d'EPO OPS.
         published_at = published_raw[:10]
 
     lens_id = doc.get("lens_id") or ""
@@ -148,24 +155,6 @@ def _parse_result(doc: dict) -> dict | None:
         "url": f"https://www.lens.org/lens/patent/{lens_id}" if lens_id
         else f"https://www.lens.org/lens/search/patent/list?q=doc_number:{doc_number}",
     }
-
-
-def _extract_documents(payload: dict) -> list[dict]:
-    results = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(results, list):
-        return []
-    parsed = [_parse_result(doc) for doc in results]
-    return [doc for doc in parsed if doc]
-
-
-def _fetch_actor_patents(client: httpx.Client, actor_name: str) -> list[dict]:
-    payload = _search_biblio(client, _applicant_query(actor_name), RESULTS_PER_ACTOR)
-    return _extract_documents(payload)
-
-
-def _fetch_topic_scoped_patents(client: httpx.Client) -> list[dict]:
-    payload = _search_biblio(client, _topic_query(), RESULTS_TOPIC_SCOPED)
-    return _extract_documents(payload)
 
 
 def _upsert_lens_patent(db, actor_name: str | None, doc: dict) -> tuple[int, int]:
@@ -188,7 +177,7 @@ def _upsert_lens_patent(db, actor_name: str | None, doc: dict) -> tuple[int, int
 
 def collect_lens_patents() -> dict:
     """Point d'entrée (voir app.py: collectors["lens_patents"])."""
-    if not LENS_API_KEY:
+    if not _is_configured():
         return {
             "status": "not_configured",
             "message": "LENS_API_KEY absente -- jeton gratuit sur lens.org/lens/user (onglet API & Data)",
@@ -197,62 +186,66 @@ def collect_lens_patents() -> dict:
         }
 
     with connect(ACTORS_DB) as db:
-        actors = [dict(row) for row in db.execute("SELECT name FROM actors WHERE active=1").fetchall()]
         known_names, _known_domains = _known_actor_names_and_domains(db)
+        # Nom d'affichage par nom normalisé, même principe que google_patents.py : attribuer
+        # documents.actor_name avec la graphie suivie plutôt qu'avec le déposant tel qu'écrit
+        # par l'office de brevets.
+        display_name = {
+            _normalize_name(row["name"]): row["name"]
+            for row in db.execute("SELECT name FROM actors WHERE active=1").fetchall()
+        }
 
-    actors_matched = patents_added = patents_attributed = candidates_added = errors = 0
+    actors_matched_names: set[str] = set()
+    patents_added = patents_attributed = candidates_added = 0
 
     try:
         with connector_client("slow") as client:
-            with connect(TECH_DB) as tech_db:
-                eligible = [a for a in actors if len(_normalize_name(a["name"])) >= MIN_APPLICANT_NAME_LENGTH]
-                for index, actor in enumerate(eligible):
-                    try:
-                        documents = _fetch_actor_patents(client, actor["name"])
-                    except Exception:
-                        errors += 1
-                        documents = []
-                    if documents:
-                        actors_matched += 1
-                    for doc in documents:
-                        added, attributed = _upsert_lens_patent(tech_db, actor["name"], doc)
-                        patents_added += added
-                        patents_attributed += attributed
-                    if index < len(eligible) - 1:
-                        time.sleep(LENS_REQUEST_DELAY_SECONDS)
-
-            try:
-                topic_documents = _fetch_topic_scoped_patents(client)
-            except Exception:
-                topic_documents = []
-                errors += 1
-
-            with connect(TECH_DB) as tech_db, connect(ACTORS_DB) as actors_db:
-                for doc in topic_documents:
-                    added, attributed = _upsert_lens_patent(tech_db, None, doc)
-                    patents_added += added
-                    patents_attributed += attributed
-                    for applicant in doc["applicants"]:
-                        if _normalize_name(applicant) in known_names:
-                            continue
-                        candidates_added += upsert_actor_candidate(
-                            actors_db, applicant, "patent",
-                            context=f"Brevet CPC {CPC_CLASS} {doc['patent_number']} (Lens.org)",
-                            source_url=doc["url"],
-                        )
+            payload = _fetch_recent_patents(client)
     except Exception as exc:
         return {
             "status": "error", "message": str(exc)[:300],
-            "actors_matched": actors_matched, "patents_added": patents_added,
-            "patents_attributed": patents_attributed,
-            "topic_scoped_candidates_added": candidates_added, "errors": errors + 1,
+            "actors_matched": 0, "patents_added": 0, "patents_attributed": 0,
+            "topic_scoped_candidates_added": 0, "errors": 1,
         }
+
+    results = payload.get("data") if isinstance(payload, dict) else None
+    documents = [doc for doc in (_parse_result(row) for row in (results or [])) if doc]
+
+    with connect(TECH_DB) as tech_db, connect(ACTORS_DB) as actors_db:
+        for doc in documents:
+            # Un brevet peut avoir plusieurs déposants (co-dépôt) : le premier déposant SUIVI
+            # trouvé porte l'attribution (documents.actor_name est une seule colonne, même
+            # limite que patent.py), les autres restent lisibles dans le déposant brut.
+            tracked = next(
+                (name for name in doc["applicants"] if _normalize_name(name) in display_name),
+                None,
+            )
+            actor_name = display_name.get(_normalize_name(tracked)) if tracked else None
+            if actor_name:
+                actors_matched_names.add(actor_name)
+
+            added, attributed = _upsert_lens_patent(tech_db, actor_name, doc)
+            patents_added += added
+            patents_attributed += attributed
+
+            if actor_name:
+                continue
+            for applicant in doc["applicants"]:
+                if len(_normalize_name(applicant)) < MIN_APPLICANT_NAME_LENGTH:
+                    continue
+                if _normalize_name(applicant) in known_names:
+                    continue
+                candidates_added += upsert_actor_candidate(
+                    actors_db, applicant, "patent",
+                    context=f"Brevet CPC {CPC_CLASS} {doc['patent_number']} (Lens.org)",
+                    source_url=doc["url"],
+                )
 
     return {
         "status": "ok",
-        "actors_matched": actors_matched,
+        "actors_matched": len(actors_matched_names),
         "patents_added": patents_added,
         "patents_attributed": patents_attributed,
         "topic_scoped_candidates_added": candidates_added,
-        "errors": errors,
+        "errors": 0,
     }

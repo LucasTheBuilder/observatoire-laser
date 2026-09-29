@@ -1,11 +1,9 @@
 """Tests pour le connecteur brevets Lens.org (lens.py).
 
-httpx.Client est remplacé par un double rejouant des réponses JSON canned -- jamais d'appel
-réseau réel ici. AVERTISSEMENT (voir lens.py docstring) : la forme de ces fixtures suit la
-documentation publique de l'API Lens telle que consultée le 22/09/2026, mais n'a PAS encore été
-confrontée à une vraie réponse (aucun jeton disponible au moment où ce module a été écrit) --
-à corriger si besoin dès qu'une clé LENS_API_KEY réelle est disponible, avant de considérer ce
-chantier terminé.
+`_fetch_recent_patents` (la seule fonction qui parle réellement au réseau) est toujours patchée
+ici -- jamais d'appel réseau réel. Les formes de réponse ci-dessous (champ "kind", pas
+"kind_symbol" ; "extracted_name" en objet {"value": ...}) reproduisent ce qui a été observé le
+28/09/2026 contre un vrai compte Lens (voir lens.py docstring) -- ce ne sont plus des suppositions.
 """
 
 from __future__ import annotations
@@ -33,7 +31,7 @@ def _lens_document(
         "lens_id": lens_id,
         "jurisdiction": jurisdiction,
         "doc_number": doc_number,
-        "kind_symbol": kind,
+        "kind": kind,
         "date_published": date_published,
         "biblio": {
             "invention_title": [
@@ -41,7 +39,7 @@ def _lens_document(
                 {"lang": "de", "text": "Verfahren zum Laserbohren"},
             ],
             "parties": {
-                "applicants": [{"applicant_name": name} for name in applicants],
+                "applicants": [{"extracted_name": {"value": name}} for name in applicants],
             },
         },
     }
@@ -83,35 +81,13 @@ class ParseResultTests(unittest.TestCase):
     def test_not_a_dict_returns_none(self):
         self.assertIsNone(_parse_result([]))  # type: ignore[arg-type]
 
-
-class FakeResponse:
-    def __init__(self, *, json_payload=None, status_code=200):
-        self._json = json_payload or {}
-        self.status_code = status_code
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
-
-    def json(self):
-        return self._json
-
-
-class FakeClient:
-    # search_handler(payload: dict) -> dict ; overridden per test.
-    search_handler = staticmethod(lambda payload: _search_response())
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def post(self, url, json=None, headers=None, **kwargs):
-        return FakeResponse(json_payload=self.search_handler(json or {}))
+    def test_applicant_name_as_plain_string_is_still_accepted(self):
+        # Repli défensif (jamais observé en pratique) : extracted_name en chaîne nue plutôt
+        # qu'en objet {"value": ...}.
+        raw = _lens_document(applicants=())
+        raw["biblio"]["parties"]["applicants"] = [{"extracted_name": "PLAIN STRING SARL"}]
+        doc = _parse_result(raw)
+        self.assertEqual(doc["applicants"], ["PLAIN STRING SARL"])
 
 
 class CollectLensPatentsTests(unittest.TestCase):
@@ -130,17 +106,14 @@ class CollectLensPatentsTests(unittest.TestCase):
         self.addCleanup(self.actors_patch.stop)
         self.addCleanup(self.tech_patch.stop)
         self.addCleanup(self.tmpdir.cleanup)
-        # Même raison que test_patent.py : 55 acteurs réels sont seedés par init_databases(),
-        # sans quoi la pause polie entre deux requêtes ferait durer chaque test une bonne minute.
-        self.delay_patch = patch.object(lens, "LENS_REQUEST_DELAY_SECONDS", 0.0)
-        self.delay_patch.start()
-        self.addCleanup(self.delay_patch.stop)
         with dbmod.connect(actors_db) as db:
             db.execute(
                 "INSERT INTO actors(name,country,role,priority,official_url,updated_at,active) VALUES(?,?,?,?,?,?,1)",
                 ("TESTLASER SARL", "France", "Centre technologique", 1, "https://www.testlaser.example", dbmod.utc_now()),
             )
-        FakeClient.search_handler = staticmethod(lambda payload: _search_response())
+        self.key_patch = patch.object(lens, "LENS_API_KEY", "k")
+        self.key_patch.start()
+        self.addCleanup(self.key_patch.stop)
 
     def test_returns_not_configured_without_credentials(self):
         with patch.object(lens, "LENS_API_KEY", ""):
@@ -148,15 +121,10 @@ class CollectLensPatentsTests(unittest.TestCase):
         self.assertEqual(result["status"], "not_configured")
         self.assertEqual(result["patents_added"], 0)
 
-    def test_actor_scoped_patent_is_attributed_and_stored(self):
-        def handler(payload):
-            must = (payload.get("query") or {}).get("bool", {}).get("must", [])
-            applicant_clause = next((m for m in must if "match" in m), None)
-            if applicant_clause and "TESTLASER SARL" in applicant_clause["match"].get("applicant.name", ""):
-                return _search_response(_lens_document(doc_number="1111111", applicants=("TESTLASER SARL",)))
-            return _search_response()
-        FakeClient.search_handler = staticmethod(handler)
-        with patch.object(lens, "LENS_API_KEY", "k"), patch.object(lens.httpx, "Client", FakeClient):
+    def test_tracked_applicant_is_attributed_and_stored(self):
+        with patch.object(lens, "_fetch_recent_patents", lambda client: _search_response(
+            _lens_document(doc_number="1111111", applicants=("TESTLASER SARL",)),
+        )):
             result = collect_lens_patents()
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["actors_matched"], 1)
@@ -168,15 +136,12 @@ class CollectLensPatentsTests(unittest.TestCase):
         self.assertEqual(row["patent_number"], "EP1111111A1")
         self.assertIn("lens.org", row["source_url"])
 
-    def test_topic_scoped_untracked_applicant_becomes_a_candidate(self):
-        def handler(payload):
-            query = payload.get("query") or {}
-            if "term" in query:
-                return _search_response(_lens_document(doc_number="2222222", applicants=("UNTRACKED LASER LAB INC",)))
-            return _search_response()
-        FakeClient.search_handler = staticmethod(handler)
-        with patch.object(lens, "LENS_API_KEY", "k"), patch.object(lens.httpx, "Client", FakeClient):
+    def test_untracked_applicant_becomes_a_candidate(self):
+        with patch.object(lens, "_fetch_recent_patents", lambda client: _search_response(
+            _lens_document(doc_number="2222222", applicants=("UNTRACKED LASER LAB INC",)),
+        )):
             result = collect_lens_patents()
+        self.assertEqual(result["actors_matched"], 0)
         self.assertEqual(result["topic_scoped_candidates_added"], 1)
         with dbmod.connect(self.actors_db) as db:
             row = db.execute("SELECT name,review_status FROM actor_candidates").fetchone()
@@ -185,34 +150,20 @@ class CollectLensPatentsTests(unittest.TestCase):
         self.assertEqual(row["review_status"], "pending")
         self.assertEqual(source["source_type"], "patent")
 
-    def test_topic_scoped_already_tracked_applicant_is_not_a_candidate(self):
-        def handler(payload):
-            query = payload.get("query") or {}
-            if "term" in query:
-                return _search_response(_lens_document(doc_number="3333333", applicants=("TESTLASER SARL",)))
-            return _search_response()
-        FakeClient.search_handler = staticmethod(handler)
-        with patch.object(lens, "LENS_API_KEY", "k"), patch.object(lens.httpx, "Client", FakeClient):
+    def test_already_tracked_applicant_is_not_a_candidate(self):
+        with patch.object(lens, "_fetch_recent_patents", lambda client: _search_response(
+            _lens_document(doc_number="3333333", applicants=("TESTLASER SARL",)),
+        )):
             result = collect_lens_patents()
         self.assertEqual(result["topic_scoped_candidates_added"], 0)
 
-    def test_same_patent_found_by_both_passes_is_stored_once_and_attributed(self):
-        def handler(payload):
-            query = payload.get("query") or {}
-            must = query.get("bool", {}).get("must", [])
-            applicant_clause = next((m for m in must if "match" in m), None)
-            is_actor_pass = applicant_clause and "TESTLASER SARL" in applicant_clause["match"].get("applicant.name", "")
-            is_topic_pass = "term" in query
-            if is_actor_pass or is_topic_pass:
-                return _search_response(_lens_document(doc_number="4444444", applicants=("TESTLASER SARL",)))
-            return _search_response()
-        FakeClient.search_handler = staticmethod(handler)
-        with patch.object(lens, "LENS_API_KEY", "k"), patch.object(lens.httpx, "Client", FakeClient):
-            collect_lens_patents()
-        with dbmod.connect(self.tech_db) as db:
-            rows = db.execute("SELECT actor_name FROM documents WHERE patent_number='EP4444444A1'").fetchall()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["actor_name"], "TESTLASER SARL")
+    def test_query_failure_is_reported_as_error_status(self):
+        def boom(client):
+            raise RuntimeError("429 Too Many Requests")
+        with patch.object(lens, "_fetch_recent_patents", boom):
+            result = collect_lens_patents()
+        self.assertEqual(result["status"], "error")
+        self.assertIn("429", result["message"])
 
 
 class UpsertLensPatentTests(unittest.TestCase):
