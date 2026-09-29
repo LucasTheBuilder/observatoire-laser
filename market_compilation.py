@@ -358,6 +358,14 @@ _GLOSSARY: tuple[tuple[str, str, str], ...] = (
     ("anr", "Signaux de demande", "cofinancements"),
 )
 
+# Le pluriel est écrit, jamais fabriqué : « 1 projets rattachés » ne se lit pas.
+_SINGULAR_UNITS = {
+    "publications rattachées": "publication rattachée",
+    "projets rattachés": "projet rattaché",
+    "brevets rattachés": "brevet rattaché",
+    "appels d'offres": "appel d'offres",
+    "cofinancements": "cofinancement",
+}
 # demand_signals.source porte le nom du guichet tel que demand_signals.py l'écrit.
 _DEMAND_SOURCE_NAMES = {"boamp": "BOAMP", "ted": "TED", "anr": "ANR"}
 
@@ -381,6 +389,8 @@ def source_glossary(
             count = demand_counts.get(_DEMAND_SOURCE_NAMES[source_id], 0)
         else:
             count = tech_counts.get(source_id, 0)
+        if count == 1:
+            unit = _SINGULAR_UNITS.get(unit, unit)
         glossary.append({
             "id": source_id,
             "name": source.name,

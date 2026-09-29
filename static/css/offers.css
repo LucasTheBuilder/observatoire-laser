@@ -21,7 +21,7 @@
 .fam-proof-pill{padding:1px 7px;border-radius:10px;background:#e9f5f3;color:#066b64;font-size:10px;font-weight:800;flex-shrink:0}
 
 /* --- Drill-down navigation (family -> operation/property -> material -> sources) ----------- */
-.drill-breadcrumb{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:16px;outline:none}
+.drill-breadcrumb{display:flex;flex-direction:row;margin-top:0;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:16px;outline:none}
 .drill-crumb{border:0;background:none;padding:2px 4px;font-size:12.5px;color:var(--teal);font-weight:700;cursor:pointer;border-radius:6px}
 .drill-crumb:hover{background:#eef7f6;text-decoration:underline}
 .drill-crumb.current{color:var(--ink);font-weight:750;cursor:default}

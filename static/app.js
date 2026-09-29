@@ -192,6 +192,10 @@ function mcGroups(entries) {
   return {markets: [...markets.entries()].sort(byTotal), orphans: [...orphans.entries()].sort(byTotal)};
 }
 
+function mcPlural(count, one, many) {
+  return `${count} ${count > 1 ? many : one}`;
+}
+
 function mcCountsLine(counts) {
   return Object.entries(MC_KIND_WORDS)
     .filter(([kind]) => counts[kind])
@@ -543,8 +547,8 @@ function renderMarket() {
     section01 = marketBreadcrumb(market, product) + (market ? mcProductFilter(entries, market, product) : "");
   } else {
     const groups = mcGroups(entries);
-    section01 = `<div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché nommé par un fait, une offre ou un document technique, avec les produits que ces mêmes sources nomment. Cliquer un marché resserre toute la page.</p></div></div><b>${groups.markets.length} marchés</b></div>${mcMarketCards(groups.markets)}
-      ${groups.orphans.length ? `<div class="section-title"><div><span>01·b</span><div><h2>Produits sans marché nommé</h2><p>La source nomme la pièce mais aucun marché : elle reste rangée sous son produit, jamais sous un marché déduit.</p></div></div><b>${groups.orphans.length} produits</b></div>${mcProductCards(groups.orphans)}` : ""}`;
+    section01 = `<div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché nommé par un fait, une offre ou un document technique, avec les produits que ces mêmes sources nomment. Cliquer un marché resserre toute la page.</p></div></div><b>${mcPlural(groups.markets.length, "marché", "marchés")}</b></div>${mcMarketCards(groups.markets)}
+      ${groups.orphans.length ? `<div class="section-title"><div><span>01·b</span><div><h2>Produits sans marché nommé</h2><p>La source nomme la pièce mais aucun marché : elle reste rangée sous son produit, jamais sous un marché déduit.</p></div></div><b>${mcPlural(groups.orphans.length, "produit", "produits")}</b></div>${mcProductCards(groups.orphans)}` : ""}`;
   }
 
   content.innerHTML = header(
@@ -554,10 +558,10 @@ function renderMarket() {
     `<div class="header-actions"><button class="export-btn" data-export="market">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser l’analyse</button></div>`
   ) +
   `<section id="market-drill-root">${section01}</section>
-   <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${existingRows.length} faits</b></div>${evidenceTable(existingRows, {hideMarketColumn: !!market, emptyMessage: scope ? `Aucune application existante documentée pour ${scope}.` : undefined})}</section>
-   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${radarRows.length} faits</b></div>${evidenceTable(radarRows, {hideMarketColumn: !!market, emptyMessage: scope ? `Aucune application radar documentée pour ${scope}.` : undefined})}</section>
-   <section><div class="section-title"><div><span>04</span><div><h2>Offres & capacités</h2><p>Capacités acceptées dont une phrase de la source nomme un marché ou un produit. Les autres restent sur la page Offres & capacités.</p></div></div><b>${offerRows.length} offres</b></div>${mcOffersTable(offerRows, context)}</section>
-   <section><div class="section-title"><div><span>05</span><div><h2>Technologie</h2><p>Publications et projets du corpus Technologie laser dont le titre, le résumé ou l’objet nomme un marché ou un produit.</p></div></div><b>${techRows.length} documents</b></div>${mcTechTable(techRows, context)}</section>
+   <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${mcPlural(existingRows.length, "fait", "faits")}</b></div>${evidenceTable(existingRows, {hideMarketColumn: !!market, emptyMessage: scope ? `Aucune application existante documentée pour ${scope}.` : undefined})}</section>
+   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${mcPlural(radarRows.length, "fait", "faits")}</b></div>${evidenceTable(radarRows, {hideMarketColumn: !!market, emptyMessage: scope ? `Aucune application radar documentée pour ${scope}.` : undefined})}</section>
+   <section><div class="section-title"><div><span>04</span><div><h2>Offres & capacités</h2><p>Capacités acceptées dont une phrase de la source nomme un marché ou un produit. Les autres restent sur la page Offres & capacités.</p></div></div><b>${mcPlural(offerRows.length, "offre", "offres")}</b></div>${mcOffersTable(offerRows, context)}</section>
+   <section><div class="section-title"><div><span>05</span><div><h2>Technologie</h2><p>Publications et projets du corpus Technologie laser dont le titre, le résumé ou l’objet nomme un marché ou un produit.</p></div></div><b>${mcPlural(techRows.length, "document", "documents")}</b></div>${mcTechTable(techRows, context)}</section>
    ${demandSignalsPanel()}
    <section>${tcSourcesBlock(state.marketCompilation?.sources || [], MC_SOURCE_ROLES)}</section>`;
   wireActions();
