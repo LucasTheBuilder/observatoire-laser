@@ -401,7 +401,13 @@ class ActorCandidateEndpointTests(unittest.TestCase):
             # la première, et ce test cesserait de vérifier ce que son nom annonce (candidat
             # inconnu) tout en restant vert.
             payload = appmod.RejectCandidateRequest(reviewed_by="lucas", reject_reason="off_topic")
-            with patch.object(ad, "ACTORS_DB", actors_db):
+            # review_journal résout ses chemins depuis le module db : sans ces deux patchs, le
+            # snapshot lisait la vraie data/actors.db (et le test échouait là où elle n'existe pas).
+            with (
+                patch.object(ad, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "ACTORS_DB", actors_db),
+                patch.object(dbmod, "MARKET_DB", Path(tmp) / "market.db"),
+            ):
                 with self.assertRaises(appmod.HTTPException) as ctx:
                     appmod.actor_candidate_reject(999, payload)
             self.assertEqual(400, ctx.exception.status_code)
