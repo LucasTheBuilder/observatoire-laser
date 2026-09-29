@@ -19,7 +19,7 @@ def _block(item: dict) -> ContentBlock:
 def _load_blocks(raw: object, diagnostics: Counter[str]) -> list[ContentBlock]:
     """Parse one stored payload without letting a malformed source abort the replay."""
     try:
-        payload = json.loads(raw or "[]")
+        payload = json.loads(raw or "[]")  # type: ignore[arg-type]  # TypeError attrapée juste en dessous
     except (TypeError, json.JSONDecodeError):
         diagnostics["sources_invalid_json"] += 1
         return []

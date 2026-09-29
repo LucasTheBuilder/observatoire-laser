@@ -426,7 +426,7 @@ class AiCandidatesMalformedBreakdownTests(unittest.TestCase):
         diagnostics: dict[str, int] = {}
         candidates = _ai_candidates(
             "Example", "https://example.test/medical", "Applications", [block],
-            FakeAiClient([fact]), diagnostics,
+            FakeAiClient([fact]), diagnostics,  # type: ignore[arg-type, list-item]
         )
         self.assertEqual([], candidates)
         # Le roll-up historique reste alimenté quel que soit le sous-cas.

@@ -164,7 +164,7 @@ class CostCapTests(unittest.TestCase):
     def _client(self, model: str, input_tokens: int) -> analyst.AnalystClient:
         client = analyst.AnalystClient.__new__(analyst.AnalystClient)
         client.model = model
-        client._client = object()  # présence suffisante : aucun appel réseau n'est atteint
+        client._client = object()  # type: ignore[assignment]  # présence suffisante : aucun appel réseau n'est atteint
         client.total_input_tokens = 0
         client.total_output_tokens = 0
         client.count_input_tokens = lambda *a, **k: input_tokens  # type: ignore[method-assign]

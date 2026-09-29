@@ -47,7 +47,16 @@ d'être écrite — voir les docstrings de `market_sizing.py`, `reference_matrix
 ## Boucle de vérification standard
 
 Implémenter → tests → `py -m pytest -q` (suite complète) → `py -m ruff check .` → `py -m mypy .`
-(une erreur préexistante connue et non liée dans `replay_market_engine_v341.py:22`, à ignorer) →
-`git add` des fichiers précis (jamais `-A`) → commit → `docker compose up -d --build` → health
+(0 erreur attendue : toute erreur est nouvelle) → `git add` des fichiers précis (jamais `-A`) →
+commit → `git push` (la CI GitHub `.github/workflows/ci.yml` rejoue ruff/mypy/pytest, et l'audit
+hebdomadaire du lundi ne voit que ce qui est poussé) → `docker compose up -d --build` → health
 check (`curl http://127.0.0.1:8765/`) → déclencher le vrai collecteur concerné contre la
 production → inspecter les données réellement écrites avant de considérer une tâche terminée.
+
+## Données de production
+
+`data/` n'est pas dans git. Une tâche planifiée Windows (« Observatoire - sauvegarde des bases »,
+13h chaque jour) lance `backup_databases.py`, qui copie `data/*.db` vers
+`%OneDrive%\observatoire-backups\AAAA-MM-JJ\` (30 jours conservés). Avant une intervention
+destructive sur une base, lancez-le à la main (`py backup_databases.py`) plutôt que de copier le
+fichier : les bases sont en WAL, une copie brute du `.db` perd les écritures non checkpointées.
