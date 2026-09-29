@@ -22,6 +22,9 @@ services:
       OPENALEX_API_KEY: ${OPENALEX_API_KEY:-}
       EPO_OPS_KEY: ${EPO_OPS_KEY:-}
       EPO_OPS_SECRET: ${EPO_OPS_SECRET:-}
+      # Lens.org (lens.py). Absente ici jusqu'au 29/09/2026 : la clé était dans .env mais le
+      # conteneur ne la voyait pas, et collect_lens_patents() répondait « not_configured ».
+      LENS_API_KEY: ${LENS_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
