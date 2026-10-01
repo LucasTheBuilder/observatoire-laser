@@ -48,9 +48,12 @@ def _roster() -> tuple[set[str], set[str], dict[str, Any]]:
         _db.ACTORS_DB,
         "SELECT name, country, actor_type, competitive_class, is_reference, active, review_status FROM actors",
     )
-    us = {a["name"] for a in actors if a["is_reference"] and a["competitive_class"] == OUR_COMPETITIVE_CLASS}
+    # « Nous » = classe A1 seule : is_reference a déjà été remis à 0 sur HEF/IREIS sans que leur
+    # classe change, et ils seraient alors comptés comme leurs propres concurrents.
+    us = {a["name"] for a in actors if a["competitive_class"] == OUR_COMPETITIVE_CLASS}
     competitors = [
-        a for a in actors if not a["is_reference"] and a["active"] and a["review_status"] == "verified"
+        a for a in actors
+        if a["name"] not in us and not a["is_reference"] and a["active"] and a["review_status"] == "verified"
     ]
     perimeter = {
         "nous": sorted(us),

@@ -106,6 +106,17 @@ class MarketingDossierTests(unittest.TestCase):
         self.assertIn("Notre propre offre (Nous SA) est à peine décrite : 1 offre(s) confirmée(s)", constats)
         self.assertIn("Aucune taille de marché", constats)
 
+    def test_class_a1_is_us_even_without_the_reference_flag(self) -> None:
+        with dbmod.connect(self.paths["ACTORS_DB"]) as db:
+            db.execute("UPDATE actors SET is_reference=0 WHERE name='Nous SA'")
+        self._offer("Nous SA", "Op test", "accepted")
+
+        dossier = build_marketing_dossier(today=TODAY)
+
+        self.assertEqual(["Nous SA"], dossier["perimetre"]["nous"])
+        line = self._operation(dossier, "Op test")
+        self.assertEqual(("confirmé", 0), (line["nous"], line["concurrents_confirmes"]))
+
     def test_paths_are_read_at_call_time_from_the_db_module(self) -> None:
         self._offer("Concurrent A", "Op isolee", "accepted")
         self.assertTrue(any(line["operation"] == "Op isolee" for line in build_marketing_dossier(today=TODAY)["operations"]))
