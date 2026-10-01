@@ -60,7 +60,13 @@ BACKUP_RETENTION_COUNT = int(os.getenv("BACKUP_RETENTION_COUNT", "14"))
 ACTORS = [
     ("ALPHANOV", "France", "Centre technologique - procédés laser & micro-usinage", 1, "https://www.alphanov.com"),
     ("MANUTECH USD", "France", "Plateforme technologique femtoseconde - texturation/fonctionnalisation", 1, "https://www.manutech-usd.fr"),
-    ("HEF", "France", "Référence interne - groupe industriel", 1, "https://hef.group"),
+    # "Référence interne" jusqu'au 01/10/2026 : HEF et IREIS sont désormais suivis comme des
+    # acteurs prioritaires à part entière (is_reference remis à 0 depuis l'UI). Le libellé
+    # devait suivre ici et pas seulement en base : l'UPSERT ci-dessus réécrit `role` à CHAQUE
+    # démarrage, donc une correction faite uniquement dans l'UI est annulée au redéploiement
+    # suivant -- constaté le jour même sur cet acteur. IREIS n'est pas dans cette liste (ajouté
+    # via create_actor, id 2002) et n'était donc pas concerné.
+    ("HEF", "France", "Groupe industriel", 1, "https://hef.group"),
     # lasea.com, not lasea.eu: 108 des 109 sources crawlées résolvent sur lasea.com (HTTP 200,
     # vérifié en base) -- lasea.eu semble n'être conservé qu'en page d'accueil/redirection.
     # Voir audit v8 §2.7 : deux mécanismes matchent sur ce domaine (site_profiles.DOMAIN_OVERRIDES,
