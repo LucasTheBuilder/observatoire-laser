@@ -136,6 +136,27 @@ ACTORS = [
     # FEMTOprint et LightFab, donc concurrent frontal et pas simple voisin.
     ("LouwersHanique", "Pays-Bas", "Microfabrication du verre par gravure sélective femtoseconde (SLE)", 0, "https://www.louwershanique.com"),
     ("Teknologisk Institut", "Danemark", "Centre technologique - micro-usinage laser femtoseconde & excimer", 0, "https://www.teknologisk.dk"),
+    # Balayage hors Europe/hors Asie (01/10/2026) : la base ne comptait que trois prestataires
+    # américains alors que le premier marché mondial du micro-usinage USP sous-traité est le
+    # médical US (stents, cathéters, nitinol) -- Resonetics était suivi, pas ses pairs directs.
+    # Source structurante : Laser Focus World, « Commercially available ultrashort-pulse laser
+    # technology: Part II » (2020), tableau 3 des job-shops USP, complété par recherche ciblée.
+    # Rien d'industriel trouvé au Canada, en Israël, en Australie ni en Amérique latine.
+    # Norman Noble, Spectralytics, Nanotech Precision et A-Laser renvoient HTTP 403 aux robots :
+    # leur crawl restera maigre, comme celui de laserKRAFTwerk.
+    ("Norman Noble", "Etats-Unis", "Sous-traitance d'usinage laser USP d'implants et dispositifs médicaux (nitinol)", 0, "https://nnoble.com"),
+    ("Laserage", "Etats-Unis", "Sous-traitance laser médicale (stents, cathéters) incluant USP femtoseconde", 0, "https://www.ametekemc.com/our-brands/laserage"),
+    ("Spectralytics", "Etats-Unis", "Sous-traitance de découpe/ablation laser médicale (femtoseconde, excimer)", 0, "https://www.spectralytics.com"),
+    ("Lighteum Medical", "Etats-Unis", "Découpe laser femtoseconde de composants nitinol & micro-usinage de métaux précieux", 0, "https://www.lighteum.com"),
+    ("Cirtec Medical", "Etats-Unis", "CDMO médical intégrant la découpe laser femtoseconde du nitinol", 0, "https://www.cirtecmed.com"),
+    ("PhotoMachining", "Etats-Unis", "Micro-usinage laser UV/USP en sous-traitance & stations de micro-usinage", 0, "https://photomachining.com"),
+    # Page du site de Hermann et non la racine spectrumplastics.com, qui couvre surtout
+    # l'extrusion de plastiques médicaux -- hors périmètre.
+    ("DuPont Spectrum Hermann", "Etats-Unis", "Micro-usinage laser femto/pico/nano/excimer pour le médical (ex-Laser Light Technologies)", 0, "https://www.spectrumplastics.com/about/company/locations/hermann-mo/"),
+    ("Laserod Technologies", "Etats-Unis", "Micro-usinage laser en sous-traitance, perçage femtoseconde de matériaux minces", 0, "https://laserod.com"),
+    ("Nanotech Precision", "Etats-Unis", "Fabrication sous contrat de micro-composants, usinage laser femtoseconde 5 axes", 0, "https://nanotechmn.com"),
+    ("Gateway Laser Services", "Etats-Unis", "Micro-usinage laser femtoseconde en sous-traitance (cathéters, polymères)", 0, "https://www.gatewaylaser.com"),
+    ("A-Laser", "Etats-Unis", "Découpe et micro-usinage laser UV/femtoseconde en sous-traitance", 0, "https://a-laser.com"),
 ]
 
 # Quelques URLs de pages connues, injectées d'office dans actor_sources au démarrage (avant
