@@ -43,7 +43,19 @@ FRENCH_REGISTRY_ALIASES: dict[str, str] = {
     "ALPHANOV": "493635817",       # siège Institut d'Optique d'Aquitaine, Talence ; sigle="ALPHANOV" exact
     "MANUTECH USD": "753487164",   # nom_raison_sociale="MANUTECH-USD" exact ; siège Saint-Étienne
     "IREPA LASER": "402256184",    # nom_commercial="IREPA LASER" exact ; siège Illkirch (Strasbourg)
+    "IREIS": "395294796",          # sigle="IREIS" exact, raison sociale "INSTITUT DE RECHERCHES EN
+                                   # INGENIERIE DES SURFACES" (la graphie que l'ANR emploie aussi
+                                   # pour ce partenaire) ; siège Andrézieux-Bouthéon, APE 72.19Z
 }
+
+# HEF n'a volontairement PAS d'alias ici (vérifié le 01/10/2026). Le registre renvoie cinq
+# entités actives du groupe au même siège d'Andrézieux-Bouthéon -- HEF-DURFERRIT (450100714),
+# HEF M&D, HEF GREEN CENTER, la holding des salariés, et HYDROMECANIQUE ET FROTTEMENT
+# (887050508) -- et l'acteur suivi désigne le GROUPE (hef.group), pas l'une d'elles. Aucune
+# page crawlée de hef.group ne porte de SIREN/RCS permettant de trancher. En choisir une au
+# jugé produirait exactement l'erreur d'attribution silencieuse que le docstring de ce module
+# décrit comme pire que l'absence de donnée : effectif, CA et date de création d'une filiale
+# s'afficheraient comme ceux du groupe. À compléter quand une mention légale aura tranché.
 
 _DATE_RE = re.compile(r"^(\d{4})-\d{2}-\d{2}")
 
