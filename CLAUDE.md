@@ -55,8 +55,9 @@ production → inspecter les données réellement écrites avant de considérer 
 
 ## Données de production
 
-`data/` n'est pas dans git. Une tâche planifiée Windows (« Observatoire - sauvegarde des bases »,
-13h chaque jour) lance `backup_databases.py`, qui copie `data/*.db` vers
-`%OneDrive%\observatoire-backups\AAAA-MM-JJ\` (30 jours conservés). Avant une intervention
-destructive sur une base, lancez-le à la main (`py backup_databases.py`) plutôt que de copier le
-fichier : les bases sont en WAL, une copie brute du `.db` perd les écritures non checkpointées.
+`data/` n'est pas dans git. N'ouvrez JAMAIS `data/*.db` depuis Windows (sqlite3, même en
+lecture seule, `backup_databases.py`, `py app.py`) pendant que le conteneur tourne : le partage
+WAL ne traverse pas le bind mount Docker Desktop, la connexion de l'hôte supprime le `-wal` du
+conteneur et tue la collecte en cours (`disk I/O error`, constaté deux fois le 2026-09-29). Lisez
+via `docker compose exec -T observatoire python -c ...`, ou interrogez une copie de
+`data/backups/`.
