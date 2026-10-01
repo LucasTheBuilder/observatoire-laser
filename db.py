@@ -1965,6 +1965,25 @@ def _init_market_db() -> None:
                 source_url TEXT
             );
             CREATE INDEX IF NOT EXISTS review_decisions_item_idx ON review_decisions(queue,item_id);
+            -- Recommandations de l'agent marketing (marketing_agent.py) : seules celles dont toutes
+            -- les références existent dans le dossier et dont tous les chiffres en viennent sont
+            -- écrites, en revue ; l'humain les accepte ou les rejette.
+            CREATE TABLE IF NOT EXISTS marketing_recommendations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                refs TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                model TEXT,
+                review_status TEXT NOT NULL DEFAULT 'review' CHECK(review_status IN ('review','accepted','rejected')),
+                reviewed_by TEXT,
+                reviewed_at TEXT,
+                reject_reason TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS marketing_recommendations_run_idx ON marketing_recommendations(run_id);
             """
         )
         _add_columns(db, "vocabulary_candidates", dict(_REVIEW_TRACE_COLUMNS))
