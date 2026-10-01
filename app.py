@@ -101,7 +101,7 @@ from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from lens import collect_lens_patents
 from market_compilation import compile_market_page, source_glossary
 from market_sizing import add_market_sizing, delete_market_sizing, list_market_sizing
-from marketing_agent import list_recommendations, run_marketing_agent
+from marketing_agent import run_marketing_agent
 from marketing_dossier import build_marketing_dossier
 from named_offers import collect_named_offers
 from national_projects import collect_national_projects
@@ -928,7 +928,7 @@ def veille_metrics_capture():
 
 @app.get("/api/review")
 def review_queue_list(
-    queue: Literal["evidence", "offers", "tech_signals", "events", "facts", "actors", "vocabulary"] = Query(...),
+    queue: Literal["evidence", "offers", "tech_signals", "events", "facts", "actors", "vocabulary", "marketing"] = Query(...),
     status: Literal["pending", "accepted", "rejected"] = "pending",
 ):
     """File de revue unifiée (§5.G audit veille, 30/08/2026) : un seul contrat pour les 7 files
@@ -1587,17 +1587,12 @@ def marketing_dossier_endpoint():
 @app.post("/api/marketing-agent/run")
 def marketing_agent_run():
     """Un passage de l'agent marketing sur le dossier courant (un appel Claude, plafonné par
-    AI_COST_CAP_USD_PER_RUN avant envoi). Les recommandations retenues sont écrites en revue ;
+    AI_COST_CAP_USD_PER_RUN avant envoi). Les recommandations retenues sont écrites en revue (file 'marketing' de /api/review) ;
     les écartées (référence inconnue, chiffre absent du dossier) sont renvoyées avec leur motif."""
     try:
         return run_marketing_agent()
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@app.get("/api/marketing-recommendations")
-def marketing_recommendations(status: Literal["review", "accepted", "rejected"] | None = "review"):
-    return list_recommendations(status)
 
 
 class GoldenFactRequest(BaseModel):

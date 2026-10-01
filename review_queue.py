@@ -41,7 +41,7 @@ from db import (
     utc_now,
 )
 
-QUEUES = ("evidence", "offers", "tech_signals", "events", "facts", "actors", "vocabulary")
+QUEUES = ("evidence", "offers", "tech_signals", "events", "facts", "actors", "vocabulary", "marketing")
 
 # §5.G item 3 : motifs de rejet typés, pour pouvoir apprendre des rejets (item 4) au lieu de les
 # perdre dans un champ libre.
@@ -83,6 +83,13 @@ REJECT_REASONS_BY_QUEUE: dict[str, tuple[str, ...]] = {
     # remonte aussi des projets, départements ou personnes, qui ne sont pas des organisations.
     "actors": (*_CORE_REASONS, "not_an_organization", "consortium_partner_out_of_scope", "out_of_scope_academic"),
     "candidates": (*_CORE_REASONS, "not_an_organization", "consortium_partner_out_of_scope", "out_of_scope_academic"),
+    # Recommandation de l'agent marketing : l'objet est un CONSEIL, pas un fait -- ni acteur ni
+    # dimension à contester. Les références et les chiffres sont déjà filtrés avant écriture
+    # (marketing_agent.rejection_reason) ; reste ce qu'un filtre ne voit pas : une lecture forcée
+    # de références réelles, une évidence déjà connue, un conseil inapplicable ou contraire à la
+    # stratégie. Seul misread_refs renvoie vers l'agent (son prompt) ; les trois autres, vers ce
+    # qu'il ne peut pas savoir de nous.
+    "marketing": (*_CORE_REASONS, "misread_refs", "already_known", "not_actionable", "against_strategy"),
 }
 
 # Libellés en français, tenus ICI et exposés par l'API (voir app.py: GET /api/reject-reasons)
@@ -99,6 +106,10 @@ REJECT_REASON_LABELS: dict[str, str] = {
     "not_an_organization": "Pas une organisation",
     "consortium_partner_out_of_scope": "Partenaire de consortium hors périmètre",
     "out_of_scope_academic": "Hors périmètre (académique)",
+    "misread_refs": "Références mal lues",
+    "already_known": "Déjà connu / déjà en cours",
+    "not_actionable": "Pas actionnable",
+    "against_strategy": "Contraire à notre stratégie",
 }
 
 # Union de tous les motifs : sert aux contrôles génériques et à la documentation d'API. La
@@ -151,6 +162,7 @@ _STATUS_MAP_3WAY: dict[str, dict[str, str]] = {
     "facts": {"pending": "pending", "accepted": "verified", "rejected": "rejected"},
     "actors": {"pending": "candidate", "accepted": "verified", "rejected": "rejected"},
     "vocabulary": {"pending": "pending", "accepted": "accepted", "rejected": "rejected"},
+    "marketing": {"pending": "review", "accepted": "accepted", "rejected": "rejected"},
 }
 
 
@@ -352,6 +364,28 @@ def _list_vocabulary(status: str) -> list[dict]:
     return items
 
 
+_MARKETING_CONFIDENCE_WEIGHT = {"high": 3, "medium": 2, "low": 1}
+
+
+def _list_marketing(status: str) -> list[dict]:
+    with connect(MARKET_DB) as db:
+        rows = db.execute(
+            "SELECT * FROM marketing_recommendations WHERE review_status=?",
+            (_STATUS_MAP_3WAY["marketing"][status],),
+        ).fetchall()
+    return [
+        _item(
+            item_id=row["id"], queue="marketing", actor_name="HEF/IREIS", summary=row["title"],
+            detail={"kind": row["kind"], "rationale": row["rationale"], "refs": json.loads(row["refs"]),
+                    "confidence": row["confidence"], "run_id": row["run_id"], "model": row["model"]},
+            confidence=None, priority=float(_MARKETING_CONFIDENCE_WEIGHT.get(row["confidence"], 1)),
+            reviewed_by=row["reviewed_by"], reviewed_at=row["reviewed_at"], reject_reason=row["reject_reason"],
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
+
+
 _LISTERS = {
     "evidence": _list_evidence,
     "offers": _list_offers,
@@ -360,6 +394,7 @@ _LISTERS = {
     "facts": _list_facts,
     "actors": _list_actors,
     "vocabulary": _list_vocabulary,
+    "marketing": _list_marketing,
 }
 
 
@@ -429,6 +464,14 @@ def _mark_offer_decision(item_id: int, *, review_status: str, reviewed_by: str |
     with connect(MARKET_DB) as db:
         return db.execute(
             "UPDATE offers SET review_status=?,reviewed_by=?,reviewed_at=?,reject_reason=? WHERE id=?",
+            (review_status, reviewed_by, utc_now(), reject_reason, item_id),
+        ).rowcount
+
+
+def _mark_marketing_decision(item_id: int, *, review_status: str, reviewed_by: str | None, reject_reason: str | None) -> int:
+    with connect(MARKET_DB) as db:
+        return db.execute(
+            "UPDATE marketing_recommendations SET review_status=?,reviewed_by=?,reviewed_at=?,reject_reason=? WHERE id=?",
             (review_status, reviewed_by, utc_now(), reject_reason, item_id),
         ).rowcount
 
@@ -544,6 +587,7 @@ def decide_review_item(
         "events": _mark_event_decision,
         "facts": _mark_fact_decision,
         "actors": _mark_actor_decision,
+        "marketing": _mark_marketing_decision,
     }[queue]
     updated = mark(
         item_id, review_status=review_status, reviewed_by=reviewed_by,

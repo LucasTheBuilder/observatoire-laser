@@ -32,7 +32,7 @@ from db import connect, utc_now
 Decision = Literal["accept", "reject"]
 
 JOURNAL_QUEUES = (
-    "evidence", "offers", "tech_signals", "events", "facts", "actors", "vocabulary", "candidates",
+    "evidence", "offers", "tech_signals", "events", "facts", "actors", "vocabulary", "candidates", "marketing",
 )
 
 # Par file : la base, la requête d'instantané (par id), et la requête d'amorçage (toutes les
@@ -83,6 +83,13 @@ _QUEUES: dict[str, dict[str, Any]] = {
         "db": "actors",
         "select": "SELECT id,name AS actor_name,country,suggested_official_url AS source_url,reviewed_by,reviewed_at,reject_reason,review_status FROM actor_candidates",
         "summary": lambda r: f"{r['actor_name']} ({r['country'] or 'pays inconnu'}) -- candidat acteur",
+    },
+    "marketing": {
+        "db": "market",
+        "select": """SELECT id,'HEF/IREIS' AS actor_name,kind,title,NULL AS source_url,
+                            reviewed_by,reviewed_at,reject_reason,review_status
+                     FROM marketing_recommendations""",
+        "summary": lambda r: f"{r['kind']} -- {r['title']}",
     },
 }
 

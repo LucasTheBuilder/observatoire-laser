@@ -190,14 +190,3 @@ def run_marketing_agent(*, client: Any = None, dossier: dict[str, Any] | None = 
         "cout_usd": estimate_anthropic_cost_usd(model, input_tokens, output_tokens) if model else None,
     }
 
-
-def list_recommendations(status: str | None = "review") -> list[dict[str, Any]]:
-    query = "SELECT * FROM marketing_recommendations"
-    params: tuple[Any, ...] = ()
-    if status:
-        query += " WHERE review_status=?"
-        params = (status,)
-    rows = _db.rows(_db.MARKET_DB, query + " ORDER BY id DESC", params)
-    for row in rows:
-        row["refs"] = json.loads(row["refs"])
-    return rows

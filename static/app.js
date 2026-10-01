@@ -3205,6 +3205,11 @@ async function decideReviewItem(queue, itemId, decision, rejectReason) {
       method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
     });
     toast(decision === "accept" ? "Validé." : "Rejeté.");
+    if (queue === "marketing") {
+      await reloadMarketing();
+      render();
+      return;
+    }
     if (queue === "offers") state.reviewOffers = (await api("/api/review?queue=offers")).items;
     if (queue === "events") state.reviewEvents = (await api("/api/review?queue=events")).items;
     // Une décision peut venir de l'échantillon d'audit : il faut alors recharger le tirage (la
@@ -3213,6 +3218,93 @@ async function decideReviewItem(queue, itemId, decision, rejectReason) {
     if (state.auditSample) await loadAuditSample({render: false});
     renderMarketReview();
   } catch (error) { toast(error.message); }
+}
+
+// --- Conseil marketing ---------------------------------------------------------------------
+// Recommandations de l'agent marketing (marketing_agent.py), servies par la file unifiée
+// (queue 'marketing') : décision, motif typé et journal passent par le même chemin que les
+// autres files. Les références offer:N / tech:N ouvrent les preuves existantes, pour vérifier
+// une recommandation en un clic plutôt que de la croire.
+const MARKETING_KIND_LABELS = {
+  marche_a_cibler: "Marché à cibler",
+  offre_a_developper: "Offre à développer",
+  argument_differenciant: "Argument différenciant",
+  concurrent_a_surveiller: "Concurrent à surveiller",
+  veille_a_completer: "Veille à compléter",
+};
+const MARKETING_CONFIDENCE_LABELS = {high: "confiance élevée", medium: "confiance moyenne", low: "confiance faible"};
+
+async function reloadMarketing() {
+  [state.marketingPending, state.marketingAccepted] = await Promise.all([LOADERS.marketingPending(), LOADERS.marketingAccepted()]);
+}
+
+function marketingRef(ref) {
+  const [kind, id] = ref.split(":");
+  if (kind === "offer") return `<button class="ref-chip" data-offer-proof="${esc(id)}">${esc(ref)}</button>`;
+  if (kind === "tech") return `<button class="ref-chip" data-tech-signal-proof="${esc(id)}">${esc(ref)}</button>`;
+  return `<span class="ref-chip">${esc(ref)}</span>`;
+}
+
+function marketingCard(item, withActions) {
+  const detail = item.detail || {};
+  const key = `marketing:${item.id}`;
+  return `<article class="vocab-card">
+    <header><span>${esc(MARKETING_KIND_LABELS[detail.kind] || detail.kind)} · ${esc(MARKETING_CONFIDENCE_LABELS[detail.confidence] || "")}</span><span>${dateLabel(withActions ? item.created_at : item.reviewed_at)}</span></header>
+    <p class="dialog-operation">${esc(item.summary)}</p>
+    <p class="coverage-note">${esc(detail.rationale)}</p>
+    <div class="ref-chips">${(detail.refs || []).map(marketingRef).join("")}</div>
+    ${withActions ? `<div class="vocab-dims" style="margin-top:12px">
+      <button class="vocab-accept" data-accept-review="${key}">✓ Valider</button>
+      ${rejectReasonSelect("marketing", key)}
+      <button class="vocab-reject" data-reject-review="${key}">✕ Rejeter</button>
+    </div>` : ""}
+  </article>`;
+}
+
+function marketingLastRunPanel(run) {
+  if (!run) return "";
+  const discarded = run.ecartees.length
+    ? `<p class="coverage-note"><b>${run.ecartees.length} écartée(s) avant écriture</b> : ${run.ecartees.map(d => `${esc(d.title || "—")} (${esc(d.motif)})`).join(" ; ")}</p>`
+    : "";
+  const limits = run.limites.length
+    ? `<p class="coverage-note"><b>Ce que l'agent n'a pas pu conclure</b></p><ul class="coverage-note">${run.limites.map(l => `<li>${esc(l)}</li>`).join("")}</ul>`
+    : "";
+  return `<section class="vocab-card"><header><span>Dernier passage · ${esc(run.model || "")}</span><span>${run.cout_usd != null ? `${run.cout_usd.toFixed(2)} $` : ""}</span></header>
+    <p class="coverage-note"><b>${run.ecrites.length} recommandation(s) écrite(s)</b> en attente de validation.</p>${discarded}${limits}</section>`;
+}
+
+function renderMarketing() {
+  const pending = state.marketingPending || [];
+  const accepted = state.marketingAccepted || [];
+  const running = state.marketingRunning;
+  content.innerHTML = header(
+    "Intelligence",
+    "Conseil marketing",
+    "Recommandations d'un agent Claude à HEF/IREIS, tirées du dossier marketing de l'observatoire (/api/marketing-dossier). Toute référence citée existe dans le dossier et tout chiffre en vient — sinon la recommandation est écartée avant d'arriver ici. Reste à juger si la lecture est juste : cliquer une référence ouvre sa preuve.",
+    `<button class="export-btn" data-run-marketing-agent ${running ? "disabled" : ""}>${running ? "Agent en cours… (≈ 2 min)" : "Lancer l'agent"}</button>`
+  )
+  + marketingLastRunPanel(state.marketingLastRun)
+  + `<section><div class="section-title"><div><span>✦</span><div><h2>À valider</h2><p>Valider garde la recommandation ; rejeter exige un motif, qui dit ce qu'un filtre automatique ne voit pas.</p></div></div><b>${pending.length}</b></div>
+      ${pending.length ? `<div class="vocab-list">${pending.map(item => marketingCard(item, true)).join("")}</div>` : `<div class="empty">Aucune recommandation en attente. Lancer l'agent pour en produire.</div>`}
+    </section>`
+  + (accepted.length ? `<section><div class="section-title"><div><span>✓</span><div><h2>Retenues</h2><p>Les recommandations que vous avez validées.</p></div></div><b>${accepted.length}</b></div>
+      <div class="vocab-list">${accepted.map(item => marketingCard(item, false)).join("")}</div></section>` : "");
+  wireActions();
+}
+
+async function runMarketingAgent() {
+  state.marketingRunning = true;
+  render();
+  try {
+    state.marketingLastRun = await api("/api/marketing-agent/run", {method: "POST"});
+    await reloadMarketing();
+    toast(`${state.marketingLastRun.ecrites.length} recommandation(s) à valider.`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    state.marketingRunning = false;
+    if (state.view === "marketing") render();
+  }
 }
 
 
@@ -3441,6 +3533,7 @@ function render(){
   if(state.view==="offers") renderOffers();
   if(state.view==="techcorpus") renderTechCorpus();
   if(state.view==="actors") renderActors();
+  if(state.view==="marketing") renderMarketing();
   if(state.view==="market-review") renderMarketReview();
   if(state.view==="unlinked") renderUnlinked();
   if(state.view==="data-quality") renderDataQuality();
@@ -3617,6 +3710,7 @@ async function poll(kind) {
 }
 
 function wireActions(){
+  document.querySelectorAll("[data-run-marketing-agent]").forEach(button=>button.addEventListener("click",()=>runMarketingAgent()));
   document.querySelectorAll("[data-run]").forEach(button=>button.addEventListener("click",()=>run(button.dataset.run)));
   document.querySelectorAll("[data-proof]").forEach(button=>button.addEventListener("click",()=>showProofs(JSON.parse(button.dataset.proof))));
   document.querySelectorAll("[data-offer-proof]").forEach(button=>button.addEventListener("click",()=>showOfferProofs(Number(button.dataset.offerProof))));
@@ -3692,6 +3786,8 @@ const LOADERS = {
   marketScores:      () => api("/api/market-scores"),
   reviewOffers:      () => api("/api/review?queue=offers").then(r => r.items),
   reviewEvents:      () => api("/api/review?queue=events").then(r => r.items),
+  marketingPending:  () => api("/api/review?queue=marketing").then(r => r.items),
+  marketingAccepted: () => api("/api/review?queue=marketing&status=accepted").then(r => r.items),
   collectionHealth:  () => api("/api/collection-health"),
   schedulerStatus:   () => api("/api/scheduler"),
   veilleMetrics:     () => apiOrNull("/api/veille-metrics"),
@@ -3716,6 +3812,7 @@ const VIEW_DEPS = {
   // s'afficherait sans capacités, marchés ni publications.
   actors:            ["overview", "actors", "network", "market", "offers", "documents", "rejectReasons"],
   "market-review":   ["overview", "marketReview", "reviewOffers", "reviewEvents", "rejectReasons"],
+  marketing:         ["overview", "marketingPending", "marketingAccepted", "rejectReasons"],
   unlinked:          ["overview", "unlinked"],
   "data-quality":    ["overview", "dataQuality", "goldenFacts"],
   collections:       ["overview", "collectionHealth", "profiles", "duplicates", "pipelineFunnel", "veilleMetrics"],

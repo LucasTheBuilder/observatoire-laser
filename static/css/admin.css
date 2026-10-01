@@ -184,3 +184,7 @@
   .buyers-map li { grid-template-columns: minmax(0, 1fr) auto; }
   .buyers-map .buyer-markets { grid-column: 1; text-align: left; }
 }
+.ref-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.ref-chip{padding:3px 8px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--muted);font:600 11px/1.4 ui-monospace,monospace}
+button.ref-chip{cursor:pointer}
+button.ref-chip:hover{border-color:var(--teal);color:var(--teal)}
