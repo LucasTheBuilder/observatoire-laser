@@ -101,6 +101,7 @@ from hybrid import AnthropicClient, estimate_anthropic_cost_usd, get_ai_client
 from lens import collect_lens_patents
 from market_compilation import compile_market_page, source_glossary
 from market_sizing import add_market_sizing, delete_market_sizing, list_market_sizing
+from marketing_dossier import build_marketing_dossier
 from named_offers import collect_named_offers
 from national_projects import collect_national_projects
 from openalex import collect_openalex_publications, discover_global_actor_candidates
@@ -1571,6 +1572,15 @@ def feedback_dossier_endpoint(limit: int = 400):
     ça se lit très bien seul. Complémentaire de /api/data-quality, qui donne des taux : ici ce
     sont les cas eux-mêmes, avec de quoi remonter à la règle en cause."""
     return build_feedback_dossier(limit=limit)
+
+
+@app.get("/api/marketing-dossier")
+def marketing_dossier_endpoint():
+    """Position de HEF/IREIS face aux concurrents suivis : opérations et marchés revendiqués
+    (confirmé / à confirmer / absent chez nous), demande, tendances technologiques, mouvements
+    récents, et ce que la base ne permet pas de dire. Purement calculé en SQL ; c'est ce que
+    lira l'agent marketing, chaque ligne portant les références qu'il devra citer."""
+    return build_marketing_dossier()
 
 
 class GoldenFactRequest(BaseModel):
