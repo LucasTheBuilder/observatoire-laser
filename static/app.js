@@ -848,7 +848,6 @@ const OF_NO_MATERIAL = "Matériau non précisé";
 function ofOperation(row) { return normalizedOperation(row) || OF_NO_OPERATION; }
 function ofMaterial(row) { return row.material || OF_NO_MATERIAL; }
 function ofProcess(row) { return row.laser_process || "Procédé non précisé"; }
-function ofStage(row) { return row.industrial_stage || "Maturité non renseignée"; }
 function ofEvidence(row) { return OF_EVIDENCE_LABELS[row.evidence_type] || "Non qualifiée"; }
 
 // `performance` n'est DÉLIBÉRÉMENT pas une facette : sur 363 capacités, la colonne porte
@@ -862,13 +861,12 @@ const OF_FACET_GROUPS = [
   {key: "operation", label: "OPÉRATION", valuesOf: row => [ofOperation(row)]},
   {key: "material", label: "MATÉRIAU", valuesOf: row => [ofMaterial(row)]},
   {key: "process", label: "PROCÉDÉ LASER", valuesOf: row => [ofProcess(row)]},
-  {key: "stage", label: "MATURITÉ", valuesOf: row => [ofStage(row)]},
   {key: "evidence", label: "NATURE DE LA PREUVE", valuesOf: row => [ofEvidence(row)]},
 ];
 
 function ofHaystack(row) {
   return [row.actor_name, row.capability, row.operation, row.laser_process, row.material,
-          row.performance, row.industrial_stage, row.page_type, offerTypeLabel(row.offer_type)]
+          row.performance, row.page_type, offerTypeLabel(row.offer_type)]
     .filter(Boolean).join(" ");
 }
 
@@ -1291,7 +1289,6 @@ function renderOffers() {
       laser_process: row.laser_process || "",
       material: row.material || "",
       performance: row.performance || "",
-      industrial_stage: row.industrial_stage || "",
       evidence: ofEvidence(row),
       proofs: Number(row.proofs || 0),
     })),
@@ -1300,7 +1297,7 @@ function renderOffers() {
       {key: "capability", label: "Capacité"}, {key: "families", label: "Famille"},
       {key: "operation", label: "Opération"}, {key: "laser_process", label: "Procédé"},
       {key: "material", label: "Matériau"}, {key: "performance", label: "Performance annoncée"},
-      {key: "industrial_stage", label: "Maturité"}, {key: "evidence", label: "Nature de la preuve"},
+      {key: "evidence", label: "Nature de la preuve"},
       {key: "proofs", label: "Sources"},
     ],
   ));
@@ -2216,17 +2213,6 @@ function actorCard(a) {
   </article>`;
 }
 
-const VALUE_CHAIN_ALL_STAGES = ["R&D", "Prototype", "Pré-industrialisation", "Industrialisation", "Production"];
-
-const VALUE_CHAIN_SHORT_LABELS = {"R&D": "Dev", "Prototype": "Proto", "Pré-industrialisation": "Pré-indus", "Industrialisation": "Indus", "Production": "Prod"};
-
-function valueChainTrack(stages, compact = false) {
-  const demonstrated = new Set(stages || []);
-  return `<div class="value-chain-track ${compact ? "compact" : ""}">${VALUE_CHAIN_ALL_STAGES.map(stage =>
-    `<div class="value-chain-node ${demonstrated.has(stage) ? "done" : ""}"><span class="dot"></span><small>${esc(compact ? VALUE_CHAIN_SHORT_LABELS[stage] : stage)}</small></div>`
-  ).join("")}</div>`;
-}
-
 const COVERAGE_LABELS = {good: "Bonne", partial: "Partielle", weak: "Faible"};
 const COVERAGE_HINTS = {
   good: "La fiche dispose déjà d'un socle documentaire suffisant.",
@@ -2348,7 +2334,6 @@ function actorDetailContent(a) {
       ${(a.business_models || []).length ? `<div class="business-model-tags">${a.business_models.map(m => `<span class="business-tag ${esc(m)}">${esc(BUSINESS_MODEL_LABELS[m] || m)}</span>`).join("")}</div>` : ""}
     </div>
 
-    ${(a.value_chain_stages || []).length ? `<div class="detail-block"><h4>Chaîne de valeur</h4>${valueChainTrack(a.value_chain_stages)}</div>` : ""}
 
     ${capabilities.length ? `<div class="detail-block"><h4>Capacités démontrées</h4><div class="subtheme-chips">${capabilities.map(c => `<span class="subtheme-chip">${esc(c)}</span>`).join("")}</div></div>` : ""}
 
@@ -2813,9 +2798,6 @@ function marketReviewMeta(item) {
   if (item.relation_strength) parts.push(`Preuve : ${RELATION_STRENGTH_LABELS[item.relation_strength] || esc(item.relation_strength)}`);
   if (item.extraction_mode && item.extraction_mode !== "block-rules") parts.push(`IA : ${esc(item.extraction_mode)}`);
   if (typeof item.field_confidence === "number") parts.push(`Confiance : ${Math.round(item.field_confidence * 100)}%`);
-  // A handful of existing rows store the literal string "None" instead of a real NULL --
-  // pre-existing backend data quirk, filtered here rather than shown as confusing noise.
-  if (item.industrial_stage && item.industrial_stage !== "None") parts.push(esc(item.industrial_stage));
   return parts.length ? `<small class="block-label">${parts.join(" · ")}</small>` : "";
 }
 
@@ -3593,7 +3575,7 @@ function verbatimBadge(isVerbatim) {
 async function showProofs(row) {
   const qs=new URLSearchParams({bucket:row.bucket,market:row.market,component:row.component,operation:row.operation});
   const proofs=await api(`/api/market/proofs?${qs}`);
-  document.querySelector("#proof-content").innerHTML=`<p class="eyebrow">${esc(row.market)}</p><h2>${esc(row.component)}</h2><p class="dialog-operation">${esc(row.operation)}</p>${proofs.map(p=>`<article class="proof"><div><strong>${esc(p.actor_name)}</strong><span>${esc(p.industrial_stage)}</span>${evidenceTypeBadge(p.evidence_type)}${verbatimBadge(p.is_verbatim)}</div>${p.language?`<small class="source-language">${esc(String(p.language).toUpperCase())}</small>`:''}${p.block_heading?`<small class="block-label">Bloc : ${esc(p.block_heading)}</small>`:''}${[p.laser_process,p.material,p.performance].filter(Boolean).length?`<small class="block-label">${[p.laser_process,p.material,p.performance].filter(Boolean).map(esc).join(' · ')}</small>`:''}${p.relation_strength?`<small class="block-label">Relation : ${esc(p.relation_strength==='direct'?'directe':'contextuelle')}${p.source_role?` · source : ${esc(p.source_role)}`:''}</small>`:''}${p.first_appeared_at?`<small class="block-label" title="Rétro-daté via Wayback Machine : plus ancien snapshot archivé où cette citation apparaît déjà">Vu pour la première fois le ${dateLabel(p.first_appeared_at)} (Wayback)</small>`:''}<blockquote>${esc(p.quote)}</blockquote><a href="${esc(p.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a></article>`).join("")}`;
+  document.querySelector("#proof-content").innerHTML=`<p class="eyebrow">${esc(row.market)}</p><h2>${esc(row.component)}</h2><p class="dialog-operation">${esc(row.operation)}</p>${proofs.map(p=>`<article class="proof"><div><strong>${esc(p.actor_name)}</strong>${evidenceTypeBadge(p.evidence_type)}${verbatimBadge(p.is_verbatim)}</div>${p.language?`<small class="source-language">${esc(String(p.language).toUpperCase())}</small>`:''}${p.block_heading?`<small class="block-label">Bloc : ${esc(p.block_heading)}</small>`:''}${[p.laser_process,p.material,p.performance].filter(Boolean).length?`<small class="block-label">${[p.laser_process,p.material,p.performance].filter(Boolean).map(esc).join(' · ')}</small>`:''}${p.relation_strength?`<small class="block-label">Relation : ${esc(p.relation_strength==='direct'?'directe':'contextuelle')}${p.source_role?` · source : ${esc(p.source_role)}`:''}</small>`:''}${p.first_appeared_at?`<small class="block-label" title="Rétro-daté via Wayback Machine : plus ancien snapshot archivé où cette citation apparaît déjà">Vu pour la première fois le ${dateLabel(p.first_appeared_at)} (Wayback)</small>`:''}<blockquote>${esc(p.quote)}</blockquote><a href="${esc(p.source_url)}" target="_blank" rel="noopener">Ouvrir la source ↗</a></article>`).join("")}`;
   dialog.classList.remove("wide");
   dialog.showModal();
 }
@@ -3628,7 +3610,6 @@ async function showOfferProofs(offerId) {
     first.operation ? `<b>${esc(normalizedOperation(first))}</b>` : "",
     first.laser_process ? esc(first.laser_process) : "",
     first.material ? esc(first.material) : "",
-    first.industrial_stage ? esc(first.industrial_stage) : "",
   ].filter(Boolean).join(" · ");
 
   panel.innerHTML = `<div class="ex-proof-head">

@@ -68,18 +68,6 @@
 .coverage-note{color:var(--muted);font-size:11.5px;line-height:1.5}
 .coverage-note b{color:var(--ink)}
 .detail-block.admin-block{background:#f8faf9;margin:22px -31px -31px;padding:18px 31px 31px}
-.value-chain-track{display:flex;align-items:center;gap:4px}
-.value-chain-node{display:flex;flex-direction:column;align-items:center;gap:6px;flex:1;position:relative}
-.value-chain-node:not(:last-child)::after{content:"";position:absolute;top:5px;left:56%;width:calc(100% + 4px);height:2px;background:var(--line)}
-.value-chain-node.done:not(:last-child)::after{background:var(--teal)}
-.value-chain-node .dot{width:12px;height:12px;border-radius:50%;background:var(--line);z-index:1}
-.value-chain-node.done .dot{background:var(--teal)}
-.value-chain-node small{font-size:10px;color:var(--muted);text-align:center}
-.value-chain-node.done small{color:var(--ink);font-weight:700}
-.value-chain-track.compact{gap:2px}
-.value-chain-track.compact .dot{width:9px;height:9px}
-.value-chain-track.compact small{font-size:9px}
-.value-chain-track.compact .value-chain-node:not(:last-child)::after{top:4px}
 
 .chart-legend{display:flex;gap:16px;margin-bottom:14px;font-size:11px;color:var(--muted)}
 .chart-legend span{display:inline-flex;align-items:center;gap:6px}

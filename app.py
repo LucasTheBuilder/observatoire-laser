@@ -120,7 +120,7 @@ from review_queue import (
     sample_review_queue,
 )
 from scoring import compute_competitive_intensity_scores, compute_confidence_scores, compute_threat_scores
-from scrapers import EXPLORATION_PAGE_TYPES, MATURITY_RULES, scrape_actors, scrape_market, scrape_technology
+from scrapers import EXPLORATION_PAGE_TYPES, scrape_actors, scrape_market, scrape_technology
 from sources import list_sources, technology_sources
 from timeseries import capture_metric_snapshot
 from veille_metrics import VEILLE_METRICS_THRESHOLDS, capture_veille_metrics
@@ -128,21 +128,6 @@ from wayback_retrodating import retrodate_evidence_sources
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-
-# Low-to-high maturity order for display, derived from the same rules the crawler uses to
-# detect a fact's stage (MATURITY_RULES is declared highest-first, for match priority).
-VALUE_CHAIN_STAGES = [name for name, _bucket, _terms in reversed(MATURITY_RULES)]
-
-
-def _leading_value_chain_stage(raw: str | None) -> str | None:
-    """offers/evidence.industrial_stage can be a composite like "Prototype | Matériau: Verre"
-    (see scrapers._candidate's stage_parts) -- only the leading maturity name is a stage.
-    """
-    if not raw:
-        return None
-    name = raw.split("|", 1)[0].strip()
-    return name if name in VALUE_CHAIN_STAGES else None
-
 
 def _coverage_level(source_count: int) -> str:
     """How much of market.db's own evidence backs an actor's fiche -- computed live from
@@ -164,7 +149,6 @@ def _coverage_level(source_count: int) -> str:
 # table déjà existante (jamais stocké), donc ce score ne peut jamais dériver des faits réels.
 COMPLETENESS_DIMENSIONS: list[tuple[str, str]] = [
     ("market_facts", "Faits marché confirmés"),
-    ("value_chain", "Chaîne de valeur"),
     ("capabilities_demonstrated", "Capacités démontrées"),
     ("firmographics", "Profil firmographique"),
     ("capability_spec", "Capacités chiffrées"),
@@ -616,7 +600,7 @@ def monthly(days: int = Query(default=30, ge=1, le=365)):
         # _split_monthly_signals, pas avant -- sinon un compartiment pourrait être sous-compté.
         recent_market_rows = [
             dict(row) for row in db.execute(
-                """SELECT id,actor_name,bucket,market,component,operation,industrial_stage,
+                """SELECT id,actor_name,bucket,market,component,operation,
                           field_confidence,created_at,last_seen_at,source_date,date_confidence,is_backfill
                    FROM evidence
                    WHERE evidence_kind='market_application' AND fact_status='validated' AND created_at>=?
@@ -629,7 +613,7 @@ def monthly(days: int = Query(default=30, ge=1, le=365)):
         recent_offer_rows = [
             dict(row) for row in db.execute(
                 """SELECT o.id,o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,
-                          o.performance,o.industrial_stage,o.created_at,o.last_seen_at,o.source_date,
+                          o.performance,o.created_at,o.last_seen_at,o.source_date,
                           o.date_confidence,o.is_backfill,
                           (SELECT COUNT(*) FROM offer_sources os WHERE os.offer_id=o.id) AS proofs,
                           (SELECT COUNT(DISTINCT COALESCE(os.language,'unknown')) FROM offer_sources os WHERE os.offer_id=o.id) AS languages
@@ -716,8 +700,7 @@ def monthly(days: int = Query(default=30, ge=1, le=365)):
 def list_actors():
     """Liste complète des acteurs avec, pour chacun, des champs calculés (jamais stockés
     directement) à partir de market.db : `evidence_confirmed` (un C1/C2 a-t-il vraiment une
-    preuve en base ?), `value_chain_stages` (à quels stades de maturité il a été observé),
-    `coverage_level` (bonne/partielle/faible, selon le nb de sources distinctes),
+    preuve en base ?), `coverage_level` (bonne/partielle/faible, selon le nb de sources distinctes),
     `completeness_score` (chantier 6 : nb de dimensions renseignées / attendues, pondéré par
     la fraîcheur du dernier crawl -- voir _completeness ci-dessus)."""
     # Includes paused (active=0) actors too, with the flag exposed, so the UI can offer a
@@ -752,16 +735,6 @@ def list_actors():
         row["actor_name"]
         for row in rows(MARKET_DB, "SELECT DISTINCT actor_name FROM offers WHERE review_status='accepted'")
     }
-    # Value-chain stages (P1): derived live from offers.industrial_stage/evidence.industrial_stage
-    # instead of a separately-maintained field, so it can never drift from the actual facts.
-    stages_by_actor: dict[str, set[str]] = {}
-    for row in (
-        rows(MARKET_DB, "SELECT actor_name,industrial_stage FROM offers WHERE review_status='accepted'")
-        + rows(MARKET_DB, "SELECT actor_name,industrial_stage FROM evidence WHERE fact_status='validated'")
-    ):
-        stage = _leading_value_chain_stage(row["industrial_stage"])
-        if stage:
-            stages_by_actor.setdefault(row["actor_name"], set()).add(stage)
     # Coverage level (fiches-cibles audit): computed from the same distinct-source count the
     # pipeline funnel uses, never hand-set, so a fiche can't claim more than market.db proves.
     sources_by_actor: dict[str, set[str]] = {}
@@ -810,8 +783,6 @@ def list_actors():
         actor["evidence_confirmed"] = (
             actor["competitive_class"] not in ("C1", "C2") or actor["name"] in confirmed_actors
         )
-        demonstrated = stages_by_actor.get(actor["name"], set())
-        actor["value_chain_stages"] = [stage for stage in VALUE_CHAIN_STAGES if stage in demonstrated]
         actor["coverage_level"] = _coverage_level(len(sources_by_actor.get(actor["name"], set())))
         actor["facts"] = facts_by_actor.get(actor["id"], [])
         actor["events"] = events_by_actor.get(actor["id"], [])
@@ -820,7 +791,6 @@ def list_actors():
         actor["threat_score"] = threat_scores.get(actor["name"], 0.0)
         actor.update(_completeness({
             "market_facts": actor["name"] in evidence_actors,
-            "value_chain": bool(actor["value_chain_stages"]),
             "capabilities_demonstrated": actor["name"] in confirmed_actors,
             "firmographics": actor["founded_year"] is not None,
             "capability_spec": actor["capability_source_url"] is not None,
@@ -1419,11 +1389,11 @@ def proofs(bucket: str, market: str, component: str, operation: str):
     identifiée par sa combinaison bucket/marché/composant/opération (voir /api/market)."""
     return rows(
         MARKET_DB,
-        """SELECT e.actor_name,e.industrial_stage,es.source_url,es.source_title,es.source_date,es.quote,es.is_verbatim,
+        """SELECT e.actor_name,es.source_url,es.source_title,es.source_date,es.quote,es.is_verbatim,
                   es.language,es.block_heading,es.extraction_mode,es.field_confidence,
                   es.relation_strength,es.relation_evidence,es.source_role,
                   es.first_appeared_at,es.first_appeared_snapshot_url,
-                  e.laser_process,e.material,e.performance,e.maturity_level,e.architecture,e.evidence_type
+                  e.laser_process,e.material,e.performance,e.architecture,e.evidence_type
            FROM evidence e
            JOIN evidence_sources es ON es.evidence_id=e.id
            WHERE e.bucket=? AND e.market=? AND e.component=? AND e.operation=?
@@ -1697,7 +1667,7 @@ def market_review(status: Literal["pending", "accepted", "rejected"] = "pending"
         clause += " AND fact_status!='validated'"
     return rows(
         MARKET_DB,
-        f"""SELECT id,actor_name,fact_status,bucket,market,component,operation,industrial_stage,
+        f"""SELECT id,actor_name,fact_status,bucket,market,component,operation,
                   source_url,source_title,source_date,quote,is_verbatim,evidence_type,relation_strength,relation_evidence,field_confidence,
                   extraction_mode,created_at,last_seen_at
            FROM evidence
@@ -1759,7 +1729,6 @@ def reject_market_review(evidence_id: int, payload: RejectMarketReviewRequest):
 # doublons sur 110 le 29/09/2026. /api/offers fusionne donc par (acteur, capacité) ; le type
 # affiché est le plus parlant du groupe, dans cet ordre.
 OFFER_TYPE_PRECEDENCE = ("service", "product", "capability", "technology")
-UNKNOWN_STAGE = "Maturité industrielle non déterminée"
 
 
 def _merge_offer_group(group: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1770,10 +1739,6 @@ def _merge_offer_group(group: list[dict[str, Any]]) -> dict[str, Any]:
     merged = dict(group[0])
     for field in ("operation", "laser_process", "material", "performance"):
         merged[field] = next((row[field] for row in group if row[field]), None)
-    merged["industrial_stage"] = next(
-        (row["industrial_stage"] for row in group if row["industrial_stage"] and row["industrial_stage"] != UNKNOWN_STAGE),
-        merged["industrial_stage"],
-    )
     merged["evidence_type"] = "proof" if any(row["evidence_type"] == "proof" for row in group) else merged["evidence_type"]
     merged["offer_types"] = sorted({row["offer_type"] for row in group})
     merged["merged_ids"] = [row["id"] for row in group]
@@ -1788,7 +1753,7 @@ def offers():
     offer_rows = rows(
         MARKET_DB,
         """SELECT id,actor_name,offer_type,capability,operation,laser_process,material,performance,
-                  industrial_stage,evidence_type,page_type
+                  evidence_type,page_type
            FROM offers WHERE review_status='accepted'""",
     )
     sources = rows(
@@ -1820,7 +1785,7 @@ def offer_proofs(offer_id: int):
     (même acteur, même capacité)."""
     return rows(
         MARKET_DB,
-        """SELECT o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.industrial_stage,o.evidence_type,
+        """SELECT o.actor_name,o.offer_type,o.capability,o.operation,o.laser_process,o.material,o.performance,o.evidence_type,
                   os.source_url,os.source_title,os.source_date,os.quote,os.is_verbatim,os.language,os.block_heading,os.extraction_mode,os.field_confidence
            FROM offers o JOIN offer_sources os ON os.offer_id=o.id
            JOIN offers ref ON ref.id=? AND ref.actor_name=o.actor_name AND ref.capability=o.capability

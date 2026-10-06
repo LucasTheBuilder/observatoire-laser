@@ -277,7 +277,15 @@ class ClassifyEvidenceTypeTests(unittest.TestCase):
 
 
 class CandidateStageArchitectureEvidenceTypeTests(unittest.TestCase):
-    def test_candidate_stage_is_just_the_maturity_label_not_concatenated(self):
+    def test_candidate_carries_no_maturity_field_at_all(self):
+        """Ce test vérifiait que `stage` ne concaténait plus architecture/matériau à l'étiquette
+        de maturité (chantier 4). L'échelle de maturité ayant été retirée du marché le
+        2026-10-06, il n'y a plus ni `stage` ni `maturity` à surveiller -- et c'est précisément
+        cette absence qu'il faut verrouiller, pour qu'un recâblage ne passe pas inaperçu.
+
+        L'architecture, elle, reste détectée dans son propre champ : c'était déjà l'acquis du
+        chantier 4, et il survit au retrait.
+        """
         block = ContentBlock(
             heading="TGV interposers",
             text=(
@@ -288,11 +296,11 @@ class CandidateStageArchitectureEvidenceTypeTests(unittest.TestCase):
         )
         fact = _candidate("Example", "https://example.test/semi", "Semi", block)
         self.assertIsNotNone(fact)
-        self.assertNotIn("|", fact["stage"])
-        self.assertEqual(fact["maturity"], fact["stage"])
-        # architecture ("TGV") is still detected and carried in its own field, just no longer
-        # folded into the stage string.
+        for removed in ("stage", "maturity", "maturity_class"):
+            self.assertNotIn(removed, fact)
         self.assertEqual("TGV", fact["architecture"])
+        # "mass production" est bien lu, mais comme un bucket, plus comme un niveau.
+        self.assertEqual("existing", fact["bucket"])
 
     def test_market_candidate_persists_architecture_and_evidence_type(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -315,11 +323,15 @@ class CandidateStageArchitectureEvidenceTypeTests(unittest.TestCase):
             with dbmod.connect(market_db) as db:
                 _upsert_market_candidate(db, candidate)
                 row = db.execute(
-                    "SELECT architecture,evidence_type,industrial_stage FROM evidence WHERE fact_key=?", (candidate["fact_key"],),
+                    "SELECT architecture,evidence_type,industrial_stage,maturity_level FROM evidence WHERE fact_key=?", (candidate["fact_key"],),
                 ).fetchone()
             self.assertEqual("TGV", row["architecture"])
             self.assertEqual("proof", row["evidence_type"])
-            self.assertNotIn("|", row["industrial_stage"])
+            # Les deux colonnes de maturité subsistent en base (les vider demanderait une
+            # réécriture de table) mais ne sont plus jamais ALIMENTÉES : une ligne neuve les
+            # laisse à NULL.
+            self.assertIsNone(row["industrial_stage"])
+            self.assertIsNone(row["maturity_level"])
 
     def test_offer_candidate_persists_evidence_type(self):
         with tempfile.TemporaryDirectory() as tmp:

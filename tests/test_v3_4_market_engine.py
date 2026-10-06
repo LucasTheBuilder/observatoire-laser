@@ -73,7 +73,14 @@ class V34MarketEngineTests(unittest.TestCase):
         self.assertEqual("Texturation", candidate["operation"])
         self.assertEqual(1, diagnostics["relation_structured"])
 
-    def test_unknown_maturity_is_valid_radar_not_hidden_pending(self):
+    def test_a_fact_without_production_evidence_is_radar_not_hidden_pending(self):
+        """Un fait complet dont rien n'atteste la mise en production reste VALIDE et classé
+        radar -- il n'est pas relégué en 'pending', donc jamais invisible dans la matrice.
+
+        Le test portait sur maturity_class='unknown' avant le retrait de l'échelle de maturité
+        (2026-10-06) ; la propriété protégée n'a pas changé, elle est seulement exprimée par ce
+        qui la décide réellement : l'absence de terme de production.
+        """
         block = ContentBlock(
             heading="Medical stents",
             h2="Medical",
@@ -83,9 +90,23 @@ class V34MarketEngineTests(unittest.TestCase):
         candidate = _candidate("Example", "https://example.test/medical", "Applications", block)
         self.assertIsNotNone(candidate)
         self.assertEqual("radar", candidate["bucket"])
-        self.assertEqual("unknown", candidate["maturity_class"])
         self.assertEqual("validated", candidate["fact_status"])
-        self.assertIn("non déterminée", candidate["maturity"])
+        self.assertNotIn("maturity", candidate)
+
+    def test_an_explicit_production_claim_is_existing(self):
+        """Contrepartie : c'est bien le vocabulaire de production, et lui seul, qui fait basculer
+        un fait en 'existing'."""
+        block = ContentBlock(
+            heading="Medical stents",
+            h2="Medical",
+            # Même phrase que le test ci-dessus, à la mention de production près : c'est elle
+            # seule qui doit faire la différence entre radar et existing.
+            text="Femtosecond laser surface texturing is used for medical stents in series production.",
+            path="main > article",
+        )
+        candidate = _candidate("Example", "https://example.test/medical", "Applications", block)
+        self.assertIsNotNone(candidate)
+        self.assertEqual("existing", candidate["bucket"])
 
     def test_page_type_aliases_are_normalized(self):
         self.assertEqual("application", normalize_page_type("applications"))
