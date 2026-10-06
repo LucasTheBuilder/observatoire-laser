@@ -1577,8 +1577,8 @@ def feedback_dossier_endpoint(limit: int = 400):
 
 @app.get("/api/marketing-dossier")
 def marketing_dossier_endpoint():
-    """Position de HEF/IREIS face aux concurrents suivis : opérations et marchés revendiqués
-    (confirmé / à confirmer / absent chez nous), demande, tendances technologiques, mouvements
+    """Lecture neutre du marché : opérations et marchés revendiqués par les acteurs suivis
+    (confirmé / à confirmer / en production), demande, tendances technologiques, mouvements
     récents, et ce que la base ne permet pas de dire. Purement calculé en SQL ; c'est ce que
     lira l'agent marketing, chaque ligne portant les références qu'il devra citer."""
     return build_marketing_dossier()

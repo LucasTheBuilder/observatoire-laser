@@ -22,9 +22,9 @@ from marketing_agent import build_prompt, run_marketing_agent
 from review_queue import decide_review_item, list_review_queue
 
 DOSSIER: dict[str, Any] = {
-    "perimetre": {"nous": ["HEF", "IREIS"], "concurrents": 77},
-    "operations": [{"operation": "Soudage", "concurrents_confirmes": 7, "concurrents_a_confirmer": 16,
-                    "nous": "absent", "refs": ["offer:12", "offer:23"]}],
+    "perimetre": {"acteurs": 77},
+    "operations": [{"operation": "Soudage", "acteurs_confirmes": 7, "acteurs_a_confirmer": 16,
+                    "acteurs_en_production": 1, "refs": ["offer:12", "offer:23"]}],
     "marches": [],
     "demande": [{"type": "tender", "source": "BOAMP", "total": 10, "plus_recents": [
         {"ref": "demand:3", "date": "2026-03-24", "acheteur": "Université X",
@@ -38,8 +38,8 @@ DOSSIER: dict[str, Any] = {
 
 
 def _rec(**overrides: Any) -> dict[str, Any]:
-    rec = {"kind": "offre_a_developper", "title": "Développer une offre de soudage",
-           "rationale": "7 concurrents confirmés proposent le soudage, nous en sommes absents.",
+    rec = {"kind": "espace_peu_couvert", "title": "Le soudage reste peu industrialisé",
+           "rationale": "7 acteurs confirmés revendiquent le soudage, mais 1 seul est en production.",
            "refs": ["offer:12"], "confidence": "medium"}
     rec.update(overrides)
     return rec
@@ -118,7 +118,7 @@ class MarketingAgentTests(unittest.TestCase):
         [rejected] = list_review_queue("marketing", "rejected")
         self.assertEqual(("misread_refs", "lucas"), (rejected["reject_reason"], rejected["reviewed_by"]))
         journal = dbmod.rows(dbmod.MARKET_DB, "SELECT queue,item_id,decision,reject_reason,summary FROM review_decisions")
-        self.assertEqual([("marketing", rec_id, "reject", "misread_refs", "offre_a_developper -- Développer une offre de soudage")],
+        self.assertEqual([("marketing", rec_id, "reject", "misread_refs", "espace_peu_couvert -- Le soudage reste peu industrialisé")],
                          [tuple(row.values()) for row in journal])
 
     def test_third_party_texts_are_moved_under_an_untrusted_key(self) -> None:

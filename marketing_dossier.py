@@ -1,5 +1,6 @@
-"""Dossier marketing (phase 1 de l'agent marketing) : ce que la veille dit de la position de
-HEF/IREIS face aux concurrents suivis, assemblé en SQL, sans aucun appel de modèle.
+"""Dossier marketing (phase 1 de l'agent marketing) : ce que la veille dit du marché du
+micro-usinage laser ultra-rapide -- qui revendique quoi, où, avec quelle dynamique --, assemblé
+en SQL, sans aucun appel de modèle. Lecture neutre : aucun acteur n'y joue le rôle de « nous ».
 
 Même partage des rôles que ``feedback_dossier``/``analyst`` : le code compte, le modèle (phase 2)
 ne fera que formuler des recommandations à partir de ces comptes, et l'humain tranche.
@@ -24,7 +25,6 @@ from typing import Any
 
 import db as _db
 
-OUR_COMPETITIVE_CLASS = "A1"
 PRODUCTION_STAGES = {"Production", "Industrialisation"}
 UNDETERMINED_STAGE = "Maturité industrielle non déterminée"
 MIN_SIGNALS_PER_AXIS = 5
@@ -35,41 +35,26 @@ def _refs(prefix: str, ids: list[int]) -> list[str]:
     return [f"{prefix}:{i}" for i in ids[:REFS_PER_LINE]]
 
 
-def _our_status(names: set[str], confirmed: set[str], unconfirmed: set[str]) -> str:
-    if names & confirmed:
-        return "confirmé"
-    if names & unconfirmed:
-        return "à confirmer"
-    return "absent"
-
-
-def _roster() -> tuple[set[str], set[str], dict[str, Any]]:
-    actors = _db.rows(
-        _db.ACTORS_DB,
-        "SELECT name, country, actor_type, competitive_class, is_reference, active, review_status FROM actors",
-    )
-    # « Nous » = classe A1 seule : is_reference a déjà été remis à 0 sur HEF/IREIS sans que leur
-    # classe change, et ils seraient alors comptés comme leurs propres concurrents.
-    us = {a["name"] for a in actors if a["competitive_class"] == OUR_COMPETITIVE_CLASS}
-    competitors = [
-        a for a in actors
-        if a["name"] not in us and not a["is_reference"] and a["active"] and a["review_status"] == "verified"
+def _roster() -> tuple[set[str], dict[str, Any]]:
+    """Acteurs suivis : vérifiés, actifs, hors partenaires de référence (is_reference -- les
+    fabricants de sources, qui équipent le marché sans y concourir)."""
+    actors = [
+        a for a in _db.rows(
+            _db.ACTORS_DB, "SELECT name, country, actor_type, is_reference, active, review_status FROM actors")
+        if not a["is_reference"] and a["active"] and a["review_status"] == "verified"
     ]
     perimeter = {
-        "nous": sorted(us),
-        "concurrents": len(competitors),
-        "par_type": Counter(a["actor_type"] or "non renseigné" for a in competitors).most_common(),
-        "par_pays": Counter(a["country"] or "non renseigné" for a in competitors).most_common(),
+        "acteurs": len(actors),
+        "par_type": Counter(a["actor_type"] or "non renseigné" for a in actors).most_common(),
+        "par_pays": Counter(a["country"] or "non renseigné" for a in actors).most_common(),
     }
-    return us, {a["name"] for a in competitors}, perimeter
+    return {a["name"] for a in actors}, perimeter
 
 
-def _positioning(rows: list[dict], key: str, prefix: str, us: set[str], competitors: set[str],
-                 is_confirmed) -> list[dict[str, Any]]:
-    """Par valeur de ``key`` : qui la revendique (confirmé / à confirmer), et nous ?"""
+def _positioning(rows: list[dict], key: str, prefix: str, tracked: set[str], is_confirmed) -> list[dict[str, Any]]:
+    """Par valeur de ``key`` : combien d'acteurs suivis la revendiquent (confirmé / à confirmer)."""
     by_value: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"confirmed": set(), "unconfirmed": set(), "us_confirmed": set(), "us_unconfirmed": set(),
-                 "production": set(), "refs": []}
+        lambda: {"confirmed": set(), "unconfirmed": set(), "production": set(), "refs": []}
     )
     for row in rows:
         value = row[key]
@@ -78,45 +63,42 @@ def _positioning(rows: list[dict], key: str, prefix: str, us: set[str], competit
         entry = by_value[value]
         confirmed = is_confirmed(row)
         name = row["actor_name"]
-        if name in us:
-            entry["us_confirmed" if confirmed else "us_unconfirmed"].add(name)
-        elif name in competitors:
-            entry["confirmed" if confirmed else "unconfirmed"].add(name)
-            if confirmed:
-                entry["refs"].append(row["id"])
-                if row.get("industrial_stage") in PRODUCTION_STAGES:
-                    entry["production"].add(name)
+        if name not in tracked:
+            continue
+        entry["confirmed" if confirmed else "unconfirmed"].add(name)
+        if confirmed:
+            entry["refs"].append(row["id"])
+            if row.get("industrial_stage") in PRODUCTION_STAGES:
+                entry["production"].add(name)
     lines = []
     for value, entry in by_value.items():
         lines.append({
             key: value,
-            "concurrents_confirmes": len(entry["confirmed"]),
-            "concurrents_a_confirmer": len(entry["unconfirmed"] - entry["confirmed"]),
-            "concurrents_en_production": len(entry["production"]),
+            "acteurs_confirmes": len(entry["confirmed"]),
+            "acteurs_a_confirmer": len(entry["unconfirmed"] - entry["confirmed"]),
+            "acteurs_en_production": len(entry["production"]),
             "exemples": sorted(entry["confirmed"])[:5],
-            "nous": _our_status(us, entry["us_confirmed"], entry["us_unconfirmed"]),
             "refs": _refs(prefix, sorted(entry["refs"])),
         })
-    return sorted(lines, key=lambda line: (-line["concurrents_confirmes"], line[key]))
+    return sorted(lines, key=lambda line: (-line["acteurs_confirmes"], line[key]))
 
 
-def _operations(us: set[str], competitors: set[str]) -> list[dict[str, Any]]:
+def _operations(tracked: set[str]) -> list[dict[str, Any]]:
     offers = _db.rows(
         _db.MARKET_DB,
         "SELECT id, actor_name, operation, industrial_stage, review_status FROM offers "
         "WHERE review_status IN ('accepted', 'review')",
     )
-    return _positioning(offers, "operation", "offer", us, competitors,
-                        lambda row: row["review_status"] == "accepted")
+    return _positioning(offers, "operation", "offer", tracked, lambda row: row["review_status"] == "accepted")
 
 
-def _markets(us: set[str], competitors: set[str]) -> list[dict[str, Any]]:
+def _markets(tracked: set[str]) -> list[dict[str, Any]]:
     evidence = _db.rows(
         _db.MARKET_DB,
         "SELECT id, actor_name, market, industrial_stage, review_status, bucket FROM evidence "
         "WHERE review_status IN ('accepted', 'review')",
     )
-    return _positioning(evidence, "market", "evidence", us, competitors,
+    return _positioning(evidence, "market", "evidence", tracked,
                         lambda row: row["review_status"] == "accepted" and row["bucket"] in ("existing", "radar"))
 
 
@@ -146,7 +128,7 @@ def _demand(today: date) -> list[dict[str, Any]]:
     ]
 
 
-def _technology(today: date, competitors: set[str]) -> list[dict[str, Any]]:
+def _technology(today: date, tracked: set[str]) -> list[dict[str, Any]]:
     signals = _db.rows(
         _db.TECH_DB,
         "SELECT id, axis, signal_year, actor_names FROM technology_signals_dated WHERE review_status='accepted'",
@@ -165,7 +147,7 @@ def _technology(today: date, competitors: set[str]) -> list[dict[str, Any]]:
         cited: set[str] = set()
         for s in items:
             try:
-                cited.update(name for name in json.loads(s["actor_names"] or "[]") if name in competitors)
+                cited.update(name for name in json.loads(s["actor_names"] or "[]") if name in tracked)
             except (TypeError, json.JSONDecodeError):
                 pass
         lines.append({
@@ -173,13 +155,13 @@ def _technology(today: date, competitors: set[str]) -> list[dict[str, Any]]:
             "signaux": len(items),
             "dates": len(dated),
             f"depuis_{recent_from}": len(recent),
-            "concurrents_cites": sorted(cited)[:5],
+            "acteurs_cites": sorted(cited)[:5],
             "refs": _refs("tech", sorted((s["id"] for s in recent), reverse=True) or sorted(s["id"] for s in items)),
         })
     return sorted(lines, key=lambda line: (-line[f"depuis_{recent_from}"], -line["signaux"]))
 
 
-def _movements(today: date, competitors: set[str]) -> dict[str, Any]:
+def _movements(today: date, tracked: set[str]) -> dict[str, Any]:
     since = (today - timedelta(days=540)).isoformat()
     events = _db.rows(
         _db.ACTORS_DB,
@@ -188,7 +170,7 @@ def _movements(today: date, competitors: set[str]) -> dict[str, Any]:
         "WHERE e.event_date >= ? ORDER BY e.event_date DESC, e.id DESC",
         (since,),
     )
-    events = [e for e in events if e["name"] in competitors]
+    events = [e for e in events if e["name"] in tracked]
     return {
         "depuis": since,
         "confirmes": [
@@ -204,21 +186,9 @@ def _share(part: int, whole: int) -> str:
     return f"{part}/{whole} ({round(100 * part / whole)} %)" if whole else "0/0"
 
 
-def _gaps(us: set[str]) -> list[dict[str, str]]:
+def _gaps() -> list[dict[str, str]]:
     market, tech = _db.MARKET_DB, _db.TECH_DB
     gaps = []
-    placeholders = ",".join("?" * len(us)) or "''"
-    ours = dict(Counter(
-        r["review_status"] for r in _db.rows(
-            market, f"SELECT review_status FROM offers WHERE actor_name IN ({placeholders})", tuple(us))
-    ))
-    if ours.get("accepted", 0) < 5:
-        gaps.append({
-            "constat": f"Notre propre offre ({', '.join(sorted(us)) or 'aucun acteur de référence'}) est à peine "
-                       f"décrite : {ours.get('accepted', 0)} offre(s) confirmée(s), {ours.get('review', 0)} en revue.",
-            "consequence": "Toute comparaison « nous vs concurrents » repose sur une offre incomplète : "
-                           "un « absent » peut signifier « non collecté », pas « non proposé ».",
-        })
     if not _db.scalar(market, "SELECT COUNT(*) FROM market_sizing"):
         gaps.append({"constat": "Aucune taille de marché enregistrée (market_sizing vide).",
                      "consequence": "Aucun chiffre de taille ou de croissance de marché ne peut être avancé."})
@@ -251,14 +221,14 @@ def _gaps(us: set[str]) -> list[dict[str, str]]:
 
 def build_marketing_dossier(*, today: date | None = None) -> dict[str, Any]:
     today = today or date.today()
-    us, competitors, perimeter = _roster()
+    tracked, perimeter = _roster()
     return {
         "genere_le": _db.utc_now(),
         "perimetre": perimeter,
-        "operations": _operations(us, competitors),
-        "marches": _markets(us, competitors),
+        "operations": _operations(tracked),
+        "marches": _markets(tracked),
         "demande": _demand(today),
-        "technologie": _technology(today, competitors),
-        "mouvements": _movements(today, competitors),
-        "lacunes": _gaps(us),
+        "technologie": _technology(today, tracked),
+        "mouvements": _movements(today, tracked),
+        "lacunes": _gaps(),
     }

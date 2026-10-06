@@ -86,7 +86,7 @@ _QUEUES: dict[str, dict[str, Any]] = {
     },
     "marketing": {
         "db": "market",
-        "select": """SELECT id,'HEF/IREIS' AS actor_name,kind,title,NULL AS source_url,
+        "select": """SELECT id,NULL AS actor_name,kind,title,NULL AS source_url,
                             reviewed_by,reviewed_at,reject_reason,review_status
                      FROM marketing_recommendations""",
         "summary": lambda r: f"{r['kind']} -- {r['title']}",

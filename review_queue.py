@@ -88,7 +88,7 @@ REJECT_REASONS_BY_QUEUE: dict[str, tuple[str, ...]] = {
     # (marketing_agent.rejection_reason) ; reste ce qu'un filtre ne voit pas : une lecture forcée
     # de références réelles, une évidence déjà connue, un conseil inapplicable ou contraire à la
     # stratégie. Seul misread_refs renvoie vers l'agent (son prompt) ; les trois autres, vers ce
-    # qu'il ne peut pas savoir de nous.
+    # que le lecteur sait et que le dossier ignore.
     "marketing": (*_CORE_REASONS, "misread_refs", "already_known", "not_actionable", "against_strategy"),
 }
 
@@ -375,7 +375,7 @@ def _list_marketing(status: str) -> list[dict]:
         ).fetchall()
     return [
         _item(
-            item_id=row["id"], queue="marketing", actor_name="HEF/IREIS", summary=row["title"],
+            item_id=row["id"], queue="marketing", actor_name=None, summary=row["title"],
             detail={"kind": row["kind"], "rationale": row["rationale"], "refs": json.loads(row["refs"]),
                     "confidence": row["confidence"], "run_id": row["run_id"], "model": row["model"]},
             confidence=None, priority=float(_MARKETING_CONFIDENCE_WEIGHT.get(row["confidence"], 1)),

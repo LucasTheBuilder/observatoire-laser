@@ -3226,10 +3226,10 @@ async function decideReviewItem(queue, itemId, decision, rejectReason) {
 // autres files. Les références offer:N / tech:N ouvrent les preuves existantes, pour vérifier
 // une recommandation en un clic plutôt que de la croire.
 const MARKETING_KIND_LABELS = {
-  marche_a_cibler: "Marché à cibler",
-  offre_a_developper: "Offre à développer",
-  argument_differenciant: "Argument différenciant",
-  concurrent_a_surveiller: "Concurrent à surveiller",
+  espace_peu_couvert: "Espace peu couvert",
+  espace_sature: "Espace saturé",
+  dynamique_technologique: "Dynamique technologique",
+  acteur_a_surveiller: "Acteur à surveiller",
   veille_a_completer: "Veille à compléter",
 };
 const MARKETING_CONFIDENCE_LABELS = {high: "confiance élevée", medium: "confiance moyenne", low: "confiance faible"};
@@ -3280,7 +3280,7 @@ function renderMarketing() {
   content.innerHTML = header(
     "Intelligence",
     "Conseil marketing",
-    "Recommandations d'un agent Claude à HEF/IREIS, tirées du dossier marketing de l'observatoire (/api/marketing-dossier). Toute référence citée existe dans le dossier et tout chiffre en vient — sinon la recommandation est écartée avant d'arriver ici. Reste à juger si la lecture est juste : cliquer une référence ouvre sa preuve.",
+    "Lecture marketing du marché par un agent Claude, tirée du dossier de l'observatoire (/api/marketing-dossier), sans prendre le parti d'aucun acteur. Toute référence citée existe dans le dossier et tout chiffre en vient — sinon la recommandation est écartée avant d'arriver ici. Reste à juger si la lecture est juste : cliquer une référence ouvre sa preuve.",
     `<button class="export-btn" data-run-marketing-agent ${running ? "disabled" : ""}>${running ? "Agent en cours… (≈ 2 min)" : "Lancer l'agent"}</button>`
   )
   + marketingLastRunPanel(state.marketingLastRun)

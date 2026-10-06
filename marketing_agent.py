@@ -1,4 +1,5 @@
-"""Agent marketing (phase 2) : lit le dossier marketing et RECOMMANDE des actions à HEF/IREIS.
+"""Agent marketing (phase 2) : lit le dossier marketing et en tire une lecture du marché, sans
+prendre le parti d'aucun acteur.
 
 Même partage des rôles qu'``analyst`` : le dossier (SQL) compte, le modèle formule, l'humain
 tranche. Le client est celui de l'analyste (plafond de coût vérifié AVANT l'appel, échec fermé
@@ -30,10 +31,10 @@ from hybrid import estimate_anthropic_cost_usd
 from marketing_dossier import build_marketing_dossier
 
 RECOMMENDATION_KINDS = (
-    "marche_a_cibler",
-    "offre_a_developper",
-    "argument_differenciant",
-    "concurrent_a_surveiller",
+    "espace_peu_couvert",
+    "espace_sature",
+    "dynamique_technologique",
+    "acteur_a_surveiller",
     "veille_a_completer",
 )
 
@@ -42,7 +43,7 @@ _NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
 
 RECOMMENDATION_TOOL: ToolParam = {
     "name": "recommend_marketing_actions",
-    "description": "Recommande des actions marketing à HEF/IREIS à partir du dossier fourni, chacune appuyée sur ses références.",
+    "description": "Formule des constats marketing sur le marché à partir du dossier fourni, chacun appuyé sur ses références.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -52,10 +53,10 @@ RECOMMENDATION_TOOL: ToolParam = {
                     "type": "object",
                     "properties": {
                         "kind": {"type": "string", "enum": list(RECOMMENDATION_KINDS)},
-                        "title": {"type": "string", "description": "L'action recommandée, en une phrase."},
+                        "title": {"type": "string", "description": "Le constat, en une phrase."},
                         "rationale": {
                             "type": "string",
-                            "description": "Deux à quatre phrases : ce que le dossier montre, et pourquoi l'action en découle. "
+                            "description": "Deux à quatre phrases : ce que le dossier montre, et ce qu'un acteur de ce marché devrait en retenir. "
                                            "N'utilise que des nombres présents dans le dossier.",
                         },
                         "refs": {
@@ -81,12 +82,12 @@ RECOMMENDATION_TOOL: ToolParam = {
     "strict": True,
 }
 
-SYSTEM_PROMPT = """Tu es un spécialiste du marketing B2B industriel dans le micro-usinage laser ultra-rapide (femtoseconde/picoseconde). Tu conseilles HEF (groupe industriel) et IREIS (son centre de R&D). Tu reçois un dossier calculé par leur observatoire de veille concurrentielle et tu recommandes des actions via l'outil recommend_marketing_actions.
+SYSTEM_PROMPT = """Tu es un analyste marketing B2B spécialiste du micro-usinage laser ultra-rapide (femtoseconde/picoseconde). Tu reçois un dossier calculé par un observatoire de veille sur ce marché et tu en tires une lecture marketing via l'outil recommend_marketing_actions. Tu ne travailles pour aucun acteur : tu décris où le marché est encombré, où il est peu couvert, ce qui bouge, qui surveiller, et ce que la veille ne permet pas encore de dire.
 
 Lecture du dossier :
-- "operations" et "marches" : pour chaque opération ou marché, combien de concurrents le revendiquent avec une preuve confirmée ou encore à confirmer, combien sont en production, et notre statut ("confirmé", "à confirmer", "absent").
-- "absent" peut vouloir dire "non collecté" : la section "lacunes" dit ce que la base ne couvre pas. Tiens-en compte avant de conclure qu'une offre manque.
-- "demande" (appels d'offres, cofinancements), "technologie" (axes et signaux récents), "mouvements" (événements concurrents).
+- "operations" et "marches" : pour chaque opération ou marché, combien d'acteurs suivis le revendiquent avec une preuve confirmée ou encore à confirmer, et combien sont en production.
+- Peu d'acteurs confirmés peut vouloir dire "non collecté" : la section "lacunes" dit ce que la base ne couvre pas. Tiens-en compte avant de conclure qu'un espace est vide.
+- "demande" (appels d'offres, cofinancements), "technologie" (axes et signaux récents), "mouvements" (événements d'acteurs).
 
 Règles absolues :
 - N'utilise QUE le dossier. Aucun fait, aucune taille de marché, aucun taux de croissance, aucun nom de client venu d'ailleurs. Un nombre absent du dossier rend la recommandation irrecevable.
