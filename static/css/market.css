@@ -81,3 +81,18 @@
   .signal-item{align-items:flex-start}
   .signal-item strong{white-space:normal}
 }
+/* Marché v2 (page de travail) : les cartes y sont la facette MARCHÉ. */
+.mv-cards{grid-template-columns:repeat(auto-fill,minmax(205px,1fr));gap:10px;margin-bottom:26px}
+.mv-cards .market-fam-card{display:flex;flex-direction:column;justify-content:flex-start;padding:12px 14px;box-shadow:none}
+.mv-cards .market-fam-card header{gap:9px;margin-bottom:8px}
+.mv-cards .market-icon{width:28px;height:28px;border-radius:8px}
+.mv-cards .market-icon svg{width:16px;height:16px}
+.mv-cards .market-fam-card h3{font-size:15px}
+.mv-cards .mc-counts{margin:0 0 6px;font-size:11px}
+.mv-cards .attractiveness-badge{align-self:flex-start;margin-bottom:4px}
+.mv-cards .block-label{margin:0 0 6px;font-size:10.5px;line-height:1.35}
+.mv-cards .subtheme-chips{gap:5px}
+.mv-cards .subtheme-chip{padding:3px 8px;font-size:10.5px}
+.mv-cards .market-fam-card.is-active{border-color:var(--teal);box-shadow:0 0 0 2px var(--teal) inset}
+.mv-cards .market-fam-card.is-empty{opacity:.45}
+.ex-row .mc-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}

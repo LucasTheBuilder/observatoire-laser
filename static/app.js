@@ -46,6 +46,10 @@ const state = {
   offersCoverage: [],
   marketDrill: null,
   marketProduct: null,
+  mvQuery: "",
+  mvFacets: {kind: [], market: [], product: [], operation: [], actor: []},
+  mvExpanded: [],
+  mvLimit: 20,
   actorFilters: {competitiveClass: "", actorType: "", country: "", businessModel: "", priorityOnly: false},
   marketReviewFilters: {origin: "", factStatus: "", actor: ""},
   // Échantillon d'audit : chargé à la demande, parce qu'il dépend d'une
@@ -593,6 +597,218 @@ function renderMarket() {
     {key: "type", label: "Type"}, {key: "markets", label: "Marché(s)"}, {key: "products", label: "Produit(s)"},
     {key: "actor", label: "Acteur(s)"}, {key: "label", label: "Opération / capacité / titre"}, {key: "source", label: "Source"},
   ]));
+}
+
+// --- Marché v2 (page de travail) ------------------------------------------------------------
+// Même corpus que renderMarket (mcEntries : faits, offres et documents techniques rattachés à un
+// marché ou un produit), lu avec le langage explorateur de Technologie laser et Offres &
+// capacités. Les cartes « Lecture par marché » restent l'entrée, mais deviennent la facette
+// MARCHÉ affichée autrement -- comme la bande des opérations d'Offres & capacités -- au lieu
+// d'ouvrir un fil d'Ariane. Les deux longs tableaux de faits laissent la place à un tableau
+// unique, filtrable et paginé.
+const MV_PAGE_SIZE = 20;
+const MV_NONE = "Non précisé";
+const MV_NO_MARKET = "Sans marché nommé";
+
+function mvKind(entry) {
+  if (entry.kind === "fait") return entry.row.bucket === "existing" ? "Fait existant" : "Fait radar";
+  if (entry.kind === "offre") return "Offre";
+  return MC_TECH_KINDS[entry.row.kind] || "Document";
+}
+
+const MV_KIND_CLASS = {"Fait existant": "capacite", "Fait radar": "projet", "Offre": "service", "Publication": "pub", "Projet": "projet", "Brevet": "brevet"};
+
+function mvActors(entry) {
+  if (entry.kind === "fait") return [entry.row.actor_name].filter(Boolean);
+  if (entry.kind === "offre") return [entry.row.actor].filter(Boolean);
+  return entry.row.actors || [];
+}
+
+function mvOperation(entry) {
+  if (entry.kind === "tech") return null;
+  return normalizedOperation(entry.row);
+}
+
+const MV_FACET_GROUPS = [
+  {key: "kind", label: "TYPE", valuesOf: entry => [mvKind(entry)]},
+  {key: "market", label: "MARCHÉ", valuesOf: entry => entry.markets.length ? entry.markets : [MV_NO_MARKET]},
+  {key: "product", label: "PRODUIT / PIÈCE", valuesOf: entry => entry.products.length ? entry.products : [MV_NONE]},
+  {key: "operation", label: "OPÉRATION LASER", valuesOf: entry => [mvOperation(entry) || MV_NONE]},
+  {key: "actor", label: "ACTEUR", valuesOf: entry => { const actors = mvActors(entry); return actors.length ? actors : [MV_NONE]; }},
+];
+
+function mvTitle(entry) {
+  if (entry.kind === "fait") return [entry.row.component, entry.row.operation].filter(Boolean).join(" — ");
+  if (entry.kind === "offre") return entry.row.capability || "";
+  return entry.row.title || "Sans titre";
+}
+
+function mvHaystack(entry) {
+  return [mvTitle(entry), ...entry.markets, ...entry.products, ...mvActors(entry), mvOperation(entry), mvKind(entry)]
+    .filter(Boolean).join(" ");
+}
+
+function mvProofLabel(entry) {
+  if (entry.kind === "fait") return proofMeta(entry.row);
+  const count = (entry.row.proofs || []).length;
+  return `${count} phrase${count > 1 ? "s" : ""}`;
+}
+
+function mvRow(entry, index) {
+  const kind = mvKind(entry);
+  const actors = mvActors(entry);
+  const date = entry.kind === "tech" && entry.row.date ? String(entry.row.date).slice(0, 4) : "";
+  // Une étiquette déjà cochée en facette se répéterait sur chaque ligne sans rien apprendre.
+  const selectedMarkets = state.mvFacets.market || [];
+  const selectedProducts = state.mvFacets.product || [];
+  const tags = [
+    ...entry.markets.filter(label => !selectedMarkets.includes(label)).map(label => `<span class="mc-tag market">${esc(label)}</span>`),
+    ...entry.products.filter(label => !selectedProducts.includes(label)).map(label => `<span class="mc-tag">${esc(label)}</span>`),
+  ].join("");
+  return `<button type="button" class="ex-row" data-mv-open="${index}">
+    <span class="ex-kind ${esc(MV_KIND_CLASS[kind] || "autre")}">${esc(kind)}</span>
+    <span class="ex-doc">
+      <span class="ex-doc-title">${esc(mvTitle(entry))}</span>
+      <span class="ex-doc-meta">
+        ${actors.length ? `<span class="ex-actor">${esc(actors.slice(0, 3).join(", "))}${actors.length > 3 ? ` +${actors.length - 3}` : ""}</span>` : ""}
+        ${date ? `<span class="ex-sep">·</span><span>${esc(date)}</span>` : ""}
+      </span>
+      ${tags ? `<span class="mc-tags">${tags}</span>` : ""}
+    </span>
+    <span class="ex-date">${esc(mvProofLabel(entry))}</span>
+  </button>`;
+}
+
+// Les cartes comptent ce que les AUTRES facettes laissent passer (options.market ignore sa
+// propre sélection, voir explore/skip) : cocher un marché ne fait pas tomber les autres cartes à 0.
+function mvMarketCards(entries, marketOptions, selected) {
+  const counts = new Map(marketOptions);
+  const groups = mcGroups(entries).markets;
+  if (!groups.length) return "";
+  return `<div class="market-fam-grid mv-cards">${groups.map(([market, bucket]) => {
+    const on = selected.includes(market);
+    const live = counts.get(market) || 0;
+    const chips = [...bucket.products.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4)
+      .map(([label, count]) => `<span class="subtheme-chip">${esc(label)}<b>${count}</b></span>`).join("");
+    return `<button type="button" class="market-fam-card market-fam-card-link${on ? " is-active" : ""}${live ? "" : " is-empty"}" data-mv-market="${esc(market)}" aria-pressed="${on}">
+      <header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${live}</b></div></header>
+      <p class="mc-counts">${esc(mcCountsLine(bucket.counts))}</p>
+      ${intensityBadge(market)}<div class="subtheme-chips">${chips}</div></button>`;
+  }).join("")}</div>`;
+}
+
+function renderMarketV2() {
+  const hadSearchFocus = document.activeElement && document.activeElement.id === "ex-search";
+  const caret = hadSearchFocus ? document.activeElement.selectionStart : null;
+
+  const entries = mcEntries();
+  const {filtered, options} = explore(entries, {
+    query: state.mvQuery, haystackOf: mvHaystack, groups: MV_FACET_GROUPS, active: state.mvFacets,
+  });
+  const shown = filtered.slice(0, state.mvLimit);
+  state.mvShown = shown;
+
+  const facts = entries.filter(entry => entry.kind === "fait");
+  const existing = facts.filter(entry => entry.row.bucket === "existing").length;
+  const offers = entries.filter(entry => entry.kind === "offre").length;
+  const tech = entries.filter(entry => entry.kind === "tech").length;
+  const markets = mcGroups(entries).markets.length;
+  const demand = (state.demandSignals || []).length;
+  const facetsActive = activeFacetCount(state.mvFacets);
+  const countLabel = state.mvQuery.trim()
+    ? `${filtered.length} résultat(s) pour « ${esc(state.mvQuery.trim())} »`
+    : `${filtered.length} entrée(s)`;
+
+  content.innerHTML = `<div class="ex-page"><div class="ex-inner">
+    <div class="ex-head">
+      <div>
+        <p class="ex-eyebrow">LECTURE MARCHÉ &amp; PRODUIT · PAGE DE TRAVAIL</p>
+        <h1>Applications femtoseconde</h1>
+        <p class="ex-lede">Les faits où marché, pièce et opération laser sont reliés, plus les offres et les travaux techniques dont une phrase de la source nomme un marché ou un produit. Rien n’est rattaché par déduction. Cliquer un marché, ou cocher des facettes, resserre le tableau.</p>
+      </div>
+      <div class="ex-head-actions">
+        <button type="button" class="ex-btn" data-mv-export>↓ Exporter CSV</button>
+        <button type="button" class="ex-btn ex-primary" data-run="market">↻ Actualiser l’analyse</button>
+      </div>
+    </div>
+
+    <div class="ex-kpis">
+      <div class="ex-kpi"><div class="ex-kpi-label">MARCHÉS</div><div class="ex-kpi-value">${markets}</div><div class="ex-kpi-note">nommés par au moins une source</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">FAITS</div><div class="ex-kpi-value">${facts.length}</div><div class="ex-kpi-note">${existing} existant${existing > 1 ? "s" : ""} · ${facts.length - existing} radar</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">OFFRES</div><div class="ex-kpi-value">${offers}</div><div class="ex-kpi-note">nommant un marché ou un produit</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">DOCUMENTS TECHNIQUES</div><div class="ex-kpi-value">${tech}</div><div class="ex-kpi-note">publications, projets, brevets</div></div>
+      <div class="ex-kpi"><div class="ex-kpi-label">SIGNAUX DE DEMANDE</div><div class="ex-kpi-value">${demand}</div><div class="ex-kpi-note">appels d’offres et cofinancements</div></div>
+    </div>
+
+    <div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Une carte par marché nommé. Le chiffre suit les autres filtres ; cliquer une carte coche le marché.</p></div></div>${(state.mvFacets.market || []).length ? `<button type="button" class="ex-facet-toggle" data-mv-market-reset>Tous les marchés ✕</button>` : `<b>${markets} marchés</b>`}</div>
+    ${mvMarketCards(entries, options.market, state.mvFacets.market || [])}
+
+    <div class="ex-search">
+      <span class="ex-search-icon" aria-hidden="true">⌕</span>
+      <input id="ex-search" type="search" value="${esc(state.mvQuery)}" placeholder="Rechercher un marché, une pièce, une opération, un acteur…" aria-label="Rechercher dans la lecture marché">
+      ${state.mvQuery ? `<button type="button" class="ex-clear" data-mv-clear>Effacer ✕</button>` : ""}
+    </div>
+
+    <div class="ex-body">
+      <div class="ex-facets">
+        ${MV_FACET_GROUPS.map(g => facetGroupHtml(g.label, g.key, options[g.key], state.mvFacets[g.key], {expanded: state.mvExpanded.includes(g.key)})).join("")}
+        ${facetsActive ? `<button type="button" class="ex-facet-reset" data-mv-reset>Réinitialiser les facettes (${facetsActive})</button>` : ""}
+      </div>
+      <div class="ex-results">
+        <div class="ex-tabs"><span class="ex-tab-spacer"></span><span class="ex-count">${countLabel}</span></div>
+        <div class="ex-table">
+          <div class="ex-row ex-thead"><div>TYPE</div><div>APPLICATION · ACTEUR · MARCHÉS ET PRODUITS NOMMÉS</div><div>PREUVES</div></div>
+          ${shown.length ? shown.map(mvRow).join("") : `<div class="ex-empty"><strong>Aucune entrée ne correspond.</strong><p>Essayez un mot-clé plus court, ou <button type="button" data-mv-reset-all>réinitialisez la recherche</button>.</p></div>`}
+        </div>
+        <div class="ex-foot">Affichage de ${shown.length} entrée(s) sur ${filtered.length}${filtered.length === entries.length ? "" : ` (corpus complet : ${entries.length})`}. ${shown.length < filtered.length ? `<button type="button" class="ex-more" data-mv-more>Charger la suite →</button>` : ""}</div>
+      </div>
+    </div>
+
+    ${demandSignalsPanel()}
+    <section>${tcSourcesBlock(state.marketCompilation?.sources || [], MC_SOURCE_ROLES)}</section>
+  </div></div>`;
+
+  const input = document.querySelector("#ex-search");
+  if (input) {
+    if (hadSearchFocus) { input.focus({preventScroll: true}); input.setSelectionRange(caret, caret); }
+    input.addEventListener("input", debounce(event => {
+      state.mvQuery = event.target.value;
+      state.mvLimit = MV_PAGE_SIZE;
+      renderMarketV2();
+    }));
+  }
+  const rerender = mutate => () => { mutate(); state.mvLimit = MV_PAGE_SIZE; renderMarketV2(); };
+  const emptyFacets = () => ({kind: [], market: [], product: [], operation: [], actor: []});
+  document.querySelectorAll("[data-ex-facet]").forEach(el => el.addEventListener("click",
+    rerender(() => { state.mvFacets = toggleFacet(state.mvFacets, el.dataset.exFacet, el.dataset.exValue); })));
+  document.querySelectorAll("[data-mv-market]").forEach(el => el.addEventListener("click",
+    rerender(() => { state.mvFacets = toggleFacet(state.mvFacets, "market", el.dataset.mvMarket); })));
+  document.querySelector("[data-mv-market-reset]")?.addEventListener("click", rerender(() => { state.mvFacets = {...state.mvFacets, market: []}; }));
+  document.querySelector("[data-mv-clear]")?.addEventListener("click", rerender(() => { state.mvQuery = ""; }));
+  document.querySelector("[data-mv-reset]")?.addEventListener("click", rerender(() => { state.mvFacets = emptyFacets(); }));
+  document.querySelector("[data-mv-reset-all]")?.addEventListener("click", rerender(() => { state.mvQuery = ""; state.mvFacets = emptyFacets(); }));
+  document.querySelectorAll("[data-ex-expand]").forEach(el => el.addEventListener("click", () => {
+    const key = el.dataset.exExpand;
+    state.mvExpanded = state.mvExpanded.includes(key) ? state.mvExpanded.filter(k => k !== key) : [...state.mvExpanded, key];
+    renderMarketV2();
+  }));
+  document.querySelector("[data-mv-more]")?.addEventListener("click", () => { state.mvLimit += MV_PAGE_SIZE; renderMarketV2(); });
+  document.querySelectorAll("[data-mv-open]").forEach(el => el.addEventListener("click", () => {
+    const entry = state.mvShown[Number(el.dataset.mvOpen)];
+    if (!entry) return;
+    if (entry.kind === "fait") showProofs(entry.row);
+    else showMarketCompilationProof(entry.row.uid);
+  }));
+  document.querySelector("[data-mv-export]")?.addEventListener("click", () => downloadCSV("marche.csv", filtered.map(entry => ({
+    type: mvKind(entry), markets: entry.markets.join(" | "), products: entry.products.join(" | "),
+    actor: mvActors(entry).join(" | "), label: mvTitle(entry), operation: mvOperation(entry) || "",
+    source: entry.kind === "fait" ? "" : entry.row.source_url || "",
+  })), [
+    {key: "type", label: "Type"}, {key: "markets", label: "Marché(s)"}, {key: "products", label: "Produit(s)"},
+    {key: "actor", label: "Acteur(s)"}, {key: "label", label: "Application / capacité / titre"},
+    {key: "operation", label: "Opération"}, {key: "source", label: "Source"},
+  ]));
+  wireActions();
 }
 
 
@@ -3505,7 +3721,7 @@ async function deleteGoldenFact(factId) {
 }
 
 // Les vues bâties sur explorer.js / explorer.css (voir le commentaire dans render()).
-const EXPLORER_VIEWS = new Set(["techcorpus", "offers"]);
+const EXPLORER_VIEWS = new Set(["techcorpus", "offers", "market-v2"]);
 
 function render(){
   // Les pages "explorateur" apportent leur propre fond et leur propre gouttière (maquette :
@@ -3514,6 +3730,7 @@ function render(){
   content.classList.toggle("ex-host", EXPLORER_VIEWS.has(state.view));
   if(state.view==="monthly") renderMonthly();
   if(state.view==="market") renderMarket();
+  if(state.view==="market-v2") renderMarketV2();
   if(state.view==="offers") renderOffers();
   if(state.view==="techcorpus") renderTechCorpus();
   if(state.view==="actors") renderActors();
@@ -3787,6 +4004,7 @@ const LOADERS = {
 const VIEW_DEPS = {
   monthly:           ["overview", "monthly", "market", "actors", "technologySignals", "collectionHealth"],
   market:            ["overview", "market", "marketScores", "marketCompilation", "demandSignals"],
+  "market-v2":       ["overview", "market", "marketScores", "marketCompilation", "demandSignals"],
   // actors/market : la fiche offre reprend specs chiffrées, certifications et marchés servis.
   offers:            ["overview", "offers", "namedOffers", "offersCoverage", "actors", "market"],
   techcorpus:        ["overview", "techCorpus", "techSources"],
