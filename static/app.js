@@ -2635,6 +2635,7 @@ function renderActors() {
     .filter(a => `${a.name} ${a.country} ${a.role}`.toLowerCase().includes(q))
     .filter(actorMatchesFilters);
   const nonReference = state.actors.filter(a => !a.is_reference);
+  const referenceNames = state.actors.filter(a => a.is_reference).map(a => a.name);
   const countFor = cls => nonReference.filter(a => a.competitive_class === cls && a.review_status === "verified").length;
   const toVerifyCount = nonReference.filter(a => a.review_status === "candidate" || a.review_status === "monitor").length;
   const priorityCount = nonReference.filter(a => a.priority).length;
@@ -2643,7 +2644,7 @@ function renderActors() {
   const pendingReview = filtered.filter(a => a.review_status === "candidate" || a.review_status === "monitor");
   const categories = groupActorsByCategory(filtered);
   const referenceSection = references.length
-    ? `<div class="actor-category reference"><p>Références internes<small>${references.length}</small></p><div class="actor-grid">${references.map(actorCard).join("")}</div></div>`
+    ? `<div class="actor-category reference"><p>Partenaires de référence<small>${references.length}</small></p><div class="actor-grid">${references.map(actorCard).join("")}</div></div>`
     : "";
   const categorySections = categories.map(([category, list]) =>
     `<div class="actor-category"><p>${esc(category)}<small>${list.length}</small></p><div class="actor-grid">${list.map(actorCard).join("")}</div></div>`
@@ -2651,7 +2652,7 @@ function renderActors() {
   const pendingSection = pendingReview.length
     ? `<section><div class="section-title"><div><span>—</span><div><h2>En attente de validation</h2><p>Signaux émergents dont la preuve est encore insuffisante pour compter comme concurrent.</p></div></div><b>${pendingReview.length}</b></div><div class="review-grid">${pendingReview.map(reviewActorCard).join("")}</div></section>`
     : "";
-  content.innerHTML = header("Écosystème suivi",`${nonReference.length} acteurs suivis`,"HEF et IREIS restent hors benchmark comme références internes.",`<div class="header-actions"><button class="export-btn" data-open-actor-add>+ Ajouter un acteur</button><button class="primary" data-run="actors">↻ Mettre à jour</button></div>`)+
+  content.innerHTML = header("Écosystème suivi",`${nonReference.length} acteurs suivis`,referenceNames.length ? `Hors benchmark, comme partenaires de référence : ${esc(referenceNames.join(", "))}.` : "",`<div class="header-actions"><button class="export-btn" data-open-actor-add>+ Ajouter un acteur</button><button class="primary" data-run="actors">↻ Mettre à jour</button></div>`)+
   `<p class="actor-summary-counts">${esc(summaryLine)}</p>
    ${pendingSection}
    ${acquisitionsSection(filtered)}
