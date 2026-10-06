@@ -31,15 +31,14 @@ offres le 28/09/2026, puis relu à la main ligne par ligne :
     libellé « Électrodes de batteries » ; « diffractive optical element » est, six fois sur
     sept, l'outil qui divise le faisceau et non la pièce fabriquée.
 
-Les deux lexiques de page ci-dessous sont dérivés de MARKETS/COMPONENTS, comme
-DOCUMENT_MARKETS l'est dans lexicon.py, sans toucher aux originaux : l'extraction de faits
-marché et la page Technologie laser continuent de les lire tels quels.
+Les lexiques resserrés (DOCUMENT_MARKETS/DOCUMENT_COMPONENTS) et le classement phrase par
+phrase vivent dans lexicon.py depuis le 06/10/2026 : les tags marché et produit de la page
+Technologie y passent aussi. MARKETS/COMPONENTS restent intacts pour l'extraction de faits.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -47,149 +46,36 @@ from typing import Any
 from urllib.parse import urlparse
 
 from lexicon import (
-    COMPONENTS,
-    LASER_AS_SOURCE_CUES,
-    MARKETS,
-    NEGATION_CUES,
+    DOCUMENT_COMPONENTS,
+    DOCUMENT_MARKETS,
+    DOCUMENT_SENTENCE_MAX,
+    OFFER_SENTENCE_MAX,
     OPERATIONS,
-    Lexicon,
-    _contains_term_normalized,
-    _laser_match,
-    _match_all_labels,
-    _normalize_text,
-    _rule_matches,
+    LexiconRule,
+    labels_named_in_sentences,
 )
-from scrapers import _sentences
 from sources import SOURCES
-
-# Termes retirés d'un marché : ils nomment l'instrument ou la machine avant le marché.
-_PAGE_MARKET_DROPPED: dict[str, frozenset[str]] = {
-    "Optique": frozenset({"optical", "optics", "lens", "lenses"}),
-    "Photonique": frozenset({"photonic"}),
-    "Spatial": frozenset({"spatial"}),
-}
-# Et ce qui les remplace : des noms de PRODUIT optique ou photonique.
-_PAGE_MARKET_ADDED: dict[str, tuple[str, ...]] = {
-    "Optique": ("micro-optics", "micro-optique", "micro-optiques", "optics manufacturing", "precision optics", "optical components"),
-    "Photonique": (
-        "photonic device", "photonic devices", "photonic component", "photonic components",
-        "photonic integrated circuit", "photonic integrated circuits", "photonic chip", "photonic chips",
-        "photonic applications",
-    ),
-}
-_PAGE_MARKET_EXCLUDES: dict[str, tuple[str, ...]] = {
-    "Quantum": ("quantum efficiency", "quantum dot", "quantum dots", "quantum-dot", "quantum electronics", "quantum yield", "quantum well"),
-    # Un matériau n'est pas un marché : « ablation on metallic and semiconductor materials ».
-    "Semi-conducteurs": ("semiconductor material", "semiconductor materials", "organic semiconductor", "organic semiconductors"),
-    "Photonique": ("photonic crystal fiber", "photonic crystal fibre", "photonic crystal fibers", "photonic process chain"),
-}
-
-PAGE_MARKETS: Lexicon = {}
-for _label, _rule in MARKETS.items():
-    _dropped = _PAGE_MARKET_DROPPED.get(_label, frozenset())
-    _any_of = tuple(term for term in _rule.get("any_of", ()) if term not in _dropped) + _PAGE_MARKET_ADDED.get(_label, ())
-    PAGE_MARKETS[_label] = {
-        **_rule,
-        "any_of": _any_of,
-        "exclude": _rule.get("exclude", ()) + _PAGE_MARKET_EXCLUDES.get(_label, ()),
-    }
-
-# Les trois libellés que DOCUMENT_COMPONENTS écarte déjà (la matière, un paramètre de procédé,
-# le capteur qui surveille), pour les mêmes raisons.
-_PAGE_COMPONENT_DROPPED = frozenset({"Composants en verre", "Substrats", "Capteurs"})
-_PAGE_COMPONENT_GUARDS: dict[str, dict[str, tuple[str, ...]]] = {
-    "Électrodes de batteries": {
-        "requires_any": ("battery", "batteries", "batterie", "li-ion", "lithium", "energy storage"),
-    },
-    "Éléments optiques diffractifs (DOE)": {
-        "exclude": ("beamlet", "beamlets", "beam division", "beam splitting", "multi-beam", "multibeam", "parallel beams", "galvo"),
-    },
-}
-PAGE_COMPONENTS: Lexicon = {}
-for _label, _rule in COMPONENTS.items():
-    if _label in _PAGE_COMPONENT_DROPPED:
-        continue
-    _guard = _PAGE_COMPONENT_GUARDS.get(_label, {})
-    PAGE_COMPONENTS[_label] = {
-        **_rule,
-        "requires_any": _rule.get("requires_any", ()) + _guard.get("requires_any", ()),
-        "exclude": _rule.get("exclude", ()) + _guard.get("exclude", ()),
-    }
-
-# Une phrase plus longue que ça n'est pas une phrase : c'est un menu, une liste de
-# publications ou un tableau aplati par le crawler. Les résumés scientifiques font de vraies
-# phrases longues, d'où deux plafonds.
-_OFFER_SENTENCE_MAX = 320
-_DOCUMENT_SENTENCE_MAX = 450
-
-# Une référence bibliographique cite un travail, elle ne décrit pas une offre : les initiales
-# d'auteurs (« Gillner, A.: »), un DOI, un congrès, un « [ PDF 2.2 MB ] ».
-_BIBLIOGRAPHIC_RE = re.compile(
-    r"doi\.org|\bdoi\b|\bet al\b|conference|congress|proceedings|\[\s*pdf|autor\*innen",
-    re.IGNORECASE,
-)
-# Les initiales se lisent sensibles à la casse : en IGNORECASE, « etc., » en serait une.
-_AUTHOR_INITIALS_RE = re.compile(r"\b[A-Z]\.[,:]\s")
-_NANOSECOND_TERMS = ("nanosecond", "nanoseconde", "nanosecondes", "ns laser", "ns-laser")
-
-
-def _is_negated(norm_sentence: str) -> bool:
-    # Négation seulement, pas le contraste (« conventional », « classic ») : qualifier la méthode
-    # concurrente ne change pas le marché nommé dans la même phrase.
-    return any(_contains_term_normalized(norm_sentence, cue) for cue in NEGATION_CUES)
-
-
-def _describes_the_source(norm_sentence: str) -> bool:
-    """La phrase parle du laser qu'on construit (oscillateur, amplificateur, fibre...), pas de ce
-    qu'on fait avec -- même périmètre que lexicon.is_laser_the_source, en plus strict : ici un
-    procédé nommé dans la phrase ne la sauve pas, parce qu'on lit un marché, pas un procédé."""
-    return any(_contains_term_normalized(norm_sentence, cue) for cue in LASER_AS_SOURCE_CUES)
-
-
-def _is_nanosecond_only(sentence: str, norm_sentence: str) -> bool:
-    return any(_contains_term_normalized(norm_sentence, term) for term in _NANOSECOND_TERMS) and not _laser_match(sentence)
-
-
-def _strip_names(sentence: str, names: list[str]) -> str:
-    """« Pulsar Photonics » et « Workshop of Photonics » ne sont pas le marché de la photonique."""
-    for name in names:
-        if name:
-            sentence = re.sub(re.escape(name), " ", sentence, flags=re.IGNORECASE)
-    return sentence
 
 
 def classify(
     texts: list[str],
     *,
     names: list[str] | None = None,
-    operation_rule: dict[str, tuple[str, ...]] | None = None,
-    max_len: int = _DOCUMENT_SENTENCE_MAX,
+    operation_rule: LexiconRule | None = None,
+    max_len: int | None = DOCUMENT_SENTENCE_MAX,
     reject_bibliography: bool = False,
+    reject_negation: bool = False,
 ) -> dict[str, dict[str, str]]:
-    """Les marchés et produits que `texts` nomme, phrase par phrase.
-
-    Renvoie ``{"market": {libellé: phrase}, "product": {libellé: phrase}}`` -- la PREMIÈRE
-    phrase qui porte chaque libellé, telle qu'écrite par la source. `operation_rule`, quand il
-    est donné, exige que la phrase nomme aussi l'opération de l'offre : une page qui décrit six
-    prestations ne rattache à la découpe que la phrase qui parle de découpe.
-    """
-    found: dict[str, dict[str, str]] = {"market": {}, "product": {}}
-    for text in texts:
-        for sentence in _sentences(text or ""):
-            if len(sentence) > max_len:
-                continue
-            if reject_bibliography and (_BIBLIOGRAPHIC_RE.search(sentence) or _AUTHOR_INITIALS_RE.search(sentence)):
-                continue
-            readable = _strip_names(sentence, names or [])
-            norm = _normalize_text(readable)
-            if operation_rule and not _rule_matches(readable, operation_rule):
-                continue
-            if _is_negated(norm) or _describes_the_source(norm) or _is_nanosecond_only(readable, norm):
-                continue
-            for dimension, lexicon in (("market", PAGE_MARKETS), ("product", PAGE_COMPONENTS)):
-                for label, _hits in _match_all_labels(readable, lexicon):
-                    found[dimension].setdefault(label, sentence)
-    return found
+    """Les marchés et produits que `texts` nomme, phrase par phrase :
+    ``{"market": {libellé: phrase}, "product": {libellé: phrase}}``. Mêmes lexiques et mêmes
+    gardes que les tags de la page Technologie (lexicon.labels_named_in_sentences)."""
+    return {
+        dimension: labels_named_in_sentences(
+            texts, lexicon, names=names, operation_rule=operation_rule,
+            max_len=max_len, reject_bibliography=reject_bibliography, reject_negation=reject_negation,
+        )
+        for dimension, lexicon in (("market", DOCUMENT_MARKETS), ("product", DOCUMENT_COMPONENTS))
+    }
 
 
 def _proofs(found: dict[str, dict[str, str]]) -> list[dict[str, str]]:
@@ -219,8 +105,9 @@ def compile_offers(market_db: Path) -> list[dict[str, Any]]:
             texts,
             names=[offer["actor_name"]],
             operation_rule=OPERATIONS.get(offer["operation"] or ""),
-            max_len=_OFFER_SENTENCE_MAX,
+            max_len=OFFER_SENTENCE_MAX,
             reject_bibliography=True,
+            reject_negation=True,
         )
         if not (found["market"] or found["product"]):
             continue

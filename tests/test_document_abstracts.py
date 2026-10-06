@@ -97,9 +97,20 @@ class DocumentMarketVocabularyTests(unittest.TestCase):
                 self.assertNotIn("Optique", {label for label, _ in match_all_labels(texte, DOCUMENT_MARKETS)})
 
     def test_the_optics_market_still_matches_on_its_own_words(self):
-        for texte in ("fabrication of lenses by femtosecond laser", "for optics and microsystems"):
+        for texte in ("target markets: medical devices and micro-optics", "glass processing for optics manufacturing"):
             with self.subTest(texte=texte):
                 self.assertIn("Optique", {label for label, _ in match_all_labels(texte, DOCUMENT_MARKETS)})
+
+    def test_the_machine_optics_is_not_the_optics_market(self):
+        """Relecture du 06/10/2026 : les 24 publications classées Optique l'étaient toutes par
+        l'optique DE LA MACHINE ou de mesure."""
+        for texte in (
+            "focused through an f-theta lens of 100 mm",
+            "helical drilling optics and ultrashort laser pulses",
+            "the design of the corresponding processing optics",
+        ):
+            with self.subTest(texte=texte):
+                self.assertNotIn("Optique", {label for label, _ in match_all_labels(texte, DOCUMENT_MARKETS)})
 
     def test_market_extraction_keeps_the_full_vocabulary(self):
         """MARKETS sert aussi à l'extraction de faits marché, sur des pages d'acteurs où le
@@ -107,12 +118,14 @@ class DocumentMarketVocabularyTests(unittest.TestCase):
         self.assertIn("spatial", MARKETS["Spatial"]["any_of"])
         self.assertIn("optical", MARKETS["Optique"]["any_of"])
 
-    def test_every_other_market_label_is_untouched(self):
+    def test_every_other_market_label_keeps_its_vocabulary(self):
+        """Seuls Spatial, Optique et Photonique perdent ou changent des termes ; ailleurs, le
+        resserrement du 06/10/2026 n'ajoute que des exclusions (« quantum efficiency »...)."""
         for label, rule in MARKETS.items():
-            if label in {"Spatial", "Optique"}:
+            if label in {"Spatial", "Optique", "Photonique"}:
                 continue
             with self.subTest(label=label):
-                self.assertEqual(rule, DOCUMENT_MARKETS[label])
+                self.assertEqual(rule["any_of"], DOCUMENT_MARKETS[label]["any_of"])
 
 
 if __name__ == "__main__":

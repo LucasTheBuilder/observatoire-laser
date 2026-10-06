@@ -53,7 +53,7 @@ class ClassifyTests(unittest.TestCase):
         )
 
     def test_negated_sentence_attaches_nothing(self):
-        found = mc.classify(["Our process does not target medical devices."])
+        found = mc.classify(["Our process does not target medical devices."], reject_negation=True)
         self.assertEqual({}, found["market"])
 
     def test_laser_source_sentence_attaches_nothing(self):

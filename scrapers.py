@@ -117,12 +117,14 @@ from lexicon import (  # noqa: F401  (reexports pour les importateurs historique
     _quote,
     _rule_match_terms,
     _rule_matches,
+    _sentences,
     _specificity_score,
     _term_pattern,
     _term_variants,
     is_laser_the_instrument,
     is_on_topic,
     is_production,
+    labels_named_in_sentences,
 )
 from site_profiles import SITE_OVERRIDES, crawl_budget, explore_budget, get_site_profile, seed_urls
 
@@ -564,16 +566,6 @@ def _context_for_block(title: str, blocks: list[ContentBlock], index: int) -> tu
     hierarchy = (getattr(block, "h1", ""), getattr(block, "h2", ""), getattr(block, "h3", ""))
     section = " ".join(dict.fromkeys(filter(None, (*hierarchy, block.heading, block.text, block.media_context))))
     return direct, section
-
-
-def _sentences(text: str) -> list[str]:
-    """Small deterministic sentence/window splitter used for relation validation."""
-    clean = re.sub(r"\s+", " ", text or "").strip()
-    if not clean:
-        return []
-    # Semicolons and bullets are meaningful separators on product/project/publication cards.
-    parts = re.split(r"(?<=[.!?])\s+|\s*[•·▪◦]\s*|\s*;\s*", clean)
-    return [part.strip() for part in parts if len(part.strip()) >= 12]
 
 
 def _is_negated(text: str) -> bool:
@@ -2932,6 +2924,23 @@ def scrape_market(max_pages: int | None = None, actor_names: list[str] | None = 
     }
 
 
+# Les deux dimensions d'un document qui disent À QUOI sert le travail (marché, pièce) plutôt que
+# COMMENT il est fait. Lues sur le texte entier, elles prenaient l'optique de la machine pour le
+# marché de l'optique ; elles exigent depuis le 06/10/2026 une phrase qui les nomme (voir
+# lexicon.labels_named_in_sentences).
+SENTENCE_DIMENSIONS = ("market", "component")
+
+
+def document_sentence_tags(title: str, abstract: str | None, actor_name: str | None) -> dict[tuple[str, str], str]:
+    """{(dimension, libellé): phrase} pour le marché et la pièce d'un document."""
+    names = [actor_name] if actor_name else []
+    return {
+        (dimension, label): sentence
+        for dimension in SENTENCE_DIMENSIONS
+        for label, sentence in labels_named_in_sentences([title, abstract or ""], DOCUMENT_LEXICONS[dimension], names=names).items()
+    }
+
+
 def upsert_document_technology_signal(
     db, title: str, abstract: str, source_url: str, actor_name: str | None = None,
 ) -> int:
@@ -2970,7 +2979,14 @@ def upsert_document_technology_signal(
     # opération, "Texturation de surface" côté procédé) : la dimension les sépare, en base
     # comme dans les facettes.
     matched: dict[tuple[str, str], LexiconRule] = {}
+    # Marché et pièce se lisent phrase par phrase, jamais sur le texte entier (voir
+    # document_sentence_tags) : la phrase qui les nomme devient la citation.
+    sentence_quotes = document_sentence_tags(title, abstract, actor_name)
+    for dimension, label in sentence_quotes:
+        matched[(dimension, label)] = DOCUMENT_LEXICONS[dimension][label]
     for dimension, lexicon in DOCUMENT_LEXICONS.items():
+        if dimension in SENTENCE_DIMENSIONS:
+            continue
         for label, _hits in _match_all_labels(text, lexicon):
             # Même garde-fou anti-faux-positif que is_on_topic(). Le test porte sur le LIBELLÉ
             # et non sur sa dimension : depuis la scission procédé/capacité machine
@@ -3001,7 +3017,7 @@ def upsert_document_technology_signal(
         # _quote, qui renvoyait alors la plus longue phrase du texte -- une preuve ou le mot
         # justificatif n'apparait meme pas. Sans abstract le defaut ne se voyait pas, la
         # citation etant le titre de toute facon.
-        quote = _quote(text, _rule_match_terms(text, rule))
+        quote = sentence_quotes.get((dimension, axis)) or _quote(text, _rule_match_terms(text, rule))
         created, signal_id = upsert_technology_signal(
             db,
             fact_key=fact_key,

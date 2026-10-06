@@ -697,29 +697,71 @@ DOCUMENT_OPERATIONS: Lexicon = {
 # MARKETS lui-meme n'est pas touche : il sert aussi a l'extraction de faits marche, sur des
 # pages d'acteurs ou le contexte est tout autre, et le modifier reecrirait des faits deja
 # valides. Meme separation que DOCUMENT_OPERATIONS et DOCUMENT_COMPONENTS, au terme pres.
-_WEAK_DOCUMENT_MARKET_TERMS: dict[str, frozenset[str]] = {
+#
+# Resserré le 06/10/2026, après relecture à la main des 96 tags marché et 76 tags produit de la
+# page Technologie (les mêmes lexiques servent la compilation de la page Marché depuis le
+# 28/09) : « optics » et « lens » y désignaient presque toujours l'optique DE LA MACHINE
+# (« f-theta lens », « helical drilling optics », « processing optics ») -- les 24 publications
+# classées Optique l'étaient toutes par ce biais ; « photonic » seul ramenait « digital photonic
+# process chain » (le nom que Fraunhofer donne à sa chaîne de procédé laser) et « photonic
+# crystal fiber » (la fibre qui livre le faisceau) ; « quantum » ramenait « quantum efficiency »
+# et « quantum-dot-doped glass ». Le marché Optique ne s'ouvre plus qu'à des noms de PRODUIT
+# optique, Photonique qu'à des dispositifs photoniques.
+_DOCUMENT_MARKET_DROPPED: dict[str, frozenset[str]] = {
     "Spatial": frozenset({"spatial"}),
-    "Optique": frozenset({"optical"}),
+    "Optique": frozenset({"optical", "optics", "lens", "lenses"}),
+    "Photonique": frozenset({"photonic"}),
+}
+_DOCUMENT_MARKET_ADDED: dict[str, tuple[str, ...]] = {
+    "Optique": ("micro-optics", "micro-optique", "micro-optiques", "optics manufacturing", "precision optics", "optical components"),
+    "Photonique": (
+        "photonic device", "photonic devices", "photonic component", "photonic components",
+        "photonic integrated circuit", "photonic integrated circuits", "photonic chip", "photonic chips",
+        "photonic applications",
+    ),
+}
+_DOCUMENT_MARKET_EXCLUDES: dict[str, tuple[str, ...]] = {
+    "Quantum": ("quantum efficiency", "quantum dot", "quantum dots", "quantum-dot", "quantum electronics", "quantum yield", "quantum well"),
+    # Un matériau n'est pas un marché : « ablation on metallic and semiconductor materials ».
+    "Semi-conducteurs": ("semiconductor material", "semiconductor materials", "organic semiconductor", "organic semiconductors"),
+    "Photonique": ("photonic crystal fiber", "photonic crystal fibre", "photonic crystal fibers", "photonic process chain"),
 }
 DOCUMENT_MARKETS: Lexicon = {
-    label: (
-        rule
-        if label not in _WEAK_DOCUMENT_MARKET_TERMS
-        else {
-            **rule,
-            "any_of": tuple(
-                terme for terme in rule.get("any_of", ())
-                if terme not in _WEAK_DOCUMENT_MARKET_TERMS[label]
-            ),
-        }
-    )
+    label: {
+        **rule,
+        "any_of": tuple(
+            term for term in rule.get("any_of", ()) if term not in _DOCUMENT_MARKET_DROPPED.get(label, frozenset())
+        ) + _DOCUMENT_MARKET_ADDED.get(label, ()),
+        "exclude": rule.get("exclude", ()) + _DOCUMENT_MARKET_EXCLUDES.get(label, ()),
+    }
     for label, rule in MARKETS.items()
 }
 
 
 _NON_DOCUMENT_COMPONENTS = frozenset({"Composants en verre", "Substrats", "Capteurs"})
+# Deux pièces que le texte scientifique nomme pour autre chose qu'un produit fabriqué (même
+# relecture du 06/10/2026) : « electrode » y est aussi l'électrode d'un photodétecteur, d'une
+# OLED ou d'une cellule d'électrolyse, jamais une électrode de BATTERIE sans le dire ; un
+# élément optique diffractif est, six fois sur sept, l'outil qui divise le faisceau.
+_DOCUMENT_COMPONENT_GUARDS: dict[str, dict[str, tuple[str, ...]]] = {
+    "Électrodes de batteries": {
+        "requires_any": ("battery", "batteries", "batterie", "li-ion", "lithium", "energy storage"),
+    },
+    "Éléments optiques diffractifs (DOE)": {
+        # La règle d'origine attend « diffract », que la frontière de mot refuse dans
+        # « diffractive » : lue sur une phrase sans le mot laser, elle ne passait plus.
+        "requires_any": ("diffractive",),
+        "exclude": ("beamlet", "beamlets", "beam division", "beam splitting", "multi-beam", "multibeam", "parallel beams", "galvo", "imaged"),
+    },
+}
 DOCUMENT_COMPONENTS: Lexicon = {
-    label: rule for label, rule in COMPONENTS.items() if label not in _NON_DOCUMENT_COMPONENTS
+    label: {
+        **rule,
+        "requires_any": rule.get("requires_any", ()) + _DOCUMENT_COMPONENT_GUARDS.get(label, {}).get("requires_any", ()),
+        "exclude": rule.get("exclude", ()) + _DOCUMENT_COMPONENT_GUARDS.get(label, {}).get("exclude", ()),
+    }
+    for label, rule in COMPONENTS.items()
+    if label not in _NON_DOCUMENT_COMPONENTS
 }
 
 # Les sept vocabulaires sur lesquels un document est classé. L'ordre n'a aucun effet ici -- les
@@ -1019,3 +1061,97 @@ match_label_details = _match_label_details
 detect_maturity = _detect_maturity
 best_quote = _quote
 laser_match = _laser_match
+
+
+# === Marché et produit nommés dans une PHRASE ==================================================
+# Un marché ou une pièce ne se lit pas sur un texte entier : une page d'acteur est souvent une
+# liste de publications ou un menu, un résumé scientifique enchaîne dix phrases sur dix sujets.
+# Ces dimensions-là se rattachent donc phrase par phrase, et la phrase est la preuve. Partagé par
+# la page Technologie (scrapers.upsert_document_technology_signal) et la compilation de la page
+# Marché (market_compilation.py).
+def _sentences(text: str) -> list[str]:
+    """Small deterministic sentence/window splitter used for relation validation."""
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    if not clean:
+        return []
+    # Semicolons and bullets are meaningful separators on product/project/publication cards.
+    parts = re.split(r"(?<=[.!?])\s+|\s*[•·▪◦]\s*|\s*;\s*", clean)
+    return [part.strip() for part in parts if len(part.strip()) >= 12]
+
+
+# Sur une page d'acteur, une phrase plus longue que ça n'est pas une phrase : c'est un menu, une
+# liste de publications ou un tableau aplati par le crawler. Un titre ou un résumé n'a pas ce
+# défaut, et un brevet écrit volontiers une phrase de 600 caractères : aucun plafond côté
+# documents (relu le 06/10/2026 -- le plafond y faisait perdre des micro-LED et des wafers).
+OFFER_SENTENCE_MAX = 320
+DOCUMENT_SENTENCE_MAX: int | None = None
+
+# Une référence bibliographique cite un travail, elle ne décrit pas une offre : un DOI, un
+# congrès, un « [ PDF 2.2 MB ] ». Les initiales d'auteurs (« Gillner, A.: ») se lisent
+# sensibles à la casse : en IGNORECASE, « etc., » en serait une.
+_BIBLIOGRAPHIC_RE = re.compile(
+    r"doi\.org|\bdoi\b|\bet al\b|conference|congress|proceedings|\[\s*pdf|autor\*innen",
+    re.IGNORECASE,
+)
+_AUTHOR_INITIALS_RE = re.compile(r"\b[A-Z]\.[,:]\s")
+_NANOSECOND_TERMS = ("nanosecond", "nanoseconde", "nanosecondes", "ns laser", "ns-laser")
+
+
+def _sentence_is_usable(
+    sentence: str, readable: str, *, max_len: int | None, reject_bibliography: bool, reject_negation: bool,
+) -> bool:
+    if max_len is not None and len(sentence) > max_len:
+        return False
+    if reject_bibliography and (_BIBLIOGRAPHIC_RE.search(sentence) or _AUTHOR_INITIALS_RE.search(sentence)):
+        return False
+    norm = _normalize_text(readable)
+    # Négation seulement, pas le contraste (« conventional », « classic ») : qualifier la
+    # méthode concurrente ne change pas le marché nommé dans la même phrase. Et seulement sur
+    # une offre (« we do not machine stents ») : dans un résumé, la négation porte sur un
+    # résultat (« surfaces sometimes do not meet the requirements » de l'outillage de moule),
+    # jamais sur le marché qu'elle nomme.
+    if reject_negation and any(_contains_term_normalized(norm, cue) for cue in NEGATION_CUES):
+        return False
+    # La phrase parle du laser qu'on construit, pas de ce qu'on en fait -- plus strict que
+    # is_laser_the_source : ici un procédé nommé ne la sauve pas, on y lit un marché.
+    if any(_contains_term_normalized(norm, cue) for cue in LASER_AS_SOURCE_CUES):
+        return False
+    if any(_contains_term_normalized(norm, term) for term in _NANOSECOND_TERMS) and not _laser_match(readable):
+        return False
+    return True
+
+
+def labels_named_in_sentences(
+    texts: list[str],
+    lexicon: Lexicon,
+    *,
+    names: list[str] | None = None,
+    operation_rule: LexiconRule | None = None,
+    max_len: int | None = DOCUMENT_SENTENCE_MAX,
+    reject_bibliography: bool = False,
+    reject_negation: bool = False,
+) -> dict[str, str]:
+    """Chaque libellé de `lexicon` qu'une phrase de `texts` nomme, avec la PREMIÈRE phrase qui
+    le porte, telle qu'écrite par la source.
+
+    `names` (acteurs) sont retirés avant lecture : « Pulsar Photonics » n'est pas le marché de
+    la photonique. `operation_rule`, quand il est donné, exige que la phrase nomme aussi
+    l'opération : une page qui décrit six prestations ne rattache à la découpe que la phrase
+    qui parle de découpe.
+    """
+    found: dict[str, str] = {}
+    for text in texts:
+        for sentence in _sentences(text or ""):
+            readable = sentence
+            for name in names or []:
+                if name:
+                    readable = re.sub(re.escape(name), " ", readable, flags=re.IGNORECASE)
+            if operation_rule and not _rule_matches(readable, operation_rule):
+                continue
+            if not _sentence_is_usable(
+                sentence, readable, max_len=max_len, reject_bibliography=reject_bibliography, reject_negation=reject_negation,
+            ):
+                continue
+            for label, _hits in _match_all_labels(readable, lexicon):
+                found.setdefault(label, sentence)
+    return found
