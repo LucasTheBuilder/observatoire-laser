@@ -1129,8 +1129,9 @@ function renderOffers() {
   const demonstrated = offers.filter(row => row.evidence_type === "proof").length;
   const claimed = offers.filter(row => row.evidence_type === "claim").length;
   // OPÉRATIONS remplace l'ancien « EN PRODUCTION » : sur les 55 capacités du 29/09/2026, 38
-  // portent « Maturité industrielle non déterminée », et la note « 3 en amont » laissait lire
-  // 11 + 3 comme la totalité. La maturité reste une facette ; le bandeau dit ce qui est couvert.
+  // portaient « Maturité industrielle non déterminée », et la note « 3 en amont » laissait lire
+  // 11 + 3 comme la totalité. La maturité a depuis été retirée du marché (2026-10-06) : elle
+  // n'est plus ni une facette ni une colonne, le bandeau dit ce qui est couvert.
   const actorsByOperation = new Map();
   for (const row of offers) {
     const operation = normalizedOperation(row);
@@ -1159,7 +1160,7 @@ function renderOffers() {
       <div>
         <p class="ex-eyebrow">VEILLE CONCURRENTIELLE</p>
         <h1>Offres &amp; capacités</h1>
-        <p class="ex-lede">Prestations, procédés et savoir-faire détectés chez les acteurs suivis. Les facettes croisent famille, opération, matériau, procédé et maturité. Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.</p>
+        <p class="ex-lede">Prestations, procédés et savoir-faire détectés chez les acteurs suivis. Les facettes croisent famille, opération, matériau, procédé et nature de la preuve. Cette vue n’invente pas de marché lorsqu’une page décrit uniquement une capacité technique.</p>
       </div>
       <div class="ex-head-actions">
         <button type="button" class="ex-btn" data-of-export>↓ Exporter CSV</button>
@@ -1931,7 +1932,7 @@ function renderTechCorpus() {
   // 91 lignes sur 98 tombaient dans "non déterminée" ou "non qualifiée", parce que
   // MATURITY_RULES cherche "ligne pilote" ou "production en série" -- des mots qu'un titre de
   // publication n'emploie jamais. Remplacées par deux mesures que le corpus porte vraiment.
-  // (La maturité du MARCHÉ, elle, reste : autre mécanisme, alimenté par market.db.)
+  // (La maturité du MARCHÉ a été retirée à son tour le 2026-10-06, pour la même raison.)
   // Compte les libellés distincts sur TOUTES les dimensions, pas seulement le procédé : depuis
   // la scission du 10/09/2026, ce dernier ne porte plus que 4 libellés, et un KPI "AXES SUIVIS"
   // à 4 aurait laissé croire que le classement s'était appauvri alors qu'il s'est étoffé.
