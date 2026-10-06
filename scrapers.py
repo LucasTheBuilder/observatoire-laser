@@ -7,7 +7,7 @@ de publications scientifiques. C'est le plus gros fichier du projet ; il se lit 
    correspondance texte -> libellé canonique, qui remplacent un vrai NLP par une approche
    déterministe et auditable (chaque libellé retenu est traçable à un terme précis du texte).
 3. Moteur de correspondance générique sur ces lexiques (_match_label, _rule_match_terms,
-   _laser_match, _detect_maturity...) et de validation de "relation" entre marché/composant/
+   _laser_match, is_production...) et de validation de "relation" entre marché/composant/
    opération dans un même passage de texte (_relation_evidence) pour éviter de recombiner à
    tort des informations qui viennent de deux endroits différents de la page.
 4. Extraction des candidats à partir des blocs de contenu d'une page déjà parsée par
@@ -122,6 +122,7 @@ from lexicon import (  # noqa: F401  (reexports pour les importateurs historique
     _term_variants,
     is_laser_the_instrument,
     is_on_topic,
+    is_production,
 )
 from site_profiles import SITE_OVERRIDES, crawl_budget, explore_budget, get_site_profile, seed_urls
 
@@ -476,8 +477,6 @@ def _compat_terms(rules: Lexicon) -> tuple[str, ...]:
     return tuple(dict.fromkeys(terms))
 
 LASER_TERMS = _compat_terms(LASER_RULES)
-INDUSTRIAL_TERMS = MATURITY_RULES[0][2]
-RADAR_TERMS = tuple(term for _, bucket, terms in MATURITY_RULES[1:] if bucket == "radar" for term in terms)
 
 
 
@@ -1029,17 +1028,15 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
     material, material_hits = _match_label_details(section, MATERIALS)
     performance, performance_hits = _match_label_details(section, PERFORMANCE_TERMS)
 
-    maturity_class, maturity = _detect_maturity(relation_text + " " + section)
-    bucket = "existing" if maturity_class == "existing" else ("pending" if is_partial else "radar")
-    if maturity_class == "unknown":
-        _inc_diagnostic(diagnostics, "maturity_unknown")
+    # Un seul test de production, plus d'échelle de maturité : voir lexicon.is_production. Le
+    # bonus de confiance de +0.04 qui récompensait une maturité "connue" disparaît avec elle --
+    # il notait surtout la présence d'un mot de vocabulaire, pas la solidité du fait.
+    bucket = "existing" if is_production(relation_text + " " + section) else ("pending" if is_partial else "radar")
     direct_laser = _laser_match(relation_text)
     confidence_by_strength = {"direct": 0.78, "structured": 0.74, "contextual": 0.70, "page_context": 0.66, "partial": 0.55}
     confidence = confidence_by_strength.get(relation_strength, 0.70)
     confidence += 0.05 if direct_laser else 0.0
     confidence += 0.02 * sum(value is not None for value in (process, architecture, material, performance))
-    if maturity_class != "unknown":
-        confidence += 0.04
     confidence = max(0.45 if is_partial else 0.70, min(0.98, confidence))
 
     # Quote the relation itself. This makes the proof shown in the UI auditable and prevents a
@@ -1084,13 +1081,7 @@ def _candidate(actor_name: str, url: str, title: str, block: ContentBlock, mode:
         "architecture": architecture,
         "material": material,
         "performance": performance,
-        "maturity": maturity,
-        "maturity_class": maturity_class,
         "fact_status": "partial" if is_partial else "validated",
-        # Chantier 4 : industrial_stage n'est plus qu'une étiquette de maturité -- process/
-        # architecture/material/performance vivent déjà dans leurs propres colonnes (voir
-        # db._migrate_industrial_stage_concatenation pour le nettoyage des lignes existantes).
-        "stage": maturity[:240],
         "url": url,
         "title": title,
         "quote": quote,
@@ -1138,7 +1129,6 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
     processes = _match_all_labels(section, TECHNOLOGY_AXES)
     materials = _match_all_labels(section, MATERIALS)
     performances = _match_all_labels(section, PERFORMANCE_TERMS)
-    bucket, maturity = _detect_maturity(section)
 
     # Offer pages can be valuable even without a market/component. On generic pages, demand explicit capability evidence.
     page_offer_type = page_type if page_type in {"service", "capability", "technology", "product"} else "capability"
@@ -1187,8 +1177,6 @@ def _offer_candidates(actor_name: str, url: str, title: str, block: ContentBlock
             "process": process,
             "material": material,
             "performance": performance,
-            "maturity": maturity,
-            "stage": maturity,
             "page_type": page_type,
             "url": url,
             "title": title,
@@ -1370,7 +1358,6 @@ def _ai_candidates(
             "markets": list(MARKETS), "components": list(COMPONENTS), "operations": list(OPERATIONS),
             "process_technologies": list(TECHNOLOGY_AXES), "application_architectures": list(APPLICATION_ARCHITECTURES),
             "materials": list(MATERIALS), "performance": list(PERFORMANCE_TERMS),
-            "maturity": [stage for stage, _, _ in MATURITY_RULES],
         },
         "blocks": [dict(index=i, context=section[:2500], **block_payload(block)) for i, block, section in relevant],
     }, ensure_ascii=False)
@@ -1380,11 +1367,11 @@ def _ai_candidates(
         "si le contenu correspond clairement. Si le contenu décrit une application, un composant ou une opération réels "
         "mais qui ne correspond à AUCUN libellé connu, propose un libellé court et précis en français plutôt que de "
         "forcer une correspondance approximative ou d'inventer une valeur non justifiée par le texte. "
-        "Pour process_technology, application_architecture, material, performance et maturity, utilise uniquement les "
+        "Pour process_technology, application_architecture, material et performance, utilise uniquement les "
         "labels autorisés listés. Ne remplace jamais un composant manquant par un matériau, une architecture ou un "
         "procédé, et ne remplace jamais une opération manquante par un procédé. "
         "Réponds en JSON avec facts contenant block_index, market, component, operation, process_technology, "
-        "application_architecture, material, performance, maturity, bucket, stage, quote, confidence. "
+        "application_architecture, material, performance, quote, confidence. "
         "quote doit être une sous-chaîne exacte du bloc courant."
     )
     try:
@@ -1410,7 +1397,6 @@ def _ai_candidates(
         "process_technology": set(TECHNOLOGY_AXES), "application_architecture": set(APPLICATION_ARCHITECTURES),
         "material": set(MATERIALS), "performance": set(PERFORMANCE_TERMS),
     }
-    maturity_to_bucket = {stage: bucket for stage, bucket, _ in MATURITY_RULES}
     mode = _ai_mode_label(ollama)
     candidates: list[dict] = []
 
@@ -1525,17 +1511,14 @@ def _ai_candidates(
             _inc_diagnostic(diagnostics, "ai_fact_lexicon_confirmed")
         _inc_diagnostic(diagnostics, "ai_fact_validated")
 
-        maturity = _validate_ai_value(fact.get("maturity"), set(maturity_to_bucket))
-        maturity_class = maturity_to_bucket.get(maturity, "unknown")
-        bucket = "existing" if maturity_class == "existing" else "radar"
+        # Le bucket vient du TEXTE, plus d'un niveau de maturité que le modèle devait choisir :
+        # on ne lui demandait finalement que de reconnaître un vocabulaire de production, ce
+        # qu'un test déterministe fait sans risque d'hallucination (voir lexicon.is_production).
+        bucket = "existing" if is_production(quote) else "radar"
         market, component, operation = resolved["market"], resolved["component"], resolved["operation"]
         assert market is not None and component is not None and operation is not None  # guaranteed by all(resolved.values()) above
         fact_key = market_fact_key(actor_name, bucket, market, component, operation)
         app_key = application_key(actor_name, market, component, operation)
-        # Chantier 4 : ne plus rattacher process/architecture/material/performance au texte de
-        # stage -- ils vivent déjà dans leurs propres colonnes (voir le dict candidat plus bas).
-        # `stage` reste la description de maturité proposée par le modèle telle quelle.
-        stage = str(fact.get("stage", maturity if maturity != "Non identifié" else "Maturité à confirmer")).strip()
 
         candidates.append({
             "kind": "market_application",
@@ -1548,10 +1531,7 @@ def _ai_candidates(
             "architecture": None if fields["application_architecture"] == "Non identifié" else fields["application_architecture"],
             "material": None if fields["material"] == "Non identifié" else fields["material"],
             "performance": None if fields["performance"] == "Non identifié" else fields["performance"],
-            "maturity": maturity if maturity != "Non identifié" else "Maturité à confirmer",
-            "maturity_class": maturity_class,
             "fact_status": "review",
-            "stage": stage[:240],
             "url": url,
             "title": title,
             "quote": quote[:700],
@@ -2517,11 +2497,11 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
             # re-rejeter indéfiniment. Tous les autres champs restent rafraîchis : rejeter un
             # fait ne fige pas sa citation ni sa source, ça fige la DÉCISION.
             db.execute(
-                """UPDATE evidence SET industrial_stage=?,source_url=?,source_title=?,source_date=COALESCE(?,source_date),
+                """UPDATE evidence SET source_url=?,source_title=?,source_date=COALESCE(?,source_date),
                           quote=?,is_verbatim=?,evidence_type=COALESCE(?,evidence_type),field_confidence=?,
                           laser_process=COALESCE(?,laser_process),material=COALESCE(?,material),performance=COALESCE(?,performance),
                           architecture=COALESCE(?,architecture),
-                          maturity_level=COALESCE(?,maturity_level),relation_strength=COALESCE(?,relation_strength),source_role=COALESCE(?,source_role),
+                          relation_strength=COALESCE(?,relation_strength),source_role=COALESCE(?,source_role),
                           date_confidence=COALESCE(?,date_confidence),is_backfill=COALESCE(?,is_backfill),
                           match_terms=COALESCE(?,match_terms),
                           bucket=?,
@@ -2529,10 +2509,10 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
                           review_status=CASE WHEN reviewed_at IS NULL THEN ? ELSE review_status END,
                           updated_at=? WHERE id=?""",
                 (
-                    candidate["stage"], candidate["url"], candidate["title"], next_source_date,
+                    candidate["url"], candidate["title"], next_source_date,
                     candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), candidate["confidence"],
                     candidate.get("process"), candidate.get("material"), candidate.get("performance"),
-                    candidate.get("architecture"), candidate.get("maturity"),
+                    candidate.get("architecture"),
                     candidate.get("relation_strength"), candidate.get("source_role"),
                     next_date_confidence, next_is_backfill, _match_terms_json(candidate), effective_bucket,
                     candidate.get("fact_status", "validated"), "accepted" if candidate.get("fact_status") == "validated" else "review",
@@ -2548,19 +2528,19 @@ def _upsert_market_candidate(db, candidate: dict) -> tuple[int, int]:
         is_backfill = compute_is_backfill(stamp, candidate.get("source_date"), candidate.get("date_confidence"))
         evidence_id = db.execute(
             """INSERT INTO evidence(
-                   actor_name,bucket,market,component,operation,industrial_stage,source_url,source_title,source_date,
+                   actor_name,bucket,market,component,operation,source_url,source_title,source_date,
                    quote,is_verbatim,evidence_type,source_group,date_confidence,is_backfill,
                    fingerprint,fact_key,application_key,evidence_kind,language,review_status,created_at,updated_at,block_heading,block_path,
-                   extraction_mode,field_confidence,laser_process,material,performance,architecture,maturity_level,relation_strength,relation_evidence,source_role,fact_status,match_terms
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   extraction_mode,field_confidence,laser_process,material,performance,architecture,relation_strength,relation_evidence,source_role,fact_status,match_terms
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'market_application',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 candidate["actor"], candidate["bucket"], candidate["market"], candidate["component"], candidate["operation"],
-                candidate["stage"], candidate["url"], candidate["title"], candidate.get("source_date"),
+                candidate["url"], candidate["title"], candidate.get("source_date"),
                 candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), fact_key,
                 candidate.get("date_confidence"), is_backfill,
                 candidate["fingerprint"], fact_key, app_key, language_from_url(candidate["url"]), review_status, stamp, stamp,
                 candidate["block_heading"], candidate["block_path"], candidate["mode"], candidate["confidence"],
-                candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("architecture"), candidate.get("maturity"),
+                candidate.get("process"), candidate.get("material"), candidate.get("performance"), candidate.get("architecture"),
                 candidate.get("relation_strength"), candidate.get("relation_evidence"), candidate.get("source_role"), fact_status,
                 _match_terms_json(candidate),
             ),
@@ -2677,14 +2657,14 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
                 next_source_date = None
                 next_is_backfill = None
             db.execute(
-                """UPDATE offers SET industrial_stage=?,source_url=?,source_title=?,source_date=COALESCE(?,source_date),
+                """UPDATE offers SET source_url=?,source_title=?,source_date=COALESCE(?,source_date),
                           quote=?,is_verbatim=?,evidence_type=COALESCE(?,evidence_type),field_confidence=?,
                           material=COALESCE(?,material),performance=COALESCE(?,performance),
                           date_confidence=COALESCE(?,date_confidence),is_backfill=COALESCE(?,is_backfill),
                           match_terms=COALESCE(?,match_terms),
                           updated_at=? WHERE id=?""",
                 (
-                    candidate["stage"], candidate["url"], candidate["title"], next_source_date,
+                    candidate["url"], candidate["title"], next_source_date,
                     candidate["quote"], int(candidate.get("is_verbatim", True)), candidate.get("evidence_type"), candidate["confidence"],
                     candidate.get("material"), candidate.get("performance"),
                     next_date_confidence, next_is_backfill, _match_terms_json(candidate), stamp, offer_id,
@@ -2696,13 +2676,13 @@ def _upsert_offer_candidate(db, candidate: dict) -> tuple[int, int]:
         is_backfill = compute_is_backfill(stamp, candidate.get("source_date"), candidate.get("date_confidence"))
         offer_id = db.execute(
             """INSERT INTO offers(
-                   actor_name,offer_type,capability,operation,laser_process,material,performance,industrial_stage,page_type,
+                   actor_name,offer_type,capability,operation,laser_process,material,performance,page_type,
                    source_url,source_title,source_date,quote,is_verbatim,evidence_type,date_confidence,is_backfill,
                    fact_key,fingerprint,review_status,field_confidence,created_at,updated_at,match_terms
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 candidate["actor"], candidate["offer_type"], candidate["capability"], candidate.get("operation"), candidate.get("process"),
-                candidate.get("material"), candidate.get("performance"), candidate["stage"], candidate["page_type"], candidate["url"],
+                candidate.get("material"), candidate.get("performance"), candidate["page_type"], candidate["url"],
                 candidate["title"], candidate.get("source_date"), candidate["quote"], int(candidate.get("is_verbatim", True)),
                 candidate.get("evidence_type"), candidate.get("date_confidence"), is_backfill,
                 candidate["fact_key"], candidate["fingerprint"], review_status, candidate["confidence"], stamp, stamp,

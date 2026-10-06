@@ -438,13 +438,25 @@ MARKET_SYNONYM_CLUSTERS = (
     frozenset({"Optique", "Photonique"}),
 )
 
-# Niveaux de maturité industrielle, du plus mature (Production) au moins mature (R&D) --
+# Termes qui attestent une PRODUCTION réelle, par opposition à une intention ou un essai. C'est
+# la seule distinction de maturité que le chemin marché conserve : un fait est "existing" si
+# l'un de ces termes apparaît, "radar" sinon (voir is_production ci-dessous).
+PRODUCTION_TERMS = ("mass production", "volume production", "series production", "serial production", "production industrielle", "production en série", "production line", "manufacturing line", "high-volume manufacturing", "commercial production", "customer production", "contract manufacturing", "job shop", "manufacturing services", "small series", "small batch", "lohnfertigung", "auftragsfertigung", "lavorazione conto terzi", "conto terzi", "fabricación por contrato", "fabricacion por contrato", "subcontratación", "subcontratacion")
+
+# Échelle de maturité à cinq niveaux, du plus mature (Production) au moins mature (R&D) --
 # _detect_maturity() parcourt cette liste DANS L'ORDRE et retourne le premier stage dont un
 # terme apparaît dans le texte, donc l'ordre encode une priorité : si un texte mentionne à la
-# fois "prototype" et "production en série", "Production" gagne. Chaque règle associe un
-# stage précis à un bucket large ("existing" = déjà en production, "radar" = pas encore).
+# fois "prototype" et "production en série", "Production" gagne.
+#
+# RÉSERVÉE AUX SIGNAUX TECHNOLOGIQUES (technology_signals.maturity_stage, où le stage EST l'axe
+# lu par la page Technologie). Retirée du chemin MARCHÉ le 2026-10-06 : 180 des 258 faits
+# portaient "Maturité industrielle non déterminée" ou NULL, l'étiquette s'affichait pourtant sur
+# chaque carte de revue, et les deux tiers des faits classés "radar" y tombaient par simple
+# ABSENCE de détection plutôt que par un signal de R&D réel -- une opposition existant/radar en
+# partie fictive. Ne pas la recâbler sur evidence/offers : le marché ne connaît plus que
+# is_production().
 MATURITY_RULES = (
-    ("Production", "existing", ("mass production", "volume production", "series production", "serial production", "production industrielle", "production en série", "production line", "manufacturing line", "high-volume manufacturing", "commercial production", "customer production", "contract manufacturing", "job shop", "manufacturing services", "small series", "small batch", "lohnfertigung", "auftragsfertigung", "lavorazione conto terzi", "conto terzi", "fabricación por contrato", "fabricacion por contrato", "subcontratación", "subcontratacion")),
+    ("Production", "existing", PRODUCTION_TERMS),
     ("Industrialisation", "radar", ("industrialization", "industrialisation", "industrial implementation", "industrialiser", "to industrialize", "scale-up", "scaling-up", "production-ready", "manufacturing integration")),
     ("Pré-industrialisation", "radar", ("pilot line", "ligne pilote", "pilot production", "pre-series", "présérie", "pre-production", "qualification", "process qualification", "production trial")),
     ("Prototype", "radar", ("prototype", "prototyping", "demonstrator", "technology demonstrator")),
@@ -938,11 +950,27 @@ def is_laser_the_instrument(text: str) -> bool:
 
 
 def _detect_maturity(text: str) -> tuple[str, str]:
-    """Return the most mature explicit stage, using boundary-safe matching."""
+    """Return the most mature explicit stage, using boundary-safe matching.
+
+    Signaux technologiques uniquement -- voir MATURITY_RULES pour pourquoi le chemin marché ne
+    l'appelle plus.
+    """
     for stage, bucket, terms in MATURITY_RULES:
         if any(_contains_term(text, term) for term in terms):
             return bucket, stage
     return "unknown", "Maturité industrielle non déterminée"
+
+
+def is_production(text: str) -> bool:
+    """Le texte atteste-t-il une production réelle (par opposition à une intention) ?
+
+    Remplace _detect_maturity sur le chemin marché. Renvoie un booléen et non un niveau : le
+    besoin était de séparer "déjà en production" de "pas encore", pas de graduer cinq étapes
+    dont quatre n'étaient jamais détectées (voir MATURITY_RULES). Une absence de terme n'est
+    donc plus une maturité "inconnue" à afficher, juste un fait qui n'a pas prouvé sa mise en
+    production.
+    """
+    return any(_contains_term(text, term) for term in PRODUCTION_TERMS)
 
 _QUOTE_MAX = 700
 
