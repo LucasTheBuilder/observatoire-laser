@@ -81,7 +81,7 @@
   .signal-item{align-items:flex-start}
   .signal-item strong{white-space:normal}
 }
-/* Marché v2 (page de travail) : les cartes y sont la facette MARCHÉ. */
+/* Page Marché : les cartes y sont la facette MARCHÉ. */
 .mv-cards{grid-template-columns:repeat(auto-fill,minmax(205px,1fr));gap:10px;margin-bottom:26px}
 .mv-cards .market-fam-card{display:flex;flex-direction:column;justify-content:flex-start;padding:12px 14px;box-shadow:none}
 .mv-cards .market-fam-card header{gap:9px;margin-bottom:8px}

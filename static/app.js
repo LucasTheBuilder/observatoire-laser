@@ -44,8 +44,6 @@ const state = {
   offerCoverageOpen: false,
   namedOffers: [],
   offersCoverage: [],
-  marketDrill: null,
-  marketProduct: null,
   mvQuery: "",
   mvFacets: {kind: [], market: [], product: [], operation: [], actor: []},
   mvExpanded: [],
@@ -168,9 +166,6 @@ function mcEntries() {
   ];
 }
 
-function mcMatches(entry, market, product) {
-  return (!market || entry.markets.includes(market)) && (!product || entry.products.includes(product));
-}
 
 function mcEmptyCounts() {
   return {fait: 0, offre: 0, tech: 0};
@@ -202,9 +197,6 @@ function mcGroups(entries) {
   return {markets: [...markets.entries()].sort(byTotal), orphans: [...orphans.entries()].sort(byTotal)};
 }
 
-function mcPlural(count, one, many) {
-  return `${count} ${count > 1 ? many : one}`;
-}
 
 function mcCountsLine(counts) {
   return Object.entries(MC_KIND_WORDS)
@@ -213,85 +205,12 @@ function mcCountsLine(counts) {
     .join(" · ");
 }
 
-function mcMarketCards(groups) {
-  if (!groups.length) return `<div class="empty">Aucune entrée ne nomme encore de marché.</div>`;
-  return `<div class="market-fam-grid">${groups.map(([market, bucket]) => {
-    const chips = [...bucket.products.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
-      .map(([label, count]) => `<span class="subtheme-chip">${esc(label)}<b>${count}</b></span>`).join("");
-    return `<button class="market-fam-card market-fam-card-link" data-drill-market="${esc(market)}">
-      <header>${marketIcon(market)}<div><h3>${esc(market)}</h3><b>${bucket.total}</b></div></header>
-      <p class="mc-counts">${esc(mcCountsLine(bucket.counts))}</p>
-      ${intensityBadge(market)}<div class="subtheme-chips">${chips}</div></button>`;
-  }).join("")}</div>`;
-}
 
-function mcProductCards(groups) {
-  return `<div class="market-fam-grid">${groups.map(([product, bucket]) => `
-    <button class="market-fam-card market-fam-card-link" data-drill-product="${esc(product)}">
-      <header><div><h3>${esc(product)}</h3><b>${bucket.total}</b></div></header>
-      <p class="mc-counts">${esc(mcCountsLine(bucket.counts))}</p></button>`).join("")}</div>`;
-}
 
-// Fil d'Ariane à deux niveaux au plus : marché, puis produit. Un produit sans marché nommé
-// s'ouvre directement sous « Tous les marchés ».
-function marketBreadcrumb(market, product) {
-  const crumbs = [`<button class="drill-crumb" data-drill-market="">Tous les marchés</button>`];
-  if (market) {
-    crumbs.push(product
-      ? `<button class="drill-crumb" data-drill-market="${esc(market)}">${esc(market)}</button>`
-      : `<span class="drill-crumb current">${esc(market)}</span>`);
-  }
-  if (product) crumbs.push(`<span class="drill-crumb current">${esc(product)}</span>`);
-  return `<nav class="drill-breadcrumb" tabindex="-1">${crumbs.join(`<span class="drill-sep">›</span>`)}</nav>`;
-}
 
-// Les produits du marché ouvert, pour resserrer encore la lecture. Seuls ceux qu'une entrée de
-// CE marché nomme -- jamais la liste complète du lexique.
-function mcProductFilter(entries, market, product) {
-  const counts = new Map();
-  for (const entry of entries) {
-    if (!entry.markets.includes(market)) continue;
-    for (const label of entry.products) counts.set(label, (counts.get(label) || 0) + 1);
-  }
-  if (!counts.size) return "";
-  const chips = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([label, count]) => `<button class="mc-product-chip ${label === product ? "active" : ""}" data-drill-product="${esc(label)}">${esc(label)}<b>${count}</b></button>`).join("");
-  return `<div class="mc-product-filter"><span>Produits nommés</span>
-    <button class="mc-product-chip ${product ? "" : "active"}" data-drill-product="">Tous</button>${chips}</div>`;
-}
 
-function mcTags(row, {hideMarket, hideProduct} = {}) {
-  return [
-    ...row.markets.filter(label => label !== hideMarket).map(label => `<span class="mc-tag market">${esc(label)}</span>`),
-    ...row.products.filter(label => label !== hideProduct).map(label => `<span class="mc-tag">${esc(label)}</span>`),
-  ].join("");
-}
 
-function mcOffersTable(rows, context) {
-  if (!rows.length) return `<div class="empty">Aucune offre acceptée ne nomme ce marché ou ce produit.</div>`;
-  return `<div class="mc-table">
-    <div class="mc-head"><span>Acteur</span><span>Capacité</span><span>Marchés · produits nommés</span><span>Preuve</span></div>
-    ${rows.map(row => `<div class="mc-row">
-      <strong>${esc(row.actor)}</strong>
-      <div>${esc(row.capability || "")}${row.operation ? `<small>${esc(normalizedOperation(row))}</small>` : ""}</div>
-      <div class="mc-tags">${mcTags(row, context)}</div>
-      <button class="proof-pill" data-mc-proof="${esc(row.uid)}" title="Voir la phrase de la source">${row.proofs.length}</button>
-    </div>`).join("")}
-  </div>`;
-}
 
-function mcTechTable(rows, context) {
-  if (!rows.length) return `<div class="empty">Aucune publication ni aucun projet ne nomme ce marché ou ce produit.</div>`;
-  return `<div class="mc-table">
-    <div class="mc-head"><span>Type</span><span>Titre</span><span>Marchés · produits nommés</span><span>Preuve</span></div>
-    ${rows.map(row => `<div class="mc-row">
-      <span class="mc-kind">${esc(MC_TECH_KINDS[row.kind] || row.kind)}${row.date ? `<small>${esc(String(row.date).slice(0, 4))}</small>` : ""}</span>
-      <div><a href="${esc(row.source_url || "#")}" target="_blank" rel="noopener">${esc(row.title || "Sans titre")}</a>${row.actors.length ? `<small>${esc(row.actors.join(", "))}</small>` : ""}</div>
-      <div class="mc-tags">${mcTags(row, context)}</div>
-      <button class="proof-pill" data-mc-proof="${esc(row.uid)}" title="Voir la phrase de la source">${row.proofs.length}</button>
-    </div>`).join("")}
-  </div>`;
-}
 
 // La preuve d'un rattachement est la phrase elle-même : c'est elle qui nomme le marché ou le
 // produit, et c'est tout ce que le rattachement affirme.
@@ -537,75 +456,12 @@ function demandSignalsPanel() {
   </section>`;
 }
 
-function renderMarket() {
-  const entries = mcEntries();
-  const market = state.marketDrill;
-  const product = state.marketProduct;
-  const visible = entries.filter(entry => mcMatches(entry, market, product));
-  const facts = visible.filter(entry => entry.kind === "fait").map(entry => entry.row);
-  const existingRows = facts.filter(row => row.bucket === "existing");
-  const radarRows = facts.filter(row => row.bucket === "radar");
-  const offerRows = visible.filter(entry => entry.kind === "offre").map(entry => entry.row);
-  const techRows = visible.filter(entry => entry.kind === "tech").map(entry => entry.row);
-  const context = {hideMarket: market, hideProduct: product};
-  const scope = product || market;
 
-  // Même idée que Offres & capacités : les cartes sont l'entrée ; une fois un marché ou un
-  // produit choisi, elles laissent la place au fil d'Ariane et tout ce qui suit se resserre.
-  let section01;
-  if (scope) {
-    section01 = marketBreadcrumb(market, product) + (market ? mcProductFilter(entries, market, product) : "");
-  } else {
-    const groups = mcGroups(entries);
-    section01 = `<div class="section-title"><div><span>01</span><div><h2>Lecture par marché</h2><p>Chaque marché nommé par un fait, une offre ou un document technique, avec les produits que ces mêmes sources nomment. Cliquer un marché resserre toute la page.</p></div></div><b>${mcPlural(groups.markets.length, "marché", "marchés")}</b></div>${mcMarketCards(groups.markets)}
-      ${groups.orphans.length ? `<div class="section-title"><div><span>01·b</span><div><h2>Produits sans marché nommé</h2><p>La source nomme la pièce mais aucun marché : elle reste rangée sous son produit, jamais sous un marché déduit.</p></div></div><b>${mcPlural(groups.orphans.length, "produit", "produits")}</b></div>${mcProductCards(groups.orphans)}` : ""}`;
-  }
-
-  content.innerHTML = header(
-    "Lecture marché & produit",
-    "Applications femtoseconde",
-    "Les faits où marché, pièce et opération laser sont reliés, plus les offres et les travaux techniques dont une phrase de la source nomme un marché ou un produit. Rien n’est rattaché par déduction.",
-    `<div class="header-actions"><button class="export-btn" data-export="market">⬇ Exporter CSV</button><button class="primary" data-run="market">↻ Actualiser l’analyse</button></div>`
-  ) +
-  `<section id="market-drill-root">${section01}</section>
-   <section><div class="section-title"><div><span>02</span><div><h2>Applications industrielles existantes</h2><p>Production, prestation ou qualification explicitement démontrée.</p></div></div><b>${mcPlural(existingRows.length, "fait", "faits")}</b></div>${evidenceTable(existingRows, {hideMarketColumn: !!market, emptyMessage: scope ? `Aucune application existante documentée pour ${scope}.` : undefined})}</section>
-   <section><div class="section-title"><div><span>03</span><div><h2>Radar applications et besoins</h2><p>Applications documentées dont l’industrialisation reste à confirmer.</p></div></div><b>${mcPlural(radarRows.length, "fait", "faits")}</b></div>${evidenceTable(radarRows, {hideMarketColumn: !!market, emptyMessage: scope ? `Aucune application radar documentée pour ${scope}.` : undefined})}</section>
-   <section><div class="section-title"><div><span>04</span><div><h2>Offres & capacités</h2><p>Capacités acceptées dont une phrase de la source nomme un marché ou un produit. Les autres restent sur la page Offres & capacités.</p></div></div><b>${mcPlural(offerRows.length, "offre", "offres")}</b></div>${mcOffersTable(offerRows, context)}</section>
-   <section><div class="section-title"><div><span>05</span><div><h2>Technologie</h2><p>Publications et projets du corpus Technologie laser dont le titre, le résumé ou l’objet nomme un marché ou un produit.</p></div></div><b>${mcPlural(techRows.length, "document", "documents")}</b></div>${mcTechTable(techRows, context)}</section>
-   ${demandSignalsPanel()}
-   <section>${tcSourcesBlock(state.marketCompilation?.sources || [], MC_SOURCE_ROLES)}</section>`;
-  wireActions();
-  document.querySelectorAll("[data-drill-market]").forEach(el => el.addEventListener("click", () => {
-    state.marketDrill = el.dataset.drillMarket || null;
-    state.marketProduct = null;
-    renderMarket();
-  }));
-  document.querySelectorAll("[data-drill-product]").forEach(el => el.addEventListener("click", () => {
-    state.marketProduct = el.dataset.drillProduct || null;
-    renderMarket();
-  }));
-  document.querySelectorAll("[data-mc-proof]").forEach(el => el.addEventListener("click", () => showMarketCompilationProof(el.dataset.mcProof)));
-  const exportBtn = document.querySelector('[data-export="market"]');
-  if (exportBtn) exportBtn.addEventListener("click", () => downloadCSV("marche.csv", visible.map(entry => ({
-    type: entry.kind === "fait" ? (entry.row.bucket === "existing" ? "Fait existant" : "Fait radar") : entry.kind === "offre" ? "Offre" : (MC_TECH_KINDS[entry.row.kind] || "Document"),
-    markets: entry.markets.join(" | "),
-    products: entry.products.join(" | "),
-    actor: entry.kind === "tech" ? entry.row.actors.join(" | ") : entry.row.actor_name || entry.row.actor || "",
-    label: entry.kind === "fait" ? entry.row.operation : entry.kind === "offre" ? entry.row.capability : entry.row.title,
-    source: entry.kind === "fait" ? "" : entry.row.source_url || "",
-  })), [
-    {key: "type", label: "Type"}, {key: "markets", label: "Marché(s)"}, {key: "products", label: "Produit(s)"},
-    {key: "actor", label: "Acteur(s)"}, {key: "label", label: "Opération / capacité / titre"}, {key: "source", label: "Source"},
-  ]));
-}
-
-// --- Marché v2 (page de travail) ------------------------------------------------------------
-// Même corpus que renderMarket (mcEntries : faits, offres et documents techniques rattachés à un
-// marché ou un produit), lu avec le langage explorateur de Technologie laser et Offres &
-// capacités. Les cartes « Lecture par marché » restent l'entrée, mais deviennent la facette
-// MARCHÉ affichée autrement -- comme la bande des opérations d'Offres & capacités -- au lieu
-// d'ouvrir un fil d'Ariane. Les deux longs tableaux de faits laissent la place à un tableau
-// unique, filtrable et paginé.
+// --- Marché : la lecture par marché dans le langage explorateur -------------------------------
+// Corpus mcEntries (faits, offres et documents techniques rattachés à un marché ou un produit),
+// lu comme Technologie laser et Offres & capacités. Les cartes « Lecture par marché » sont la
+// facette MARCHÉ affichée autrement -- comme la bande des opérations d'Offres & capacités --, et
+// un tableau unique, filtrable et paginé remplace les anciens tableaux faits/offres/documents.
 const MV_PAGE_SIZE = 20;
 const MV_NONE = "Non précisé";
 const MV_NO_MARKET = "Sans marché nommé";
@@ -697,7 +553,7 @@ function mvMarketCards(entries, marketOptions, selected) {
   }).join("")}</div>`;
 }
 
-function renderMarketV2() {
+function renderMarket() {
   const hadSearchFocus = document.activeElement && document.activeElement.id === "ex-search";
   const caret = hadSearchFocus ? document.activeElement.selectionStart : null;
 
@@ -722,7 +578,7 @@ function renderMarketV2() {
   content.innerHTML = `<div class="ex-page"><div class="ex-inner">
     <div class="ex-head">
       <div>
-        <p class="ex-eyebrow">LECTURE MARCHÉ &amp; PRODUIT · PAGE DE TRAVAIL</p>
+        <p class="ex-eyebrow">LECTURE MARCHÉ &amp; PRODUIT</p>
         <h1>Applications femtoseconde</h1>
         <p class="ex-lede">Les faits où marché, pièce et opération laser sont reliés, plus les offres et les travaux techniques dont une phrase de la source nomme un marché ou un produit. Rien n’est rattaché par déduction. Cliquer un marché, ou cocher des facettes, resserre le tableau.</p>
       </div>
@@ -774,10 +630,10 @@ function renderMarketV2() {
     input.addEventListener("input", debounce(event => {
       state.mvQuery = event.target.value;
       state.mvLimit = MV_PAGE_SIZE;
-      renderMarketV2();
+      renderMarket();
     }));
   }
-  const rerender = mutate => () => { mutate(); state.mvLimit = MV_PAGE_SIZE; renderMarketV2(); };
+  const rerender = mutate => () => { mutate(); state.mvLimit = MV_PAGE_SIZE; renderMarket(); };
   const emptyFacets = () => ({kind: [], market: [], product: [], operation: [], actor: []});
   document.querySelectorAll("[data-ex-facet]").forEach(el => el.addEventListener("click",
     rerender(() => { state.mvFacets = toggleFacet(state.mvFacets, el.dataset.exFacet, el.dataset.exValue); })));
@@ -790,9 +646,9 @@ function renderMarketV2() {
   document.querySelectorAll("[data-ex-expand]").forEach(el => el.addEventListener("click", () => {
     const key = el.dataset.exExpand;
     state.mvExpanded = state.mvExpanded.includes(key) ? state.mvExpanded.filter(k => k !== key) : [...state.mvExpanded, key];
-    renderMarketV2();
+    renderMarket();
   }));
-  document.querySelector("[data-mv-more]")?.addEventListener("click", () => { state.mvLimit += MV_PAGE_SIZE; renderMarketV2(); });
+  document.querySelector("[data-mv-more]")?.addEventListener("click", () => { state.mvLimit += MV_PAGE_SIZE; renderMarket(); });
   document.querySelectorAll("[data-mv-open]").forEach(el => el.addEventListener("click", () => {
     const entry = state.mvShown[Number(el.dataset.mvOpen)];
     if (!entry) return;
@@ -3721,7 +3577,7 @@ async function deleteGoldenFact(factId) {
 }
 
 // Les vues bâties sur explorer.js / explorer.css (voir le commentaire dans render()).
-const EXPLORER_VIEWS = new Set(["techcorpus", "offers", "market-v2"]);
+const EXPLORER_VIEWS = new Set(["techcorpus", "offers", "market"]);
 
 function render(){
   // Les pages "explorateur" apportent leur propre fond et leur propre gouttière (maquette :
@@ -3730,7 +3586,6 @@ function render(){
   content.classList.toggle("ex-host", EXPLORER_VIEWS.has(state.view));
   if(state.view==="monthly") renderMonthly();
   if(state.view==="market") renderMarket();
-  if(state.view==="market-v2") renderMarketV2();
   if(state.view==="offers") renderOffers();
   if(state.view==="techcorpus") renderTechCorpus();
   if(state.view==="actors") renderActors();
@@ -4004,7 +3859,6 @@ const LOADERS = {
 const VIEW_DEPS = {
   monthly:           ["overview", "monthly", "market", "actors", "technologySignals", "collectionHealth"],
   market:            ["overview", "market", "marketScores", "marketCompilation", "demandSignals"],
-  "market-v2":       ["overview", "market", "marketScores", "marketCompilation", "demandSignals"],
   // actors/market : la fiche offre reprend specs chiffrées, certifications et marchés servis.
   offers:            ["overview", "offers", "namedOffers", "offersCoverage", "actors", "market"],
   techcorpus:        ["overview", "techCorpus", "techSources"],
