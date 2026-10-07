@@ -64,7 +64,7 @@ class SentenceTagTests(unittest.TestCase):
     def test_the_quote_is_the_sentence_that_names_the_tag(self):
         with dbmod.connect(self.tech_db) as db:
             upsert_document_technology_signal(db, IMPLANT_TITLE, "Laser parameters were varied.", "https://doi.org/10.1/imp")
-        self.assertEqual({("component", "Implants"): [IMPLANT_TITLE]}, self._tags("https://doi.org/10.1/imp"))
+        self.assertEqual({("component", "Implants"): [IMPLANT_TITLE], ("market", "Médical"): [IMPLANT_TITLE]}, self._tags("https://doi.org/10.1/imp"))
 
     def _seed_old_tags(self):
         """Ce qu'écrivait l'ancienne lecture du texte entier : un faux Optique, un vrai
@@ -108,7 +108,7 @@ class SentenceTagTests(unittest.TestCase):
         lens_tags = self._tags("https://doi.org/10.1/lens")
         self.assertNotIn(("market", "Optique"), lens_tags)
         self.assertIn(("market", "Médical"), lens_tags, "une ligne relue par un humain ne bouge jamais")
-        self.assertEqual({("component", "Implants"): [IMPLANT_TITLE]}, self._tags("https://doi.org/10.1/imp"))
+        self.assertEqual({("component", "Implants"): [IMPLANT_TITLE], ("market", "Médical"): [IMPLANT_TITLE]}, self._tags("https://doi.org/10.1/imp"))
 
     def test_dry_run_writes_nothing(self):
         self._seed_old_tags()

@@ -155,7 +155,8 @@ class CompilationEndpointTests(unittest.TestCase):
     def test_only_documents_that_name_something_are_compiled(self):
         technology = self._call()["technology"]
         self.assertEqual(1, len(technology))
-        self.assertEqual([], technology[0]["markets"])
+        # « dental » nomme le marché Médical depuis l'élargissement du lexique (07/10/2026).
+        self.assertEqual(["Médical"], technology[0]["markets"])
         self.assertEqual(["Implants"], technology[0]["products"])
         self.assertEqual("openalex", technology[0]["source_id"])
 

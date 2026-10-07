@@ -420,6 +420,280 @@ CONTRAST_CUES = (
     "traditional", "traditionnel", "traditionnelle", "whereas", "herkömmlich", "herkommlich",
 )
 
+# === Élargissement du 07/10/2026 : marchés et produits ===========================================
+# Demandé par Lucas (« ajoute un maximum de mots : noms de produits, marchés »). Chaque terme a
+# été mesuré sur le corpus réel avant d'entrer -- 2 472 textes : blocs laser des 22 887 pages
+# d'acteurs crawlées, citations d'offres, titres et résumés des 413 documents -- et ses
+# occurrences relues. Écartés à la relecture, parce qu'ils mentaient dans NOS textes :
+# « diagnostics » seul (aussi le diagnostic de procédé), « traceability » (la traçabilité qualité,
+# pas l'anti-contrefaçon), « nuclear » seul (« nuclear transition in thorium »), « aiguilles »
+# (les aiguilles d'une montre, et il matche DANS « micro-aiguilles »), « dials » seul,
+# « outillage » seul (« sans outillage »), « antenna » seul (« photosynthetic antenna »),
+# « hologram » seul (un élément du montage optique d'un brevet), « scalpel » (« cleaned with a
+# scalpel »), « fan-out » (structures photoniques fan-in/fan-out), « düse » (la buse de la
+# machine), « chip manufacturing » et « wafer-level » (de la microfluidique verre),
+# « halbleiter » seul (un matériau dans une liste), « embossing » seul (un procédé
+# d'outillage), et les sigles courts FPC, MLA, GDL, ITER.
+#
+# Garder les deux nombres : _term_pattern pose une frontière de mot, « filter » ne matche pas
+# « filters » (piège déjà rencontré trois fois, voir LASER_AS_SOURCE_CUES).
+#
+# MARKETS et COMPONENTS servent à l'extraction de faits (qui exige marché + pièce + opération
+# dans une même phrase), aux tags de la page Technologie et à la compilation de la page Marché
+# -- jamais au portail d'entrée is_on_topic, qui ne lit que TECHNOLOGY_AXES. Ces ajouts
+# étiquettent mieux ce qui est déjà admis ; ils ne font rien entrer de nouveau dans le corpus.
+_MARKET_TERMS_ADDED: dict[str, tuple[str, ...]] = {
+    "Médical": (
+        "medical device", "medical devices", "dispositif médical", "dispositifs médicaux", "medizintechnik",
+        "medical technology", "medical engineering", "ophthalmic", "ophthalmology", "ophtalmologie", "ophtalmique",
+        "dental", "dentaire", "orthopedic", "orthopaedic", "orthopédique", "cardiovascular", "cardiovasculaire",
+        "implantable", "medical industry", "industrie médicale", "secteur médical", "médical", "médicale",
+    ),
+    "Batteries": (
+        "lithium-ion", "li-ion battery", "li-ion batteries", "solid-state battery", "solid-state batteries",
+        "batterie", "battery manufacturing", "battery production", "gigafactory", "gigafactories",
+    ),
+    "Semi-conducteurs": (
+        "semi-conducteurs", "semiconductor industry", "semiconductor manufacturing",
+        "halbleiterindustrie", "halbleitertechnik", "microelectronic", "micro-électronique", "mikroelektronik",
+    ),
+    "Aéronautique": (
+        "aéronautique", "aérospatial", "aérospatiale", "aerospace industry", "luftfahrt", "aircraft engine",
+        "aircraft engines", "aero-engine", "aero-engines", "jet engine", "jet engines", "avionics", "avionique",
+    ),
+    "Spatial": (
+        "space industry", "industrie spatiale", "space applications", "satellites", "raumfahrt", "launcher",
+        "launchers", "lanceur", "lanceurs", "space-qualified", "newspace",
+    ),
+    "Défense": ("defence industry", "defense industry", "armement", "militaire", "verteidigung", "wehrtechnik"),
+    "Automobile": (
+        "automotive industry", "industrie automobile", "automotive sector", "car manufacturer", "car manufacturers",
+        "automobilindustrie", "fahrzeugbau", "electric vehicles", "véhicule électrique", "véhicules électriques",
+        "powertrain", "powertrains",
+    ),
+    "Luxe": (
+        "luxury goods", "luxury industry", "joaillerie", "jewelry", "jewellery", "bijouterie", "schmuck",
+        "uhrenindustrie", "watch industry", "watchmakers", "watchmaker", "horloger", "horlogère", "horlogers",
+        "haute horlogerie", "maroquinerie",
+    ),
+    "Quantum": (
+        "quantum technology", "quantum technologies", "quantum computer", "quantum computers", "quantum sensor",
+        "quantum sensors", "quantum communication", "technologies quantiques", "quantentechnologie", "qubit", "qubits",
+    ),
+    "Photonique": ("photonics industry", "integrated photonic", "silicon photonics", "photonique intégrée", "photonik"),
+    "Sciences de la vie": (
+        "life science", "biotechnology", "biotech", "biotechnologie", "pharmaceutical", "pharmaceuticals",
+        "pharmaceutique", "pharma", "in vitro diagnostics", "in-vitro diagnostics", "medical diagnostics",
+        "point-of-care", "point of care", "genomics", "cell culture", "organ-on-chip", "organ on chip",
+        "sciences du vivant",
+    ),
+    "Photovoltaïque": (
+        "solar module", "solar modules", "solar panel", "solar panels", "panneau solaire", "panneaux solaires",
+        "module photovoltaïque", "modules photovoltaïques", "perovskite solar", "thin-film solar", "photovoltaik",
+        "solarzelle", "solarzellen",
+    ),
+    "Hydrogène": (
+        "hydrogen economy", "fuel cells", "piles à combustible", "electrolysis", "électrolyse", "wasserstoff",
+        "brennstoffzelle", "brennstoffzellen", "pem fuel cell", "electrolysers", "electrolyzers",
+    ),
+}
+
+# Cinq marchés nouveaux. Chacun a au moins une occurrence relue dans le corpus, sauf
+# « Sécurité & anti-contrefaçon » qui en a neuf (marquage anti-contrefaçon, lutte contre la
+# contrefaçon) et « Impression & emballage » (formes flexographiques, réservoirs d'encre).
+_MARKETS_ADDED: Lexicon = {
+    "Électronique": {"any_of": (
+        "consumer electronics", "électronique grand public", "electronics industry", "electronics manufacturing",
+        "industrie électronique", "printed electronics", "électronique imprimée", "flexible electronics",
+        "électronique flexible", "smartphone", "smartphones", "wearables", "elektronikindustrie",
+    )},
+    "Télécommunications": {
+        "any_of": (
+            "telecommunications", "telecommunication", "télécommunications", "telecom", "datacom",
+            "optical communication", "optical communications", "communications optiques", "5g", "data center",
+            "data centers", "datacenter", "datacenters",
+        ),
+        # « waveguides at the telecom wavelengths 1310 nm and 1550 nm » nomme une BANDE
+        # spectrale, pas le marché des télécoms (13 occurrences sur 13 dans le corpus).
+        "exclude": ("telecom wavelength", "telecom wavelengths", "telecommunications wavelength",
+                    "telecommunications wavelengths", "telecommunication wavelengths"),
+    },
+    "Impression & emballage": {"any_of": (
+        "printing industry", "industrie de l'impression", "imprimerie", "packaging industry",
+        "industrie de l'emballage", "flexographic", "flexographie", "druckindustrie", "verpackungsindustrie",
+    )},
+    "Sécurité & anti-contrefaçon": {"any_of": (
+        "anti-counterfeiting", "anti-counterfeit", "anticounterfeiting", "anti-contrefaçon", "counterfeiting",
+        "contrefaçon", "banknote", "banknotes", "billets de banque", "fälschungsschutz",
+    )},
+    "Outillage & coupe": {"any_of": (
+        "cutting tool industry", "tool industry", "tooling industry", "werkzeugbau", "werkzeugindustrie",
+        "industrie de l'outillage", "toolmaking", "tool making",
+    )},
+    "Énergie nucléaire & fusion": {"any_of": (
+        "nuclear industry", "nuclear power", "nuclear energy", "industrie nucléaire", "fusion energy",
+        "inertial confinement", "tokamak", "kernenergie",
+    )},
+}
+
+_COMPONENT_TERMS_ADDED: dict[str, tuple[str, ...]] = {
+    "Stents": ("stents", "stent struts", "bioresorbable scaffold", "bioresorbable scaffolds"),
+    "Cathéters": ("catheters", "catheter tip", "catheter tubing"),
+    "Aiguilles médicales": ("hypodermic needle", "hypodermic needles", "kanüle", "kanülen", "cannula", "cannulas",
+                            "cannulae", "cannule", "cannules"),
+    "Implants": ("implants", "dental implant", "dental implants", "implant dentaire", "implants dentaires",
+                 "bone implant", "bone implants", "orthopedic implant", "orthopaedic implant", "prosthesis", "prostheses",
+                 "prothèse", "prothèses", "implantat", "implantate"),
+    "Wafers": ("wafer dicing", "plaquette de silicium", "plaquettes de silicium", "sic wafer", "sic wafers",
+               "sapphire wafer", "sapphire wafers"),
+    "Substrats": ("substrats",),
+    "Packaging avancé": ("chip packaging", "wafer-level packaging", "fan-out packaging", "fan-out wafer",
+                         "3d packaging", "system in package", "packaging avancé"),
+    "MicroLED": ("micro-leds", "microleds", "micro led", "micro leds"),
+    "PCB": ("printed circuit boards", "circuit imprimé", "circuits imprimés", "leiterplatte", "leiterplatten",
+            "flexible printed circuit", "flexible printed circuits"),
+    "Microcanaux": ("microchannels", "micro-channels", "microcanaux", "micro-canaux", "mikrokanal", "mikrokanäle"),
+    "Dispositifs microfluidiques": ("microfluidic devices", "microfluidic chips", "lab-on-a-chip", "lab on a chip",
+                                    "puce microfluidique", "puces microfluidiques", "dispositif microfluidique",
+                                    "dispositifs microfluidiques", "microfluidic cartridge", "microfluidic cartridges",
+                                    "mikrofluidik-chip", "mikrofluidik-chips"),
+    "Fibres optiques": ("optical fibers", "optical fibres", "fibre optique", "fibres optiques", "fiber bragg grating",
+                        "fiber bragg gratings", "fbg", "fbgs", "glasfaser", "glasfasern"),
+    "Guides d'onde": ("waveguides", "guide d'onde", "guides d'onde", "wellenleiter"),
+    "Buses": ("nozzles", "buses", "spray nozzle", "spray nozzles"),
+    "Injecteurs": ("injectors", "fuel injector", "fuel injectors", "injection nozzle", "injection nozzles", "injecteurs",
+                   "einspritzdüse", "einspritzdüsen"),
+    "Aubes / composants turbine": ("turbine blades", "aube de turbine", "aubes de turbine", "turbinenschaufel",
+                                   "turbinenschaufeln", "cooling holes", "trous de refroidissement", "combustor",
+                                   "combustors", "combustion chamber", "combustion chambers"),
+    "Pièges à ions": ("ion-trap", "ion-traps"),
+    "Connectique": ("connectors", "connecteur", "connecteurs", "steckverbinder"),
+    "Optique intégrée": ("photonic integrated circuits", "photonic circuit", "photonic circuits", "integrated optical"),
+    "Composants d'affichage": ("display panels", "oled panel", "oled panels", "écran oled", "écrans oled", "écrans",
+                               "displays", "cover glass", "touch panel", "touch panels", "écran tactile", "écrans tactiles"),
+    "Moules et outillage de précision": ("mould", "moulds", "mold insert", "mold inserts", "mould insert", "mould inserts",
+                                         "injection molds", "injection moulds", "embossing tool", "embossing tools",
+                                         "stamper", "stampers", "tire mold", "tire molds", "tyre mould", "tyre moulds",
+                                         "spritzgießwerkzeug", "spritzgusswerkzeug", "formeinsatz", "formeinsätze"),
+    "Micro-aiguilles": ("micro-needle", "micro-needles", "microneedle array", "microneedle arrays"),
+    "Lentilles de contact": ("contact-lens", "contact-lenses"),
+    "Vias traversants (TSV)": ("through-silicon vias", "through silicon vias"),
+    "Cellules photovoltaïques": ("pv cells", "perc cell", "perc cells", "heterojunction cell", "heterojunction cells",
+                                 "topcon", "perovskite cell", "perovskite cells", "cellules photovoltaïques",
+                                 "solar wafer", "solar wafers"),
+    "Plaques bipolaires": ("bipolarplatte", "bipolarplatten", "plaques bipolaires"),
+    "Réseaux de diffraction": ("gratings", "volume bragg grating", "volume bragg gratings", "beugungsgitter"),
+    "Micro-lentilles": ("micro-lens", "micro-lenses", "micro lens array", "micro lens arrays"),
+    "Composants horlogers": ("watch parts", "watch components", "composants horlogers", "pièces horlogères",
+                             "uhrenteile", "balance spring", "balance springs", "hairspring", "hairsprings",
+                             "spiral horloger", "watch movements", "escapement", "escapements", "échappement"),
+    "Boîtiers de montres": ("watch cases", "boîtiers de montre", "uhrengehäuse"),
+    "Cadrans de montres": ("cadrans", "zifferblatt", "zifferblätter"),
+    "Puces photoniques": ("photonic integrated chip", "photonic integrated chips"),
+}
+
+# Seize familles de produits nouvelles, toutes des pièces que le micro-usinage ultra-rapide
+# fabrique ou traite couramment ; celles qui ont une occurrence dans le corpus l'ont relue.
+_COMPONENTS_ADDED: Lexicon = {
+    "Outils coupants": {"any_of": (
+        "cutting tool", "cutting tools", "cutting insert", "cutting inserts", "indexable insert", "indexable inserts",
+        "pcd tool", "pcd tools", "pcd insert", "pcd inserts", "cbn tool", "cbn tools", "carbide tool", "carbide tools",
+        "outil coupant", "outils coupants", "plaquette de coupe", "plaquettes de coupe", "zerspanungswerkzeug",
+        "zerspanungswerkzeuge", "schneidwerkzeug", "schneidwerkzeuge", "drill bit", "drill bits", "end mill", "end mills",
+    ),
+        # L'outil MÉCANIQUE que le laser remplace n'est pas le produit fabriqué : « mostly used
+        # are mechanical saws or conventional cutting tools » (cas Pulsar, test_v3_4_market_engine).
+        "exclude": (
+            "conventional cutting tool", "conventional cutting tools", "mechanical cutting tool",
+            "mechanical cutting tools", "traditional cutting tool", "traditional cutting tools",
+        ),
+    },
+    "Filtres et membranes": {"any_of": (
+        "filtration membrane", "filtration membranes", "microfilter", "microfilters", "micro-filter", "micro-filters",
+        "micro filter", "micro filters", "membrane filter", "membrane filters", "sieve", "sieves", "micro sieve",
+        "micro sieves", "tamis", "membrane de filtration", "membranes de filtration", "microfiltre", "microfiltres",
+        "perforated foil", "perforated foils",
+    )},
+    "Filières": {"any_of": (
+        # « filière » seul est exclu : en français il désigne aussi un secteur (« la filière
+        # hydrogène »). Ne restent que les formes qui nomment la pièce.
+        "spinneret", "spinnerets", "filière d'extrusion", "filières d'extrusion", "filière de filage", "extrusion die", "extrusion dies", "drawing die",
+        "drawing dies", "wire drawing die", "wire drawing dies", "spinndüse", "spinndüsen",
+    )},
+    "Cylindres d'impression et d'embossage": {"any_of": (
+        "anilox", "anilox roll", "anilox rolls", "embossing roll", "embossing rolls", "embossing cylinder",
+        "embossing cylinders", "printing roll", "printing rolls", "printing cylinder", "printing cylinders",
+        "gravure cylinder", "gravure cylinders", "rotary die", "rotary dies", "prägewalze", "prägewalzen",
+        "cylindre d'impression", "cylindres d'impression", "printing form", "printing forms",
+    )},
+    "Pierres précieuses et diamants": {"any_of": (
+        "gemstone", "gemstones", "lab-grown diamond", "lab-grown diamonds", "diamant de synthèse", "diamants de synthèse",
+        "pierre précieuse", "pierres précieuses", "edelstein", "edelsteine", "diamond jewelry",
+    )},
+    "Verres de montre et vitres saphir": {"any_of": (
+        "watch crystal", "watch crystals", "glace de montre", "glaces de montre", "sapphire window", "sapphire windows",
+        "sapphire crystal", "uhrglas",
+    )},
+    "Valves cardiaques": {"any_of": (
+        "heart valve", "heart valves", "valve cardiaque", "valves cardiaques", "herzklappe", "herzklappen",
+    )},
+    "Hypotubes et tubes médicaux": {"any_of": (
+        "hypotube", "hypotubes", "medical tubing", "medical tube", "medical tubes", "tube médical", "tubes médicaux",
+    )},
+    "Lames et instruments chirurgicaux": {"any_of": (
+        "surgical blade", "surgical blades", "scalpel blade", "scalpel blades", "surgical instrument",
+        "surgical instruments", "instrument chirurgical", "instruments chirurgicaux", "skalpelle", "razor blade",
+        "razor blades",
+    )},
+    "Endoscopes": {"any_of": ("endoscope", "endoscopes", "endoskop", "endoskope")},
+    "Antennes RFID et radiofréquence": {"any_of": (
+        "rfid antenna", "rfid antennas", "antenne rfid", "antennes rfid", "5g antenna", "5g antennas",
+        "antenna array", "antenna arrays",
+    )},
+    "Cartes à puce et documents d'identité": {"any_of": (
+        "smart card", "smart cards", "carte à puce", "cartes à puce", "id card", "id cards", "chipkarte",
+        "chipkarten", "contactless payment card", "contactless payment cards",
+    )},
+    "Hologrammes et marquages de sécurité": {"any_of": (
+        "holograms", "hologrammes", "security marking", "security markings", "anti-counterfeiting marking",
+        "marquage de sécurité", "marquages de sécurité",
+    )},
+    "Boîtiers hermétiques": {"any_of": (
+        "hermetic package", "hermetic packages", "hermetic packaging", "hermetic sealing", "hermetic seal",
+        "hermetic seals", "boîtier hermétique", "boîtiers hermétiques", "encapsulation hermétique",
+        "glass-to-metal seal", "glass-to-metal seals",
+    )},
+    "Modules et cellules de batteries": {"any_of": (
+        "battery cell", "battery cells", "battery module", "battery modules", "battery pack", "battery packs",
+        "pouch cell", "pouch cells", "cylindrical cell", "cylindrical cells", "module de batterie",
+        "modules de batterie", "pack batterie",
+    )},
+    "Panneaux acoustiques et surfaces micro-perforées": {"any_of": (
+        "acoustic panel", "acoustic panels", "acoustic liner", "acoustic liners", "micro-perforated",
+        "microperforated", "panneau acoustique", "panneaux acoustiques",
+    )},
+    "Ressorts et pièces de micromécanique": {"any_of": (
+        "micro spring", "micro springs", "microspring", "microsprings", "flexure", "flexures", "compliant mechanism",
+        "compliant mechanisms", "micro gear", "micro gears", "microgear", "microgears", "micro-engrenage",
+        "micro-engrenages",
+    )},
+}
+
+
+def _extend(lexicon: Lexicon, terms: dict[str, tuple[str, ...]], added: Lexicon) -> None:
+    for label, extra in terms.items():
+        rule = lexicon[label]
+        rule["any_of"] = tuple(dict.fromkeys((*rule.get("any_of", ()), *extra)))
+    for label, rule in added.items():
+        if label in lexicon:
+            raise ValueError(f"{label!r} existe déjà dans le lexique")
+        lexicon[label] = rule
+
+
+_extend(MARKETS, _MARKET_TERMS_ADDED, _MARKETS_ADDED)
+_extend(COMPONENTS, _COMPONENT_TERMS_ADDED, _COMPONENTS_ADDED)
+
+
 # Conservative market inference used only for display when the market is not explicit.
 # Inferred values never count as an independent acceptance signal.
 MARKET_INFERENCE = {
