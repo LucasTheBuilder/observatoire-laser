@@ -1258,6 +1258,32 @@ def _is_real_proposal(value: str) -> bool:
     return bool(value) and _normalize_text(value) not in _NON_PROPOSAL_SENTINELS
 
 
+_CORE_LABELS: dict[str, frozenset[str]] = {
+    "market": frozenset(MARKETS), "component": frozenset(COMPONENTS), "operation": frozenset(OPERATIONS),
+}
+
+
+def proposal_parts(value: str) -> list[str]:
+    """Les libellés que contient une réponse du modèle. Il répond parfois par une liste Python
+    (« ['Gravure', 'Microdécoupe'] ») ou une énumération (« Médical, Optique ») quand la page
+    cite plusieurs marchés : la chaîne entière n'est alors aucun libellé, chacun de ses
+    morceaux peut l'être."""
+    text = value.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    parts = (part.strip().strip("'\"").strip() for part in text.split(","))
+    return [part for part in parts if part]
+
+
+def is_known_label_list(dimension: str, value: str) -> bool:
+    """Vrai quand chaque morceau de la réponse est déjà un libellé du lexique : c'est un fait à
+    plusieurs marchés (ou opérations), pas un trou de vocabulaire. Audit du 07/10/2026 : 15 des
+    28 candidats vocabulaire en attente étaient de cette forme -- rien à apprendre au lexique,
+    seulement une file qui grossit."""
+    parts = proposal_parts(value)
+    return bool(parts) and all(part in _CORE_LABELS.get(dimension, frozenset()) for part in parts)
+
+
 def _vocabulary_candidate(
     actor_name: str,
     url: str,
@@ -1274,7 +1300,10 @@ def _vocabulary_candidate(
     vocabulary gap worth a human's time. Resolved dimensions are kept alongside for context
     (e.g. "component already resolved to Stents, but market has no match").
     """
-    missing = {key: value for key, value in proposed.items() if _is_real_proposal(value) and not resolved.get(key)}
+    missing = {
+        key: value for key, value in proposed.items()
+        if _is_real_proposal(value) and not resolved.get(key) and not is_known_label_list(key, value)
+    }
     if not missing:
         return None
     known = {key: value for key, value in resolved.items() if value}
