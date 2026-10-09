@@ -46,6 +46,12 @@ FRENCH_REGISTRY_ALIASES: dict[str, str] = {
     "IREIS": "395294796",          # sigle="IREIS" exact, raison sociale "INSTITUT DE RECHERCHES EN
                                    # INGENIERIE DES SURFACES" (la graphie que l'ANR emploie aussi
                                    # pour ce partenaire) ; siège Andrézieux-Bouthéon, APE 72.19Z
+    "Amplitude": "434637005",      # AMPLITUDE LASER GROUP, siège Cité de la Photonique, 11 avenue de
+                                   # Canteranne, 33600 Pessac (APE 64.20Z, holding) ; la page d'accueil
+                                   # de amplitude-laser.com se présente comme "Amplitude Laser Group".
+                                   # NB : date_creation (2001) est celle de la holding, pas celle des
+                                   # filiales opérationnelles (Amplitude Systèmes, Amplitude
+                                   # Technologies, cette dernière radiée -- SIREN 435314935).
 }
 
 # HEF n'a volontairement PAS d'alias ici (vérifié le 01/10/2026). Le registre renvoie cinq
