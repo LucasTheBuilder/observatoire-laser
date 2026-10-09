@@ -352,12 +352,22 @@ def _jobs_snapshot() -> dict[str, dict]:
         return {kind: dict(job) for kind, job in jobs.items()}
 
 
+def _warm_market_compilation() -> None:
+    try:
+        compile_market_page(MARKET_DB, TECH_DB)
+    except Exception:  # noqa: BLE001 -- un échec ici retombe sur le calcul à la demande
+        pass
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # S'exécute une fois au démarrage de l'appli (avant le premier appel API) : crée/met à
     # jour le schéma des 3 bases. `yield` cède la main pendant toute la durée de vie du
     # serveur ; le code après `finally` s'exécute à l'arrêt (Ctrl+C, redéploiement...).
     init_databases()
+    # La compilation de la page Marché lit tout le corpus : la préparer en arrière-plan évite
+    # que le premier visiteur après un redéploiement attende à sa place.
+    threading.Thread(target=_warm_market_compilation, name="warm-market-compilation", daemon=True).start()
     if SCHEDULER_ENABLED:
         scheduler.add_job(
             _scheduled_monthly_run, CronTrigger.from_crontab(SCHEDULER_CRON),

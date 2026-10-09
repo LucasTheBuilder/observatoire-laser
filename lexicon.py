@@ -854,11 +854,68 @@ def _specificity_score(rule: LexiconRule, hits: list[str]) -> tuple[int, int, in
     lexical_weight = sum(len(_normalize_text(hit)) for hit in hits)
     return (all_bonus + regex_bonus + len(hits), lexical_weight, len(rule.get("all_of", ())))
 
+# Index de déclenchement par lexique (09/10/2026). Un libellé ne peut matcher que si l'un de ses
+# termes any_of/all_of (ou l'une de ses regex) est présent : _rule_match_terms exige au moins un
+# « hit ». Mesuré : 2,7 millions de recherches regex et 11 s pour classer les 413 documents de la
+# page Marché (près d'une minute dans le conteneur), alors que la plupart des phrases ne nomment
+# aucun marché ni aucune pièce.
+#
+# Le filtre est un index de MOTS, pas une regex : une alternance de 2 000 termes gardés par
+# (?<!\w) ne s'optimise pas et ne gagnait qu'un facteur 1,7. Un terme ne peut matcher que si son
+# premier mot apparaît tel quel parmi les mots du texte normalisé (_term_pattern pose une
+# frontière de mot avant et après chaque morceau) : c'est une condition NÉCESSAIRE, donc le
+# résultat est strictement identique -- seuls les libellés qui ne pouvaient pas matcher sont
+# sautés. Un libellé à `regex`, ou dont un terme ne commence pas par une lettre ou un chiffre,
+# est toujours évalué.
+_WORD = re.compile(r"\w+")
+_ALWAYS: frozenset[str] = frozenset()
+_INDEXES: dict[int, tuple[int, dict[str, frozenset[str]]]] = {}
+
+
+def _first_word(term: str) -> str | None:
+    norm = _normalize_text(term)
+    match = _WORD.match(norm)
+    return match.group(0) if match else None
+
+
+def _label_keys(rule: LexiconRule) -> frozenset[str]:
+    if rule.get("regex"):
+        return _ALWAYS
+    keys = set()
+    for term in (*rule.get("any_of", ()), *rule.get("all_of", ())):
+        for variant in _term_variants(term):
+            word = _first_word(variant)
+            if word is None:
+                return _ALWAYS
+            keys.add(word)
+    return frozenset(keys)
+
+
+def _lexicon_index(lexicon: Lexicon) -> dict[str, frozenset[str]]:
+    # Clé = identité du dictionnaire + taille : les lexiques sont des constantes de module,
+    # complétés une seule fois à l'import (voir _extend) avant tout appel.
+    cached = _INDEXES.get(id(lexicon))
+    if cached and cached[0] == len(lexicon):
+        return cached[1]
+    index = {label: _label_keys(rule) for label, rule in lexicon.items()}
+    _INDEXES[id(lexicon)] = (len(lexicon), index)
+    return index
+
+
+def _candidate_rules(text: str, lexicon: Lexicon) -> list[tuple[str, LexiconRule]]:
+    """Les seuls libellés dont un terme peut apparaître dans `text` -- les autres ne matchent pas."""
+    words = set(_WORD.findall(_normalize_text(text)))
+    return [
+        (label, lexicon[label]) for label, keys in _lexicon_index(lexicon).items()
+        if keys is _ALWAYS or not keys.isdisjoint(words)
+    ]
+
+
 def _match_label_details(text: str, lexicon: Lexicon) -> tuple[str | None, list[str]]:
     """Cherche le MEILLEUR libellé (le plus spécifique, voir _specificity_score) qui matche
     dans `text` pour un lexique donné, et renvoie (libellé, termes trouvés) ou (None, [])."""
     matches: list[tuple[tuple[int, int, int], str, list[str]]] = []
-    for label, rule in lexicon.items():
+    for label, rule in _candidate_rules(text, lexicon):
         hits = _rule_match_terms(text, rule)
         if hits:
             matches.append((_specificity_score(rule, hits), label, hits))
@@ -871,7 +928,7 @@ def _match_label_details(text: str, lexicon: Lexicon) -> tuple[str | None, list[
 def _match_all_labels(text: str, lexicon: Lexicon) -> list[tuple[str, list[str]]]:
     """Return all matching canonical labels, ordered by specificity, not just the first one."""
     matches: list[tuple[tuple[int, int, int], str, list[str]]] = []
-    for label, rule in lexicon.items():
+    for label, rule in _candidate_rules(text, lexicon):
         hits = _rule_match_terms(text, rule)
         if hits:
             matches.append((_specificity_score(rule, hits), label, hits))
@@ -1420,12 +1477,18 @@ def labels_named_in_sentences(
             for name in names or []:
                 if name:
                     readable = re.sub(re.escape(name), " ", readable, flags=re.IGNORECASE)
+            # Les libellés d'abord, les gardes ensuite : la plupart des phrases ne nomment rien,
+            # et les gardes (200 indices de source laser, négation...) coûtaient plus que le
+            # classement lui-même. Même résultat -- une phrase sans libellé n'apporte rien.
+            labels = [label for label, _hits in _match_all_labels(readable, lexicon) if label not in found]
+            if not labels:
+                continue
             if operation_rule and not _rule_matches(readable, operation_rule):
                 continue
             if not _sentence_is_usable(
                 sentence, readable, max_len=max_len, reject_bibliography=reject_bibliography, reject_negation=reject_negation,
             ):
                 continue
-            for label, _hits in _match_all_labels(readable, lexicon):
+            for label in labels:
                 found.setdefault(label, sentence)
     return found
